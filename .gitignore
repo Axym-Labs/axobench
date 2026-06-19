@@ -1,0 +1,21 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# Local data, generated runs, and heavyweight artifacts.
+data/
+runs/
+artifacts/
+build/
+.external/
+*.log
+*.pid
+*.nohup.log
+
+# Exploration arc is intentionally local/untracked while the benchmark is in flux.
+docs/benchmark/
+.codex-autoresearch.md

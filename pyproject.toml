@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dendrobench"
+version = "0.1.0"
+description = "Single-neuron surrogate benchmark and dataset generation workbench."
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.24",
+  "requests>=2.32",
+  "torch>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8",
+]
+sim = [
+  "arbor==0.11.0",
+]
+pretrained = [
+  "tensorflow>=2",
+]
+
+[project.scripts]
+dendrobench = "dendrobench.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+dendrobench = ["assets/*.swc", "assets/*.json", "mechanisms/*.mod"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
