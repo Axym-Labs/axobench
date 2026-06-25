@@ -13,6 +13,7 @@ os.environ.setdefault("SOURCE_DATE_EPOCH", "1782252000")
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.lines import Line2D
 from matplotlib.patches import FancyArrowPatch, Rectangle
 
 
@@ -658,6 +659,12 @@ def _plot_neuronio_intervention_trace_examples(
 
     fig, axes = plt.subplots(2, 2, figsize=(7.4, 4.65), sharex=False, sharey=False)
     axes = axes.ravel()
+    handles = [
+        Line2D([0], [0], color=OKABE_ITO["gray"], linewidth=0.85, label="baseline V"),
+        Line2D([0], [0], color=OKABE_ITO["blue"], linewidth=0.95, label="intervention V"),
+        Line2D([0], [0], color="#555555", marker="|", linestyle="None", markersize=6, label="baseline spike"),
+        Line2D([0], [0], color=OKABE_ITO["red"], marker="|", linestyle="None", markersize=6, label="intervention spike"),
+    ]
     for index, (ax, record) in enumerate(zip(axes, records)):
         time = np.arange(record["start"], record["stop"], dtype=float)
         baseline = record["baseline"][record["start"]:record["stop"]]
@@ -680,9 +687,8 @@ def _plot_neuronio_intervention_trace_examples(
         ax.set_xlabel("time (ms)")
         ax.set_ylabel("soma voltage (mV)")
         ax.set_xlim(record["start"], record["stop"] - 1)
-        if index == 0:
-            ax.legend(loc="lower right")
-    fig.subplots_adjust(left=0.08, right=0.98, bottom=0.12, top=0.96, wspace=0.24, hspace=0.36)
+    fig.legend(handles=handles, loc="lower center", ncol=4, frameon=False, handlelength=1.4, columnspacing=1.0)
+    fig.subplots_adjust(left=0.08, right=0.98, bottom=0.18, top=0.96, wspace=0.24, hspace=0.44)
     _save_figure(fig, output, formats)
     return output.name
 
@@ -886,7 +892,11 @@ def _write_morphology_intervention_table(rows: list[dict[str, Any]], output: Pat
         )
     if not table_rows:
         table_rows = [("not available", "", "", "", "")]
-    _write_markdown_table(output, ("intervention", "mean spike-count delta", "min", "max", "range"), table_rows)
+    _write_markdown_table(
+        output,
+        ("intervention", "mean delta (spikes/trace)", "min delta", "max delta", "range"),
+        table_rows,
+    )
     return output.name
 
 
