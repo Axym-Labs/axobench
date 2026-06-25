@@ -2,56 +2,16 @@ from pathlib import Path
 import json
 
 import numpy as np
-import torch
 
 from dendrobench.cli import main
-from dendrobench.checkpoint import load_checkpoint
-from dendrobench.experiments import apply_preset
-from dendrobench.official import create_official_elm, load_official_elm_config
 
 
-def _write_small_official_config(path: Path) -> None:
-    path.write_text(
-        """{
-  "input_to_synapse_routing": "neuronio_routing",
-  "learn_memory_tau": false,
-  "memory_tau_max": 150.0,
-  "memory_tau_min": 1.0,
-  "num_branch": 3,
-  "num_input": 6,
-  "num_memory": 4,
-  "num_output": 2,
-  "num_synapse_per_branch": 2
-}
-""",
-        encoding="utf-8",
-    )
-
-
-def test_cli_smoke_data_and_evaluate(tmp_path):
+def test_cli_smoke_writes_demo_data(tmp_path):
     data_dir = tmp_path / "data"
-    metrics_path = tmp_path / "metrics.json"
 
     assert main(["make-demo-data", "--output", str(data_dir), "--samples", "2", "--time-steps", "4", "--input-dim", "6"]) == 0
-    assert main(
-        [
-            "evaluate",
-            "--preset",
-            "legacy-baseline-smoke",
-            "--data",
-            str(data_dir),
-            "--input-dim",
-            "6",
-            "--memory-units",
-            "4",
-            "--branches",
-            "2",
-            "--output",
-            str(metrics_path),
-        ]
-    ) == 0
 
-    assert Path(metrics_path).exists()
+    assert len(list(data_dir.glob("*.npz"))) == 1
 
 
 def test_cli_prints_benchmark_axis_profile(capsys):
@@ -90,6 +50,111 @@ def test_cli_prints_diagnostic_catalog(capsys):
 
     assert catalog["plotter_policy"]["shape"] == "variable_length_list"
     assert "clipping_distortion" in catalog["suites"]["paper-summary"]
+    assert "metric_decoupling" in catalog["suites"]["metric-decoupling"]
+
+
+def test_cli_writes_artifact_derived_diagnostic_rows(tmp_path, capsys):
+    teacher_rows = tmp_path / "teacher.jsonl"
+    output = tmp_path / "audit_rows.jsonl"
+    summary = tmp_path / "audit_summary.json"
+    teacher_rows.write_text(
+        json.dumps(
+            {
+                "model_id": "branch_elm_best",
+                "regime": "canonical_test",
+                "spike_auc": 0.995,
+                "event_f1_2ms": 0.34,
+                "clipped_rmse_mv": 0.55,
+                "raw_soma_rmse_mv": 1.9,
+                "near_spike_clipped_fraction": 0.52,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = main(
+        [
+            "diagnostic-audits",
+            "--teacher-grounded-rows",
+            str(teacher_rows),
+            "--output",
+            str(output),
+            "--summary-output",
+            str(summary),
+            "--suites",
+            "metric-decoupling,target-view-audit,paper-summary",
+            "--teacher-id",
+            "neuronio",
+        ]
+    )
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["rows"] > 0
+    rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+    assert {row["diagnostic"] for row in rows} >= {"metric_decoupling", "target_view_audit"}
+    assert any(row["metric"] == "spike_auc_mean" for row in rows)
+    assert summary.exists()
+
+
+def test_cli_writes_diagnostic_plot_and_table_artifacts(tmp_path, capsys):
+    canonical = tmp_path / "canonical.json"
+    mechanistic = tmp_path / "mechanistic.json"
+    sparse = tmp_path / "sparse.json"
+    points = tmp_path / "points.jsonl"
+    tcn = tmp_path / "tcn.json"
+    morphology = tmp_path / "morphology.jsonl"
+    neuronio = tmp_path / "neuronio_interventions.jsonl"
+    trace_root = tmp_path / "neuronio_trace_root"
+    output = tmp_path / "plots"
+
+    canonical.write_text(json.dumps(_canonical_plot_fixture()), encoding="utf-8")
+    mechanistic.write_text(json.dumps(_mechanistic_plot_fixture()), encoding="utf-8")
+    sparse.write_text(json.dumps(_sparse_plot_fixture()), encoding="utf-8")
+    points.write_text("\n".join(json.dumps(row) for row in _point_plot_fixture()) + "\n", encoding="utf-8")
+    tcn.write_text(json.dumps(_tcn_plot_fixture("tcn_dwt7_128_153", raw=226.0)), encoding="utf-8")
+    morphology.write_text("\n".join(json.dumps(row) for row in _morphology_plot_fixture()) + "\n", encoding="utf-8")
+    neuronio.write_text("\n".join(json.dumps(row) for row in _neuronio_intervention_plot_fixture()) + "\n", encoding="utf-8")
+    _write_neuronio_trace_root_fixture(trace_root)
+
+    result = main(
+        [
+            "diagnostic-plots",
+            "--canonical-summary",
+            str(canonical),
+            "--mechanistic-summary",
+            str(mechanistic),
+            "--sparse-event-summary",
+            str(sparse),
+            "--point-rows",
+            str(points),
+            "--tcn-summary",
+            str(tcn),
+            "--morphology-contrast-rows",
+            str(morphology),
+            "--neuronio-intervention-rows",
+            str(neuronio),
+            "--neuronio-intervention-root",
+            str(trace_root),
+            "--output-dir",
+            str(output),
+            "--formats",
+            "svg,png",
+        ]
+    )
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload["figures"]) == 8
+    assert len(payload["tables"]) == 6
+    assert (output / "fig01_spike_metric_identification.svg").exists()
+    assert (output / "fig05_morphology_intervention_heatmap.png").exists()
+    assert (output / "fig07_neuronio_matched_intervention_response.svg").exists()
+    assert (output / "fig08_neuronio_matched_trace_examples.svg").exists()
+    assert "AUC Versus Event Timing" in (output / "table02_metric_decoupling.md").read_text(encoding="utf-8")
+    assert "TCN Voltage RMSE" in (output / "table03_target_and_adapter_protocol.md").read_text(encoding="utf-8")
+    assert "event_dropout" in (output / "table06_neuronio_matched_interventions.md").read_text(encoding="utf-8")
 
 
 def test_cli_writes_teacher_qc_benchmark_rows(tmp_path, capsys):
@@ -119,57 +184,9 @@ def test_cli_writes_teacher_qc_benchmark_rows(tmp_path, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["rows"] > 0
     assert payload["output"] == str(output)
-    assert output.exists()
     rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
     assert any(row["diagnostic"] == "teacher_distribution_qc" for row in rows)
     assert all(row["morphology_id"] == "unit-morph" for row in rows)
-
-
-def test_cli_writes_model_benchmark_rows(tmp_path, capsys):
-    data_dir = tmp_path / "v1"
-    output = tmp_path / "model_rows.json"
-    summary = tmp_path / "model_summary.md"
-    assert main(["make-demo-data", "--output", str(data_dir / "val"), "--samples", "2", "--time-steps", "8", "--input-dim", "4"]) == 0
-
-    result = main(
-        [
-            "benchmark-rows",
-            "--mode",
-            "model",
-            "--dataset-root",
-            str(data_dir),
-            "--selector",
-            "val",
-            "--output",
-            str(output),
-            "--summary-output",
-            str(summary),
-            "--ignore-start",
-            "0",
-            "--suites",
-            "trace-core,paper-summary",
-            "--model-kind",
-            "baseline",
-            "--input-dim",
-            "4",
-            "--memory-units",
-            "4",
-            "--branches",
-            "2",
-            "--batch-size",
-            "1",
-            "--model-id",
-            "unit-baseline",
-        ]
-    )
-
-    assert result == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["rows"] > 0
-    rows = json.loads(output.read_text(encoding="utf-8"))
-    assert any(row["diagnostic"] == "trace_core" for row in rows)
-    assert all(row["model_id"] == "unit-baseline" for row in rows)
-    assert "Benchmark Diagnostic Summary" in summary.read_text(encoding="utf-8")
 
 
 def test_cli_writes_intervention_benchmark_rows_from_pair_path(tmp_path, capsys):
@@ -226,7 +243,7 @@ def test_cli_writes_intervention_benchmark_rows_from_pair_path(tmp_path, capsys)
     assert all(row["intervention"] == "event_dropout" for row in rows)
 
 
-def test_cli_runs_v1_benchmark_bundle(tmp_path, capsys):
+def test_cli_runs_teacher_only_v1_benchmark_bundle(tmp_path, capsys):
     data_dir = tmp_path / "v1"
     output_dir = tmp_path / "bundle"
     pair_dir = tmp_path / "pilot" / "specimen_488683425_event_dropout_simbase8"
@@ -257,10 +274,6 @@ def test_cli_runs_v1_benchmark_bundle(tmp_path, capsys):
             str(output_dir),
             "--suite",
             "teacher-qc",
-            "--model-kind",
-            "baseline",
-            "--model-config",
-            "configs/branch_elm_30_official.json",
             "--intervention-pair-glob",
             str(tmp_path / "pilot" / "*" / "intervention_pair.npz"),
             "--max-val-samples",
@@ -279,378 +292,6 @@ def test_cli_runs_v1_benchmark_bundle(tmp_path, capsys):
     assert (output_dir / "teacher_qc_val.md").exists()
     assert (output_dir / "morphology_routing_qc.md").exists()
     assert (output_dir / "intervention_specimen_488683425_event_dropout.md").exists()
-
-
-def test_cli_make_arbor_hetero_data_writes_shards_and_report(tmp_path):
-    data_dir = tmp_path / "arbor-hetero"
-    report_path = tmp_path / "report.json"
-
-    result = main(
-        [
-            "make-arbor-hetero-data",
-            "--output",
-            str(data_dir),
-            "--samples",
-            "1",
-            "--shards",
-            "1",
-            "--time-steps",
-            "16",
-            "--input-dim",
-            "8",
-            "--branches",
-            "2",
-            "--integration-dt-ms",
-            "0.1",
-            "--report",
-            str(report_path),
-        ]
-    )
-
-    assert result == 0
-    report = json.loads(report_path.read_text(encoding="utf-8"))
-    assert report["samples"] == 1
-    assert report["backend"] == "arbor"
-    assert report["simulator"]["name"] == "arbor"
-    assert "bnn::NMDA_CA1_pyr_SC" in report["simulator"]["custom_catalogues"]["mechanisms"]
-    assert report["simulator"]["custom_catalogues"]["nmda_source"]["modeldb_model"] == "2019343"
-    assert "nmda_weight_scale" in report["simulator"]["heterogeneity_names"]
-    assert (data_dir / "manifest.json").exists()
-    assert (data_dir / "generation_report.json").exists()
-
-
-def test_cli_make_arbor_hetero_splits(tmp_path):
-    data_dir = tmp_path / "arbor-hetero-splits"
-
-    result = main(
-        [
-            "make-arbor-hetero-data",
-            "--output",
-            str(data_dir),
-            "--splits",
-            "train:2,val:1",
-            "--shards-per-split",
-            "1",
-            "--time-steps",
-            "8",
-            "--input-dim",
-            "6",
-            "--branches",
-            "2",
-            "--integration-dt-ms",
-            "0.1",
-        ]
-    )
-
-    assert result == 0
-    summary = json.loads((data_dir / "generation_summary.json").read_text(encoding="utf-8"))
-    assert set(summary["splits"]) == {"train", "val"}
-    assert summary["backend"] == "arbor"
-    assert (data_dir / "train" / "manifest.json").exists()
-
-
-def test_cli_make_arbor_hetero_data_accepts_config_file(tmp_path):
-    data_dir = tmp_path / "configured-arbor-hetero"
-    report_path = tmp_path / "configured-report.json"
-    config_path = tmp_path / "sim-config.json"
-    config_path.write_text(
-        json.dumps(
-            {
-                "output": str(data_dir),
-                "samples": 1,
-                "shards": 1,
-                "time_steps": 8,
-                "input_dim": 6,
-                "branches": 2,
-                "integration_dt_ms": 0.1,
-                "report": str(report_path),
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    result = main(["make-arbor-hetero-data", "--config", str(config_path)])
-
-    assert result == 0
-    report = json.loads(report_path.read_text(encoding="utf-8"))
-    assert report["samples"] == 1
-    assert report["input_dim"] == 6
-    assert (data_dir / "manifest.json").exists()
-
-
-def test_cli_make_arbor_hetero_data_accepts_param_overrides_config(tmp_path):
-    data_dir = tmp_path / "fixed-arbor-hetero"
-    config_path = tmp_path / "sim-config.json"
-    config_path.write_text(
-        json.dumps(
-            {
-                "output": str(data_dir),
-                "samples": 1,
-                "shards": 1,
-                "time_steps": 8,
-                "input_dim": 6,
-                "branches": 2,
-                "integration_dt_ms": 0.1,
-                "param_overrides": {
-                    "v_init_mv": -72.0,
-                    "input_rate_scale": 1.0,
-                    "spike_threshold_mv": -38.0,
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    result = main(["make-arbor-hetero-data", "--config", str(config_path)])
-
-    assert result == 0
-    report = json.loads((data_dir / "generation_report.json").read_text(encoding="utf-8"))
-    assert report["param_overrides"]["v_init_mv"] == -72.0
-    assert report["param_overrides"]["input_rate_scale"] == 1.0
-    assert report["param_overrides"]["spike_threshold_mv"] == -38.0
-
-
-def test_cli_evaluate_accepts_window_options(tmp_path):
-    data_dir = tmp_path / "data"
-    metrics_path = tmp_path / "metrics.json"
-
-    main(["make-demo-data", "--output", str(data_dir), "--samples", "2", "--time-steps", "10", "--input-dim", "6"])
-
-    result = main(
-        [
-            "evaluate",
-            "--preset",
-            "legacy-baseline-smoke",
-            "--data",
-            str(data_dir),
-            "--input-dim",
-            "6",
-            "--memory-units",
-            "4",
-            "--branches",
-            "2",
-            "--window-size",
-            "4",
-            "--window-stride",
-            "4",
-            "--blocking-transfer",
-            "--output",
-            str(metrics_path),
-        ]
-    )
-
-    assert result == 0
-    assert Path(metrics_path).exists()
-
-
-def test_cli_benchmark_writes_json_report(tmp_path):
-    report_path = tmp_path / "benchmark.json"
-
-    assert main(
-        [
-            "benchmark",
-            "--model-kind",
-            "baseline",
-            "--input-dim",
-            "6",
-            "--memory-units",
-            "4",
-            "--branches",
-            "2",
-            "--batch-size",
-            "1",
-            "--time-steps",
-            "3",
-            "--runs",
-            "1",
-            "--output",
-            str(report_path),
-        ]
-    ) == 0
-    assert Path(report_path).exists()
-
-
-def test_cli_inference_benchmark_writes_deployment_report(tmp_path):
-    report_path = tmp_path / "inference-benchmark.json"
-
-    assert main(
-        [
-            "inference-benchmark",
-            "--model-kind",
-            "baseline",
-            "--input-dim",
-            "6",
-            "--memory-units",
-            "4",
-            "--branches",
-            "2",
-            "--batch-sizes",
-            "1,2",
-            "--time-steps",
-            "3",
-            "--runs",
-            "1",
-            "--warmup-runs",
-            "0",
-            "--output",
-            str(report_path),
-        ]
-    ) == 0
-    report = json.loads(report_path.read_text(encoding="utf-8"))
-    assert report["model_parameter_count"] > 0
-    assert len(report["measurements"]) == 2
-    assert report["measurements"][0]["neuron_steps_per_second"] > 0
-
-
-def test_cli_evaluate_accepts_official_model_config(tmp_path):
-    data_dir = tmp_path / "data"
-    metrics_path = tmp_path / "metrics.json"
-    config_path = tmp_path / "official.json"
-    _write_small_official_config(config_path)
-
-    main(["make-demo-data", "--output", str(data_dir), "--samples", "2", "--time-steps", "4", "--input-dim", "6"])
-
-    result = main(
-        [
-            "evaluate",
-            "--data",
-            str(data_dir),
-            "--model-kind",
-            "official",
-            "--model-config",
-            str(config_path),
-            "--output",
-            str(metrics_path),
-        ]
-    )
-
-    assert result == 0
-    assert metrics_path.exists()
-
-
-def test_cli_train_saves_official_checkpoint(tmp_path):
-    data_dir = tmp_path / "data"
-    checkpoint_path = tmp_path / "official.pt"
-    metrics_path = tmp_path / "metrics.json"
-    config_path = tmp_path / "official.json"
-    _write_small_official_config(config_path)
-
-    main(["make-demo-data", "--output", str(data_dir), "--samples", "2", "--time-steps", "4", "--input-dim", "6"])
-
-    result = main(
-        [
-            "train",
-            "--data",
-            str(data_dir),
-            "--registry",
-            "off",
-            "--model-kind",
-            "official",
-            "--model-config",
-            str(config_path),
-            "--epochs",
-            "1",
-            "--batch-size",
-            "1",
-            "--shuffle-mode",
-            "shard",
-            "--cache-shards",
-            "1",
-            "--checkpoint",
-            str(checkpoint_path),
-            "--metrics",
-            str(metrics_path),
-        ]
-    )
-
-    assert result == 0
-    model, metadata = load_checkpoint(checkpoint_path)
-    assert model.num_input == 6
-    assert model.num_memory == 4
-    assert metadata["model_kind"] == "official"
-
-
-def test_cli_evaluate_loads_raw_official_state_dict(tmp_path):
-    data_dir = tmp_path / "data"
-    checkpoint_path = tmp_path / "raw-official.pt"
-    metrics_path = tmp_path / "metrics.json"
-    config_path = tmp_path / "official.json"
-    _write_small_official_config(config_path)
-
-    main(["make-demo-data", "--output", str(data_dir), "--samples", "2", "--time-steps", "4", "--input-dim", "6"])
-    model = create_official_elm(load_official_elm_config(config_path))
-    torch_state = model.state_dict()
-
-    torch.save(torch_state, checkpoint_path)
-
-    result = main(
-        [
-            "evaluate",
-            "--data",
-            str(data_dir),
-            "--model-kind",
-            "official",
-            "--model-config",
-            str(config_path),
-            "--checkpoint",
-            str(checkpoint_path),
-            "--output",
-            str(metrics_path),
-        ]
-    )
-
-    assert result == 0
-    assert metrics_path.exists()
-
-
-def test_cli_preset_and_registry_write_jsonl(tmp_path):
-    data_dir = tmp_path / "data"
-    metrics_path = tmp_path / "metrics.json"
-    registry_path = tmp_path / "registry.jsonl"
-    config_path = tmp_path / "official.json"
-    _write_small_official_config(config_path)
-
-    main(["make-demo-data", "--output", str(data_dir), "--samples", "2", "--time-steps", "8", "--input-dim", "6"])
-
-    result = main(
-        [
-            "evaluate",
-            "--preset",
-            "fulltrace-paper-metric",
-            "--data",
-            str(data_dir),
-            "--model-config",
-            str(config_path),
-            "--metric-ignore-start",
-            "1",
-            "--registry",
-            str(registry_path),
-            "--output",
-            str(metrics_path),
-        ]
-    )
-
-    assert result == 0
-    lines = registry_path.read_text(encoding="utf-8").strip().splitlines()
-    assert len(lines) == 1
-    entry = json.loads(lines[0])
-    assert entry["command"] == "evaluate"
-    assert entry["preset"] == "fulltrace-paper-metric"
-
-
-def test_mamba_presets_use_soma075_objective():
-    class Args:
-        spike_loss_weight = 0.5
-        soma_loss_weight = 0.5
-
-    for preset in ("mamba-official-probe", "mamba2-official-probe"):
-        args = Args()
-        args.preset = preset
-
-        apply_preset("train", preset, args, set())
-
-        assert args.spike_loss_weight == 0.25
-        assert args.soma_loss_weight == 0.75
 
 
 def test_cli_convert_neuronio_requires_existing_raw_path(tmp_path):
@@ -672,3 +313,193 @@ def test_cli_repack_shards_writes_sliceable_dataset(tmp_path):
     assert result == 0
     assert (repacked_dir / "manifest.json").exists()
     assert len(list(repacked_dir.glob("*_inputs.npy"))) == 1
+
+
+def _canonical_plot_fixture():
+    models = []
+    for idx, model_id in enumerate(("branch_elm_best", "branch_elm_m1", "branch_elm_m30", "branch_elm_m100")):
+        models.append(
+            {
+                "model_id": model_id,
+                "rmse_to_clipped_valid_mv": 0.55 + 0.1 * idx,
+                "rmse_to_raw_valid_mv": 1.9 + 0.2 * idx,
+                "rmse_to_clipped_near_spike_mv": 3.1 + 0.1 * idx,
+                "rmse_to_raw_near_spike_mv": 28.0 - idx,
+                "threshold_logit_zero": {"predicted_spike_count": 3 if idx == 0 else 0},
+            }
+        )
+    return {
+        "validation": {
+            "models": models,
+            "target": {
+                "target_spike_count": 2817,
+                "target_distortion": {
+                    "clipped_fraction_valid": 0.003,
+                    "near_spike_clipped_fraction": 0.52,
+                    "rmse_mv_near_spike": 26.5,
+                    "max_abs_distortion_mv": 88.6,
+                },
+            },
+        }
+    }
+
+
+def _mechanistic_plot_fixture():
+    reports = {}
+    for idx, model_id in enumerate(("branch_elm_best", "branch_elm_m1", "branch_elm_m30", "branch_elm_m100")):
+        reports[model_id] = {
+            "phase_plane": {
+                "near_spike_phase_rmse_mv": 24.0 + idx,
+                "high_dvdt_sign_agreement_fraction": 0.96 - 0.03 * idx,
+            },
+            "history_conditioned_error": {
+                "recent_spike_history": {"voltage_rmse_mv": 10.0 + idx},
+                "quiet_history": {"voltage_rmse_mv": 0.6 + 0.1 * idx},
+            },
+            "event_triggered_response": {
+                "exc": {"latency_error_steps": -4 + idx},
+                "inh": {"latency_error_steps": 6 - idx, "response_gain": 0.52 + 0.08 * idx},
+            },
+        }
+    return {"reports": reports}
+
+
+def _sparse_plot_fixture():
+    ratios = []
+    for budget in (8, 32, 128):
+        for group in ("quiet_or_low_spike", "spike_rich"):
+            for label, targeted, control in (
+                ("global", "gradient_sparse_global", "random_sparse_global"),
+                ("time_local_8", "gradient_sparse_time_local_8", "random_sparse_same_time_8"),
+                ("time_local_32", "gradient_sparse_time_local_32", "random_sparse_same_time_32"),
+            ):
+                base = 3.0 + budget / 16.0 + (2.0 if group == "spike_rich" else 0.0)
+                ratios.append(
+                    {
+                        "budget": budget,
+                        "window_group": group,
+                        "targeted": targeted,
+                        "control": control,
+                        "median_soma_delta_ratio": base + (0.5 if label == "time_local_8" else 0.0),
+                        "changed_fraction_of_events_median": 0.001 * budget / 8.0,
+                    }
+                )
+    return {"ratios": ratios, "headline": {"global_ratio_median": 8.0}}
+
+
+def _point_plot_fixture():
+    points = []
+    for regime, auc_base, f1_base in (
+        ("canonical_test", 0.994, 0.34),
+        ("ood_rates", 0.990, 0.29),
+        ("combined_ergodic", 0.989, 0.31),
+    ):
+        for idx, model_id in enumerate(("branch_elm_best", "branch_elm_m30", "branch_elm_m100")):
+            points.append(
+                {
+                    "model_id": model_id,
+                    "model_regime": f"{model_id}:{regime}",
+                    "regime": regime,
+                    "spike_auc": auc_base - 0.001 * idx,
+                    "event_f1_2ms": f1_base - 0.02 * idx,
+                }
+            )
+    return [
+        {"point_id": 1, "metric": "points", "value": json.dumps(points)},
+        {"point_id": 2, "metric": "delta_min", "value": -0.003},
+        {"point_id": 2, "metric": "delta_mean", "value": 0.007},
+        {"point_id": 2, "metric": "delta_max", "value": 0.020},
+    ]
+
+
+def _tcn_plot_fixture(model, *, raw):
+    return {
+        "model": model,
+        "rows": [
+            {"view": "raw_tcn", "rmse_mv": raw},
+            {"view": "same_slice_target_mean_baseline", "rmse_mv": 3.48},
+            {"view": "same_slice_mean_std_match", "rmse_mv": 3.6},
+            {"view": "same_slice_linear_fit", "rmse_mv": 3.1},
+        ],
+    }
+
+
+def _morphology_plot_fixture():
+    rows = []
+    values = {
+        "event_dropout": {"specimen_1": -10.0, "specimen_2": -15.0},
+        "exc_dropout": {"specimen_1": -25.0, "specimen_2": -35.0},
+        "inh_dropout": {"specimen_1": 20.0, "specimen_2": 28.0},
+        "site_silence": {"specimen_1": -5.0, "specimen_2": -12.0},
+        "temporal_jitter": {"specimen_1": -1.0, "specimen_2": 2.0},
+    }
+    for intervention, morphology_values in values.items():
+        rows.append(
+            {
+                "diagnostic": "morphology_contrast",
+                "metric": "intervention_response.spike_count_delta_teacher_mean.mean_across_morphologies",
+                "intervention": intervention,
+                "morphology_values": morphology_values,
+            }
+        )
+    return rows
+
+
+def _neuronio_intervention_plot_fixture():
+    rows = []
+    values = {
+        "event_dropout": (-0.0038, 1.26, 0.18, -1.08, -2.50, 2.59, "lower_event_drive/lower_spiking/hyperpolarized"),
+        "exc_dropout": (-0.0021, 1.26, 0.04, -1.22, -4.94, 4.96, "lower_event_drive/lower_spiking/hyperpolarized"),
+        "inh_dropout": (-0.0017, 1.26, 4.12, 2.86, 3.09, 3.39, "lower_event_drive/higher_spiking/depolarized"),
+        "site_silence": (-0.0033, 1.26, 0.42, -0.84, -3.56, 3.63, "lower_event_drive/lower_spiking/hyperpolarized"),
+        "temporal_jitter": (-0.0001, 1.26, 1.21, -0.05, -0.04, 0.35, "lower_event_drive/lower_spiking/hyperpolarized"),
+    }
+    metric_names = (
+        "event_fraction_delta",
+        "baseline_spike_rate_per_1000_steps",
+        "intervention_spike_rate_per_1000_steps",
+        "delta_spike_rate_per_1000_steps",
+        "delta_soma_mean_mv",
+        "delta_soma_abs_mean_mv",
+        "teacher_direction",
+    )
+    for intervention, metric_values in values.items():
+        for metric, value in zip(metric_names, metric_values):
+            rows.append(
+                {
+                    "diagnostic": "intervention_response",
+                    "intervention": intervention,
+                    "metric": metric,
+                    "value": value,
+                }
+            )
+    return rows
+
+
+def _write_neuronio_trace_root_fixture(root):
+    time_steps = 620
+    time = np.arange(time_steps, dtype=np.float32)
+    baseline_soma = -70.0 + 0.4 * np.sin(time / 20.0)
+    baseline_targets = np.zeros((1, time_steps, 2), dtype=np.float32)
+    intervention_targets = np.zeros((1, time_steps, 2), dtype=np.float32)
+    baseline_targets[..., 1] = (baseline_soma + 67.7) * 0.1
+    for idx, intervention in enumerate(("exc_dropout", "inh_dropout", "temporal_jitter", "morphology-3")):
+        folder = root / "interventions" / intervention
+        folder.mkdir(parents=True)
+        intervention_soma = baseline_soma.copy()
+        intervention_soma[520:590] += (idx + 1) * 2.0
+        intervention_targets[..., 1] = (intervention_soma + 67.7) * 0.1
+        baseline_targets[..., 0] = 0
+        intervention_targets[..., 0] = 0
+        baseline_targets[0, 540, 0] = 1
+        intervention_targets[0, 550 + idx, 0] = 1
+        np.savez_compressed(
+            folder / "intervention_pair_00000.npz",
+            baseline_soma_mv=baseline_soma[None, :].astype(np.float32),
+            intervention_soma_mv=intervention_soma[None, :].astype(np.float32),
+            baseline_targets=baseline_targets.copy(),
+            intervention_targets=intervention_targets.copy(),
+            baseline_inputs=np.zeros((1, time_steps, 4), dtype=np.int8),
+            intervention_inputs=np.zeros((1, time_steps, 4), dtype=np.int8),
+            sample_ids=np.asarray([f"{intervention}-trace"]),
+        )

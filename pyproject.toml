@@ -8,9 +8,9 @@ version = "0.1.0"
 description = "Single-neuron surrogate benchmark and dataset generation workbench."
 requires-python = ">=3.10"
 dependencies = [
+  "matplotlib>=3.8",
   "numpy>=1.24",
   "requests>=2.32",
-  "torch>=2.0",
 ]
 
 [project.optional-dependencies]
@@ -20,9 +20,7 @@ dev = [
 sim = [
   "arbor==0.11.0",
 ]
-pretrained = [
-  "tensorflow>=2",
-]
+plots = []
 
 [project.scripts]
 dendrobench = "dendrobench.cli:main"
@@ -31,7 +29,7 @@ dendrobench = "dendrobench.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-dendrobench = ["assets/*.swc", "assets/*.json", "mechanisms/*.mod"]
+"dendrobench.generation" = ["assets/*.swc", "assets/*.json", "mechanisms/*.mod"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -25,8 +25,14 @@ DIAGNOSTIC_SUITES = (
     "state-dynamics",
     "spike-behavior",
     "feature-fidelity",
+    "mechanistic-response",
     "morphology-contrast",
     "intervention-response",
+    "metric-decoupling",
+    "target-view-audit",
+    "robustness-directionality",
+    "protocol-coverage",
+    "adapter-fairness",
     "paper-summary",
     "full",
 )
@@ -114,7 +120,7 @@ class PlotterSpec:
     """A variable-length diagnostic-attached plotting method."""
 
     name: str
-    kind: Literal["atomic", "example"]
+    kind: Literal["atomic", "example", "table"]
     consumes: tuple[str, ...]
     description: str
 
@@ -229,7 +235,7 @@ def provisional_v1_morphologies() -> tuple[MorphologySpec, ...]:
         MorphologySpec(
             specimen_id=488_683_425,
             role="reference_control",
-            swc_path="src/dendrobench/assets/allen_l5_template.swc",
+            swc_path="src/dendrobench/generation/assets/allen_l5_template.swc",
             line_name="Rbp4-Cre_KL100",
             reconstruction_type="dendrite-only",
             compatibility_score_lower_better=0.0,
@@ -391,6 +397,44 @@ def default_diagnostic_specs() -> tuple[DiagnosticSpec, ...]:
             description="Electrophysiology-style feature summaries.",
         ),
         DiagnosticSpec(
+            name="mechanistic_response",
+            suites=("mechanistic-response", "paper-summary", "full"),
+            selectors=("split=val",),
+            plotters=(
+                PlotterSpec(
+                    name="phase_plane_fidelity",
+                    kind="atomic",
+                    consumes=("mechanistic_response",),
+                    description="Voltage/dVdt phase-plane fidelity and high-dVdt error view.",
+                ),
+                PlotterSpec(
+                    name="event_triggered_response",
+                    kind="atomic",
+                    consumes=("mechanistic_response",),
+                    description="Excitatory/inhibitory event-triggered response gain, latency, and curve error.",
+                ),
+                PlotterSpec(
+                    name="history_conditioned_error",
+                    kind="atomic",
+                    consumes=("mechanistic_response",),
+                    description="Trace error conditioned on recent spikes and recent E/I drive.",
+                ),
+                PlotterSpec(
+                    name="mechanistic_behavior_matrix",
+                    kind="atomic",
+                    consumes=("mechanistic_response",),
+                    description="Model-by-behavior matrix over phase-plane, history, latency, and response-gain errors.",
+                ),
+                PlotterSpec(
+                    name="mechanistic_worst_examples",
+                    kind="example",
+                    consumes=("mechanistic_response", "trace_core", "spike_behavior"),
+                    description="Worst-case example traces combining voltage dynamics, event response, and spike behavior.",
+                ),
+            ),
+            description="Mechanistic response dynamics: phase-plane, event-triggered response, and history-conditioned error.",
+        ),
+        DiagnosticSpec(
             name="morphology_contrast",
             suites=("morphology-contrast", "paper-summary", "full"),
             selectors=("split=val", "morphologies=all_v1"),
@@ -400,6 +444,18 @@ def default_diagnostic_specs() -> tuple[DiagnosticSpec, ...]:
                     kind="atomic",
                     consumes=("morphology_contrast",),
                     description="Per-morphology effect-size and uncertainty view.",
+                ),
+                PlotterSpec(
+                    name="morphology_intervention_response_heatmap",
+                    kind="atomic",
+                    consumes=("morphology_contrast", "intervention_response"),
+                    description="Morphology-by-intervention teacher response heatmap.",
+                ),
+                PlotterSpec(
+                    name="morphology_intervention_response_table",
+                    kind="table",
+                    consumes=("morphology_contrast", "intervention_response"),
+                    description="Exact intervention response range table across morphologies.",
                 ),
             ),
             description="Differences and rough uncertainty across all v1 morphologies.",
@@ -429,6 +485,18 @@ def default_diagnostic_specs() -> tuple[DiagnosticSpec, ...]:
                     consumes=("intervention_response",),
                     description="Teacher/model paired-delta direction and gain view.",
                 ),
+                PlotterSpec(
+                    name="neuronio_matched_intervention_response",
+                    kind="atomic",
+                    consumes=("intervention_response", "protocol_coverage"),
+                    description="NeuronIO-source paired teacher-response matrix and spike-rate transition view.",
+                ),
+                PlotterSpec(
+                    name="neuronio_matched_intervention_table",
+                    kind="table",
+                    consumes=("intervention_response", "protocol_coverage"),
+                    description="Exact NeuronIO-source paired intervention response table.",
+                ),
             ),
             description="Paired response deltas under top-level intervention conditions.",
         ),
@@ -451,6 +519,118 @@ def default_diagnostic_specs() -> tuple[DiagnosticSpec, ...]:
                 ),
             ),
             description="Explicit raw-vs-clipped target distortion diagnostic.",
+        ),
+        DiagnosticSpec(
+            name="metric_decoupling",
+            suites=("metric-decoupling", "paper-summary", "full"),
+            selectors=("diagnostic_artifacts",),
+            plotters=(
+                PlotterSpec(
+                    name="spike_metric_identification",
+                    kind="atomic",
+                    consumes=("metric_decoupling",),
+                    description="Information-dense AUC/event-F1 scatter with prevalence-matching delta inset.",
+                ),
+                PlotterSpec(
+                    name="metric_decoupling_table",
+                    kind="table",
+                    consumes=("metric_decoupling",),
+                    description="Exact AUC/F1 and zero-threshold event deployment table.",
+                ),
+            ),
+            description="Cases where headline voltage/spike scores separate from event timing, OOD, or calibration behavior.",
+        ),
+        DiagnosticSpec(
+            name="target_view_audit",
+            suites=("target-view-audit", "teacher-qc", "paper-summary", "full"),
+            selectors=("diagnostic_artifacts", "target_views"),
+            plotters=(
+                PlotterSpec(
+                    name="target_view_distortion_map",
+                    kind="atomic",
+                    consumes=("target_view_audit",),
+                    description="Model-by-target-view RMSE heatmap with clipping-distortion side panel.",
+                ),
+                PlotterSpec(
+                    name="target_protocol_table",
+                    kind="table",
+                    consumes=("target_view_audit", "adapter_fairness"),
+                    description="Exact clipping-distortion and target-dependent adapter evaluation table.",
+                ),
+            ),
+            description="Checks whether target transforms change measured voltage fidelity or spike-shape conclusions.",
+        ),
+        DiagnosticSpec(
+            name="robustness_directionality",
+            suites=("robustness-directionality", "paper-summary", "full"),
+            selectors=("diagnostic_artifacts", "interventions/<name>"),
+            plotters=(
+                PlotterSpec(
+                    name="sparse_event_sensitivity_heatmap",
+                    kind="atomic",
+                    consumes=("robustness_directionality",),
+                    description="Budget-by-locality heatmap for targeted/random sparse-event sensitivity and edited-event fraction.",
+                ),
+                PlotterSpec(
+                    name="sparse_event_sensitivity_table",
+                    kind="table",
+                    consumes=("robustness_directionality",),
+                    description="Exact sparse-event sensitivity ratio table.",
+                ),
+            ),
+            description="Directional robustness diagnostics for sparse-event edits and local perturbations.",
+        ),
+        DiagnosticSpec(
+            name="protocol_coverage",
+            suites=("protocol-coverage", "teacher-qc", "paper-summary", "full"),
+            selectors=("diagnostic_artifacts", "metadata"),
+            plotters=(
+                PlotterSpec(
+                    name="teacher_intervention_contract",
+                    kind="atomic",
+                    consumes=("protocol_coverage",),
+                    description="Mechanistic teacher-delta contract schematic for intervention diagnostics.",
+                ),
+                PlotterSpec(
+                    name="neuronio_matched_intervention_response",
+                    kind="atomic",
+                    consumes=("intervention_response", "protocol_coverage"),
+                    description="Measured paired teacher deltas on the NeuronIO-source replica.",
+                ),
+                PlotterSpec(
+                    name="neuronio_matched_intervention_table",
+                    kind="table",
+                    consumes=("intervention_response", "protocol_coverage"),
+                    description="Exact NeuronIO-source paired intervention response table.",
+                ),
+                PlotterSpec(
+                    name="coverage_table",
+                    kind="table",
+                    consumes=("protocol_coverage",),
+                    description="Teacher-grounding, morphology, intervention, and source-file coverage table.",
+                ),
+            ),
+            description="Protocol coverage checks for teacher grounding, morphology transfer, and intervention support.",
+        ),
+        DiagnosticSpec(
+            name="adapter_fairness",
+            suites=("adapter-fairness", "paper-summary", "full"),
+            selectors=("diagnostic_artifacts", "pretrained_models"),
+            plotters=(
+                PlotterSpec(
+                    name="adapter_preprocessing_trajectories",
+                    kind="atomic",
+                    consumes=("adapter_fairness",),
+                    description="TCN voltage-RMSE trajectories across leakage-free and target-dependent preprocessing views.",
+                ),
+                PlotterSpec(
+                    name="adapter_preprocessing_table",
+                    kind="table",
+                    consumes=("adapter_fairness",),
+                    description="Exact adapter and target-scale sanity table for pretrained literature models.",
+                ),
+            ),
+            description="Preprocessing, adapter, and target-scale sanity diagnostics for model comparison.",
         ),
     )
 
