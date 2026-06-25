@@ -79,5 +79,7 @@ def test_diagnostic_suite_catalog_is_overlapping_not_partitioned():
     assert "clipping_distortion" in catalog["suites"]["paper-summary"]
     assert "intervention_response" in catalog["suites"]["teacher-qc"]
     assert "intervention_response" in catalog["suites"]["intervention-response"]
+    assert "mechanistic_response" in catalog["suites"]["mechanistic-response"]
+    assert "mechanistic_response" in catalog["suites"]["paper-summary"]
     assert "morphology_routing_qc" in catalog["suites"]["teacher-qc"]
     assert "morphology_routing_qc" in catalog["suites"]["paper-summary"]

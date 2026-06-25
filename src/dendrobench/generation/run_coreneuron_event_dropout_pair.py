@@ -7,20 +7,17 @@ import argparse
 import json
 import os
 from pathlib import Path
-import sys
 import time
 from typing import Any
 
 import numpy as np
 
-# CoreNEURON GPU uses the NVHPC/OpenACC runtime.  Import it before package
-# modules that may import torch/CUDA; otherwise GPU discovery can fail later in
-# embedded CoreNEURON even when the device is present.
+# CoreNEURON GPU uses the NVHPC/OpenACC runtime. Import it before other
+# accelerator-aware libraries so GPU discovery stays stable in this process.
 from neuron import coreneuron as _early_coreneuron  # noqa: F401
 from neuron import h as _early_h  # noqa: F401
 
-ROOT = Path(__file__).resolve().parents[2]
-SCRIPT_DIR = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[3]
 ARTIFACTS = Path(os.environ.get("DENDROBENCH_GENERATION_ARTIFACTS", ROOT / "artifacts" / "generation")).resolve()
 CORENEURON_PROBE = ARTIFACTS / "coreneuron_hay_port_probe_20260605"
 DEFAULT_SOURCE_ROOT = Path(
@@ -29,20 +26,17 @@ DEFAULT_SOURCE_ROOT = Path(
         ARTIFACTS / "source_models" / "neuron_as_deep_net" / "L5PC_NEURON_simulation",
     )
 ).resolve()
-sys.path.insert(0, str(SCRIPT_DIR))
-sys.path.insert(0, str(ARTIFACTS))
-sys.path.insert(0, str(CORENEURON_PROBE))
 
-from dendrobench.benchmark import compute_paired_event_intervention_metrics, make_structured_intervention_inputs  # noqa: E402
-from dendrobench.data import ShardedNeuronIODataset  # noqa: E402
-from generate_hay_neuron_dataset import (  # noqa: E402
+from dendrobench.benchmark import compute_paired_event_intervention_metrics, make_structured_intervention_inputs
+from dendrobench.data import ShardedNeuronIODataset
+from dendrobench.generation.generate_hay_neuron_dataset import (
     SOMA_BIAS_MV,
     SOMA_CLIP_THRESHOLD_MV,
     SOMA_SCALE,
     local_peak_spike_labels,
 )
-from run_coreneuron_hay_probe import attach_deterministic_synapses, load_probe_mechanisms  # noqa: E402
-from run_hay_neuron_driven_probe import collect_segments  # noqa: E402
+from dendrobench.generation.run_coreneuron_hay_probe import attach_deterministic_synapses, load_probe_mechanisms
+from dendrobench.generation.run_hay_neuron_driven_probe import collect_segments
 
 
 def main() -> int:

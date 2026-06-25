@@ -25,7 +25,7 @@ from dendrobench.benchmark.state_metrics import compute_state_conditioned_metric
 from dendrobench.benchmark.perturbation_stability import compute_perturbation_stability
 from dendrobench.benchmark.structured_intervention import compute_paired_event_intervention_metrics
 from dendrobench.benchmark.trace_shape import compute_trace_shape_metrics
-from dendrobench.official.constants import DEFAULT_Y_TRAIN_SOMA_BIAS
+from dendrobench.neuronio_raw import DEFAULT_Y_TRAIN_SOMA_BIAS
 
 
 class BenchmarkSuite:

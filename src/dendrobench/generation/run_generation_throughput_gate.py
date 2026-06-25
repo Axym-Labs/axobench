@@ -14,10 +14,8 @@ import time
 from typing import Any
 
 
-ROOT = Path(__file__).resolve().parents[2]
-SCRIPT_DIR = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[3]
 ARTIFACTS = Path(os.environ.get("DENDROBENCH_GENERATION_ARTIFACTS", ROOT / "artifacts" / "generation")).resolve()
-GENERATOR = SCRIPT_DIR / "generate_coreneuron_hay_dataset.py"
 CPU_MECH_ROOT = ARTIFACTS / "coreneuron_hay_port_probe_20260605"
 GPU_MECH_ROOT = ARTIFACTS / "coreneuron_hay_gpu_probe_9_durable_20260606"
 SOURCE_ROOT = ARTIFACTS / "source_models" / "neuron_as_deep_net" / "L5PC_NEURON_simulation"
@@ -177,10 +175,11 @@ def run_or_load_generator(
         env = os.environ.copy()
         if env_override:
             env.update(env_override)
-        env["PYTHONPATH"] = f"src:{ARTIFACTS}:{env.get('PYTHONPATH', '')}"
+        env["PYTHONPATH"] = f"{ROOT / 'src'}:{ARTIFACTS}:{env.get('PYTHONPATH', '')}"
         cmd = [
             str(python),
-            str(GENERATOR),
+            "-m",
+            "dendrobench.generation.generate_coreneuron_hay_dataset",
             "--source-root",
             str(SOURCE_ROOT),
             "--mechanism-root",
@@ -195,7 +194,7 @@ def run_or_load_generator(
             "0",
             "--duration-ms",
             str(duration_ms),
-            "--exc-event-keep-prob",
+            "--exc-gmax-scale",
             "0.925",
             "--batch-size",
             str(batch_size),
@@ -239,10 +238,11 @@ def run_or_load_parallel(
         for index in range(parallelism):
             shard_root = output_root / f"shard_{index}"
             env = os.environ.copy()
-            env["PYTHONPATH"] = f"src:{ARTIFACTS}:{env.get('PYTHONPATH', '')}"
+            env["PYTHONPATH"] = f"{ROOT / 'src'}:{ARTIFACTS}:{env.get('PYTHONPATH', '')}"
             cmd = [
                 str(python),
-                str(GENERATOR),
+                "-m",
+                "dendrobench.generation.generate_coreneuron_hay_dataset",
                 "--source-root",
                 str(SOURCE_ROOT),
                 "--mechanism-root",
@@ -259,7 +259,7 @@ def run_or_load_parallel(
                 str(duration_ms),
                 "--seed",
                 str(20260605 + index),
-                "--exc-event-keep-prob",
+                "--exc-gmax-scale",
                 "0.925",
             ]
             procs.append(subprocess.Popen(cmd, cwd=ROOT, env=env, stdout=subprocess.DEVNULL))

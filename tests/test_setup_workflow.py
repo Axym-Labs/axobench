@@ -26,7 +26,7 @@ def test_setup_plan_adds_kaggle_downloads_only_when_requested():
     command_text = "\n".join(step.command for step in plan.steps if step.command)
 
     assert "pip install requests" in command_text
-    assert "dendrobench.kaggle_download" in command_text
+    assert "scripts/data/download_kaggle.py" in command_text
     assert "selfishgene/single-neurons-as-deep-nets-nmda-train-data" in command_text
     assert "selfishgene/single-neurons-as-deep-nets-nmda-test-data" in command_text
 

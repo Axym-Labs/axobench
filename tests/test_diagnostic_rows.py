@@ -4,6 +4,7 @@ import json
 from dendrobench.benchmark.diagnostic_rows import (
     DiagnosticContext,
     evaluate_model_diagnostic_rows,
+    mechanistic_response_diagnostic_rows,
     morphology_contrast_diagnostic_rows,
     morphology_routing_qc_rows,
     paired_intervention_diagnostic_rows,
@@ -48,6 +49,46 @@ def test_model_diagnostics_emit_dataframe_rows_for_overlapping_suites():
         for row in rows
     )
     assert all(row["morphology_id"] == "morph-a" for row in rows)
+
+
+def test_mechanistic_response_rows_capture_phase_event_and_history_metrics():
+    inputs = np.zeros((1, 80, 4), dtype=np.float32)
+    inputs[0, 20, 0] = 1.0
+    inputs[0, 35, 3] = -1.0
+    targets = np.zeros((1, 80, 2), dtype=np.float32)
+    predictions = targets.copy()
+    targets[..., 1] = (-67.0 + 67.7) * 0.1
+    predictions[..., 1] = (-66.5 + 67.7) * 0.1
+    targets[0, 25, 0] = 1.0
+    predictions[0, 25, 0] = 4.0
+    raw_soma_mv = np.full((1, 80), -67.0, dtype=np.float32)
+    raw_soma_mv[0, 20:30] += np.linspace(0.0, 8.0, 10)
+    raw_soma_mv[0, 35:45] -= np.linspace(0.0, 4.0, 10)
+
+    rows = mechanistic_response_diagnostic_rows(
+        predictions,
+        inputs,
+        targets,
+        target_soma_mv=raw_soma_mv,
+        context=DiagnosticContext(
+            suites=("mechanistic-response", "paper-summary"),
+            model_id="unit-model",
+            morphology_id="morph-a",
+            ignore_start=0,
+        ),
+    )
+
+    validate_diagnostic_rows(rows)
+    assert {row["diagnostic"] for row in rows} == {"mechanistic_response"}
+    assert "mechanistic-response|paper-summary" in {row["suite"] for row in rows}
+    states = {row["state"] for row in rows}
+    assert "phase_plane" in states
+    assert "exc_event_triggered" in states
+    assert "inh_event_triggered" in states
+    metrics = {(row["state"], row["metric"]): row for row in rows}
+    assert metrics[("phase_plane", "phase_distribution_jsd")]["value"] >= 0.0
+    assert metrics[("exc_event_triggered", "event_count")]["value"] == 1
+    assert metrics[("inh_event_triggered", "event_count")]["value"] == 1
 
 
 def test_teacher_qc_rows_include_distribution_and_clipping_distortion():

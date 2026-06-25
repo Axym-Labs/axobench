@@ -1,6 +1,7 @@
 import numpy as np
+import pytest
 
-from dendrobench.arbor_sim import (
+from dendrobench.generation.arbor_sim import (
     ArborHeteroConfig,
     _interlocking_branch_routing,
     _label_spikes,
@@ -74,6 +75,7 @@ def test_neuronio_smoothed_arbor_inputs_have_slow_drive_structure():
 
 
 def test_distributed_synapse_routing_restores_many_physical_input_sites():
+    pytest.importorskip("arbor")
     config = ArborHeteroConfig(
         input_dim=1278,
         num_branch=45,

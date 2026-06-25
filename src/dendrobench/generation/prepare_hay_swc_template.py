@@ -15,7 +15,7 @@ from pathlib import Path
 
 
 DEFAULT_SOURCE_ROOT = (
-    Path(__file__).resolve().parents[2]
+    Path(__file__).resolve().parents[3]
     / "artifacts"
     / "generation"
     / "source_models"

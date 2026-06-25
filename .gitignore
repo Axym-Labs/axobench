@@ -7,15 +7,17 @@ __pycache__/
 *.egg-info/
 
 # Local data, generated runs, and heavyweight artifacts.
-data/
-runs/
-artifacts/
-build/
-.external/
+/data/
+/runs/
+/artifacts/
+/build/
+/.external/
 *.log
 *.pid
 *.nohup.log
 
 # Exploration arc is intentionally local/untracked while the benchmark is in flux.
 docs/benchmark/
+docs/ta1/
+docs/internal/
 .codex-autoresearch.md

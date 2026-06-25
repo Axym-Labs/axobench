@@ -58,7 +58,6 @@ def build_setup_plan(options: SetupOptions) -> SetupPlan:
         SetupStep("Create raw data directory", mkdir=raw_root),
         SetupStep("Create shard directory", mkdir=shard_root),
         SetupStep("Create run output directory", mkdir=project_root / "runs"),
-        SetupStep("Create checkpoint directory", mkdir=project_root / "checkpoints"),
     ]
 
     if not options.skip_install:
@@ -87,8 +86,7 @@ def build_setup_plan(options: SetupOptions) -> SetupPlan:
                     f"Download {dataset.name} from Kaggle",
                     (
                         options.python_executable,
-                        "-m",
-                        "dendrobench.kaggle_download",
+                        str(project_root / "scripts" / "data" / "download_kaggle.py"),
                         dataset.slug,
                         str(target / f"{dataset.name}.zip"),
                         "--unzip-to",
@@ -122,7 +120,7 @@ def build_setup_plan(options: SetupOptions) -> SetupPlan:
     next_steps = (
         "Place kaggle.json under ~/.kaggle/ or set KAGGLE_USERNAME and KAGGLE_KEY before using --download-data.",
         "Convert downloaded raw files with --convert-raw if you did not convert during setup.",
-        "Run the recommended preset with: python -m dendrobench.cli train --preset paper-random-fulltrace --data <train-shards> --val-data <val-shards> --epochs 10 --epoch-samples 80000 --shard-reuse-batches 58 --checkpoint runs/paper-like.pt --metrics runs/paper-like-metrics.json",
+        "Run teacher/data diagnostics with: python -m dendrobench.cli benchmark-rows --mode teacher-qc --dataset-root <v1-dataset> --output runs/teacher_qc.jsonl",
     )
     return SetupPlan(steps=tuple(steps), next_steps=next_steps)
 

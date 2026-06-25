@@ -16,9 +16,10 @@ from dendrobench.benchmark.dataset_schema import (
     default_diagnostic_specs,
     provisional_v1_morphologies,
 )
+from dendrobench.benchmark.mechanistic_response import compute_mechanistic_response_metrics
 from dendrobench.benchmark.structured_intervention import compute_paired_event_intervention_metrics
 from dendrobench.benchmark.suite import BenchmarkSuite
-from dendrobench.official.constants import DEFAULT_Y_TRAIN_SOMA_BIAS
+from dendrobench.neuronio_raw import DEFAULT_Y_TRAIN_SOMA_BIAS
 
 
 DEFAULT_MODEL_ID = "model"
@@ -60,10 +61,19 @@ def evaluate_model_diagnostic_rows(
     """
     context = context or DiagnosticContext()
     trace_ids = trace_ids or [str(i) for i in range(np.asarray(inputs).shape[0])]
+    input_array = np.asarray(inputs)
+    target_array = np.asarray(targets)
+    predictions = np.asarray(model_fn(input_array))
+
+    def cached_model_fn(batch: np.ndarray) -> np.ndarray:
+        if batch is input_array:
+            return predictions
+        return np.asarray(model_fn(batch))
+
     report = BenchmarkSuite().evaluate_model(
-        model_fn,
-        inputs,
-        targets,
+        cached_model_fn,
+        input_array,
+        target_array,
         soma_scale=context.soma_scale,
         soma_bias_mv=context.soma_bias_mv,
         ignore_start=context.ignore_start,
@@ -77,6 +87,69 @@ def evaluate_model_diagnostic_rows(
     rows.extend(_state_dynamics_rows(report["state_conditioned_fidelity"], context))
     rows.extend(_spike_behavior_rows(report["m1_trace_fidelity"], report["m2_regimes"], context))
     rows.extend(_feature_fidelity_rows(report["m1b_feature_fidelity"], context))
+    rows.extend(
+        mechanistic_response_diagnostic_rows(
+            predictions,
+            input_array,
+            target_array,
+            context=context,
+        )
+    )
+    return _filter_rows_for_suites(rows, context.suites)
+
+
+def mechanistic_response_diagnostic_rows(
+    predictions: np.ndarray,
+    inputs: np.ndarray,
+    targets: np.ndarray,
+    *,
+    context: DiagnosticContext | None = None,
+    target_soma_mv: np.ndarray | None = None,
+) -> list[dict[str, Any]]:
+    """Return tidy mechanistic-response rows for precomputed predictions."""
+    context = context or DiagnosticContext()
+    report = compute_mechanistic_response_metrics(
+        predictions,
+        targets,
+        inputs,
+        target_soma_mv=target_soma_mv,
+        soma_scale=context.soma_scale,
+        soma_bias_mv=context.soma_bias_mv,
+        ignore_start=context.ignore_start,
+    )
+    rows: list[dict[str, Any]] = []
+    for metric, value in report["phase_plane"].items():
+        if metric.endswith("_support"):
+            unit = "count"
+        else:
+            unit = _unit_for_metric(metric)
+        rows.append(_row("mechanistic_response", context, metric, value, state="phase_plane", unit=unit))
+    for event_kind, event_report in report["event_triggered_response"].items():
+        for metric, value in event_report.items():
+            rows.append(
+                _row(
+                    "mechanistic_response",
+                    context,
+                    metric,
+                    value,
+                    state=f"{event_kind}_event_triggered",
+                    unit=_unit_for_metric(metric),
+                    n=event_report.get("event_count"),
+                )
+            )
+    for state, state_report in report["history_conditioned_error"].items():
+        for metric, value in state_report.items():
+            rows.append(
+                _row(
+                    "mechanistic_response",
+                    context,
+                    metric,
+                    value,
+                    state=state,
+                    unit=_unit_for_metric(metric),
+                    n=state_report.get("support"),
+                )
+            )
     return _filter_rows_for_suites(rows, context.suites)
 
 
@@ -602,6 +675,18 @@ def _json_scalar(value: Any) -> Any:
 
 
 def _unit_for_metric(metric: str) -> str:
+    if "agreement" in metric:
+        return "fraction"
+    if "correlation" in metric:
+        return "correlation"
+    if "gain" in metric:
+        return "ratio"
+    if "latency" in metric:
+        return "steps"
+    if "jsd" in metric:
+        return "bits"
+    if "dvdt" in metric:
+        return "mV_per_step"
     if metric.endswith("_mv") or "_mv_" in metric or metric in {"soma_mean_mv", "soma_std_mv"}:
         return "mV"
     if "rate_per_1000" in metric:

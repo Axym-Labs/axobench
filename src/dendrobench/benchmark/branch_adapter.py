@@ -7,7 +7,8 @@ and test morphologies (e.g., 24-40 branches).
 from __future__ import annotations
 
 import numpy as np
-import torch
+
+from dendrobench.metrics import binary_auc
 
 
 def adapt_branch_count(
@@ -57,22 +58,6 @@ def adapt_branch_count(
         raise ValueError(f"Unknown strategy: {strategy}")
 
 
-def create_model_with_adapted_routing(
-    model_class,
-    model_kwargs: dict,
-    source_routing: np.ndarray,
-    target_routing: np.ndarray,
-) -> torch.nn.Module:
-    """Create a model with adapted branch routing.
-
-    This is a placeholder for more sophisticated adaptation.
-    Currently just creates a new model with the target branch count.
-    """
-    n_target = target_routing.shape[0]
-    adapted_kwargs = {**model_kwargs, "n_branches": n_target}
-    return model_class(**adapted_kwargs)
-
-
 def evaluate_with_branch_adaptation(
     model_fn: callable,
     inputs: np.ndarray,
@@ -106,10 +91,8 @@ def evaluate_with_branch_adaptation(
 
     rmse_mv = np.sqrt(np.mean((preds[:, :, 1] - targets[:, :, 1]) ** 2)) / 0.1
 
-    from sklearn.metrics import roc_auc_score
-    try:
-        auc = roc_auc_score(targets[:, :, 0].flatten(), preds[:, :, 0].flatten())
-    except ValueError:
+    auc = binary_auc(preds[:, :, 0], targets[:, :, 0])
+    if np.isnan(auc):
         auc = 0.5
 
     return {

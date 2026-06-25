@@ -927,8 +927,8 @@ def _simulator_metadata(
             "heterogeneous AMPA/NMDA/GABA-like synaptic inputs, and per-sample physiology/stimulus heterogeneity."
         ),
         "template": {
-            "morphology": "src/dendrobench/assets/allen_l5_template.swc",
-            "fit": "src/dendrobench/assets/allen_l5_template_fit.json",
+            "morphology": "src/dendrobench/generation/assets/allen_l5_template.swc",
+            "fit": "src/dendrobench/generation/assets/allen_l5_template_fit.json",
             "source": "Arbor v0.11 python example single_cell_allen",
         },
         "config": asdict(config),
@@ -983,10 +983,10 @@ def _load_nmda_catalogue(A):
 
 
 def _nmda_catalogue_path() -> Path:
-    build_dir = Path(__file__).resolve().parents[2] / "build" / "arbor_catalogues" / "bnn_nmda"
+    build_dir = Path(__file__).resolve().parents[3] / "build" / "arbor_catalogues" / "bnn_nmda"
     build_dir.mkdir(parents=True, exist_ok=True)
     catalogue_path = build_dir / "bnn_nmda-catalogue.so"
-    mod_source = resources.files("dendrobench.mechanisms").joinpath("nmda.mod")
+    mod_source = resources.files("dendrobench.generation.mechanisms").joinpath("nmda.mod")
     source_text = mod_source.read_text(encoding="utf-8")
     mod_dir = build_dir / "mod"
     mod_dir.mkdir(exist_ok=True)
@@ -1029,8 +1029,8 @@ def _nmda_catalogue_path() -> Path:
 def _load_allen_template():
     import arbor as A
 
-    swc_path = resources.files("dendrobench.assets").joinpath("allen_l5_template.swc")
-    fit_path = resources.files("dendrobench.assets").joinpath("allen_l5_template_fit.json")
+    swc_path = resources.files("dendrobench.generation.assets").joinpath("allen_l5_template.swc")
+    fit_path = resources.files("dendrobench.generation.assets").joinpath("allen_l5_template_fit.json")
     morphology = A.load_swc_neuron(str(swc_path)).morphology
     fit = json.loads(fit_path.read_text(encoding="utf-8"))
     return morphology, _parse_allen_fit(fit)

@@ -7,17 +7,12 @@ import argparse
 import json
 import os
 from pathlib import Path
-import sys
 import time
 from typing import Any
 
 import numpy as np
 
-ARTIFACTS = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ARTIFACTS))
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-from generate_hay_neuron_dataset import (  # noqa: E402
+from dendrobench.generation.generate_hay_neuron_dataset import (
     SOMA_BIAS_MV,
     SOMA_CLIP_THRESHOLD_MV,
     SOMA_SCALE,
@@ -26,8 +21,8 @@ from generate_hay_neuron_dataset import (  # noqa: E402
     local_peak_spike_labels,
     summarize_written_trace,
 )
-from run_coreneuron_hay_probe import attach_deterministic_synapses, load_probe_mechanisms  # noqa: E402
-from run_hay_neuron_driven_probe import collect_segments, sample_neuronio_inputs  # noqa: E402
+from dendrobench.generation.run_coreneuron_hay_probe import attach_deterministic_synapses, load_probe_mechanisms
+from dendrobench.generation.run_hay_neuron_driven_probe import collect_segments, sample_neuronio_inputs
 
 
 def main() -> int:
@@ -42,15 +37,16 @@ def main() -> int:
     parser.add_argument("--duration-ms", type=int, default=6000)
     parser.add_argument("--seed", type=int, default=20260605)
     parser.add_argument("--v-init-mv", type=float, default=-76.0)
-    parser.add_argument("--exc-event-keep-prob", type=float, default=1.0)
-    parser.add_argument("--inh-event-keep-prob", type=float, default=1.0)
-    parser.add_argument("--exc-gmax-scale", type=float, default=1.0)
+    parser.add_argument(
+        "--teacher-balance-label",
+        default="dendrobench_ei_balanced",
+        help="Human-readable label for the DendroBench E/I calibration stored in metadata.",
+    )
+    parser.add_argument("--exc-gmax-scale", type=float, default=0.925)
     parser.add_argument("--inh-gmax-scale", type=float, default=1.0)
     parser.add_argument("--batch-size", type=int, default=1, help="Number of independent traces to solve in one simulator launch")
     args = parser.parse_args()
 
-    validate_keep_prob(args.exc_event_keep_prob, "exc-event-keep-prob")
-    validate_keep_prob(args.inh_event_keep_prob, "inh-event-keep-prob")
     validate_positive(args.exc_gmax_scale, "exc-gmax-scale")
     validate_positive(args.inh_gmax_scale, "inh-gmax-scale")
     output_root = Path(args.output_root).resolve()
@@ -64,8 +60,7 @@ def main() -> int:
         duration_ms=args.duration_ms,
         seed=args.seed,
         v_init_mv=args.v_init_mv,
-        exc_event_keep_prob=args.exc_event_keep_prob,
-        inh_event_keep_prob=args.inh_event_keep_prob,
+        teacher_balance_label=args.teacher_balance_label,
         exc_gmax_scale=args.exc_gmax_scale,
         inh_gmax_scale=args.inh_gmax_scale,
         batch_size=args.batch_size,
@@ -85,8 +80,7 @@ def write_splits(
     duration_ms: int,
     seed: int,
     v_init_mv: float,
-    exc_event_keep_prob: float,
-    inh_event_keep_prob: float,
+    teacher_balance_label: str,
     exc_gmax_scale: float,
     inh_gmax_scale: float,
     batch_size: int,
@@ -137,8 +131,7 @@ def write_splits(
             duration_ms=duration_ms,
             seed=seed + 1009 * split_index,
             v_init_mv=v_init_mv,
-            exc_event_keep_prob=exc_event_keep_prob,
-            inh_event_keep_prob=inh_event_keep_prob,
+            teacher_balance_label=teacher_balance_label,
             exc_gmax_scale=exc_gmax_scale,
             inh_gmax_scale=inh_gmax_scale,
             batch_size=batch_size,
@@ -154,6 +147,7 @@ def write_splits(
         "duration_ms": int(duration_ms),
         "seed": int(seed),
         "v_init_mv": float(v_init_mv),
+        "teacher_balance_label": teacher_balance_label,
         "splits": split_reports,
         "elapsed_seconds": time.perf_counter() - started,
         "target_policy": {
@@ -161,10 +155,7 @@ def write_splits(
             "spike_labels": f"high-resolution local soma peaks above {SPIKE_PEAK_THRESHOLD_MV} mV, binned to 1 ms",
             "soma": f"low-resolution soma clipped at {SOMA_CLIP_THRESHOLD_MV} mV then normalized as (v - {SOMA_BIAS_MV}) * {SOMA_SCALE}",
             "synapses": "DetAMPANMDA/DetGABA deterministic subsets matching the source-teacher Use=1, Dep=0, Fac=0, u0=0 policy",
-            "event_keep_prob": {
-                "excitatory": float(exc_event_keep_prob),
-                "inhibitory": float(inh_event_keep_prob),
-            },
+            "input_event_policy": "source_neuronio_sampler_unmodified",
             "gmax_scale": {
                 "excitatory": float(exc_gmax_scale),
                 "inhibitory": float(inh_gmax_scale),
@@ -192,8 +183,7 @@ def write_split(
     duration_ms: int,
     seed: int,
     v_init_mv: float,
-    exc_event_keep_prob: float,
-    inh_event_keep_prob: float,
+    teacher_balance_label: str,
     exc_gmax_scale: float,
     inh_gmax_scale: float,
     batch_size: int,
@@ -219,8 +209,6 @@ def write_split(
             sample_seeds=sample_seeds,
             duration_ms=duration_ms,
             v_init_mv=v_init_mv,
-            exc_event_keep_prob=exc_event_keep_prob,
-            inh_event_keep_prob=inh_event_keep_prob,
             exc_gmax_scale=exc_gmax_scale,
             inh_gmax_scale=inh_gmax_scale,
         )
@@ -256,10 +244,8 @@ def write_split(
             "fixed_step_dt_ms": 0.025,
             "v_init_mv": float(v_init_mv),
             "event_delivery": "PatternStim + ParallelContext.gid_connect",
-            "event_keep_prob": {
-                "excitatory": float(exc_event_keep_prob),
-                "inhibitory": float(inh_event_keep_prob),
-            },
+            "teacher_balance_label": teacher_balance_label,
+            "input_event_policy": "source_neuronio_sampler_unmodified",
             "gmax_scale": {
                 "excitatory": float(exc_gmax_scale),
                 "inhibitory": float(inh_gmax_scale),
@@ -299,8 +285,6 @@ def simulate_one_trace(
     sample_rng: np.random.Generator,
     duration_ms: int,
     v_init_mv: float,
-    exc_event_keep_prob: float,
-    inh_event_keep_prob: float,
     exc_gmax_scale: float,
     inh_gmax_scale: float,
 ) -> dict[str, np.ndarray]:
@@ -313,8 +297,6 @@ def simulate_one_trace(
     cell.soma[0].vshift_Ih = 0
 
     inputs_exc, inputs_inh = sample_neuronio_inputs(sample_rng, duration_ms, segment_types, segment_lengths)
-    inputs_exc = apply_event_keep(sample_rng, inputs_exc, exc_event_keep_prob)
-    inputs_inh = apply_event_keep(sample_rng, inputs_inh, inh_event_keep_prob)
     pc = h.ParallelContext()
     netcons, synapses, stim_refs = attach_deterministic_synapses(
         h,
@@ -366,8 +348,6 @@ def simulate_trace_batch(
     sample_seeds: list[int],
     duration_ms: int,
     v_init_mv: float,
-    exc_event_keep_prob: float,
-    inh_event_keep_prob: float,
     exc_gmax_scale: float,
     inh_gmax_scale: float,
 ) -> list[dict[str, np.ndarray]]:
@@ -392,8 +372,6 @@ def simulate_trace_batch(
         cell.soma[0].vshift_Ih = 0
 
         inputs_exc, inputs_inh = sample_neuronio_inputs(sample_rng, duration_ms, segment_types, segment_lengths)
-        inputs_exc = apply_event_keep(sample_rng, inputs_exc, exc_event_keep_prob)
-        inputs_inh = apply_event_keep(sample_rng, inputs_inh, inh_event_keep_prob)
         netcons, synapses, stim_refs = attach_deterministic_synapses(
             h,
             pc,
@@ -453,23 +431,9 @@ def simulate_trace_batch(
     return traces
 
 
-def validate_keep_prob(value: float, name: str) -> None:
-    if not 0.0 <= value <= 1.0:
-        raise ValueError(f"{name} must be in [0, 1], got {value}")
-
-
 def validate_positive(value: float, name: str) -> None:
     if value <= 0.0:
         raise ValueError(f"{name} must be positive, got {value}")
-
-
-def apply_event_keep(rng: np.random.Generator, events: np.ndarray, keep_prob: float) -> np.ndarray:
-    if keep_prob >= 1.0:
-        return events
-    if keep_prob <= 0.0:
-        return np.zeros_like(events, dtype=bool)
-    return events & (rng.random(events.shape) < keep_prob)
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

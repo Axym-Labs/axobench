@@ -15,15 +15,14 @@ from typing import Any
 
 import numpy as np
 
-# CoreNEURON GPU uses the NVHPC/OpenACC runtime.  Import it before package
-# modules that may import torch/CUDA; otherwise the worker can later abort with
-# "Enabled GPU execution but couldn't find NVIDIA GPU!".
+# CoreNEURON GPU uses the NVHPC/OpenACC runtime. Import it before other
+# accelerator-aware libraries so the worker does not later abort during GPU
+# discovery.
 from neuron import coreneuron as _early_coreneuron  # noqa: F401
 from neuron import h as _early_h  # noqa: F401
 
 
-ROOT = Path(__file__).resolve().parents[2]
-SCRIPT_DIR = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[3]
 ARTIFACTS = Path(os.environ.get("DENDROBENCH_GENERATION_ARTIFACTS", ROOT / "artifacts" / "generation")).resolve()
 CORENEURON_PROBE = ARTIFACTS / "coreneuron_hay_port_probe_20260605"
 SWC_MECH_ROOT = Path(os.environ.get("DENDROBENCH_SWC_MECH_ROOT", ARTIFACTS / "hay_swc_template")).resolve()
@@ -36,23 +35,19 @@ SOURCE_ROOT = Path(
 TEMPLATE_HOC = Path(os.environ.get("DENDROBENCH_SWC_TEMPLATE_HOC", SWC_MECH_ROOT / "L5PCtemplate_swc.hoc")).resolve()
 DEFAULT_PYTHON = Path(".venv/bin/python")
 
-sys.path.insert(0, str(ROOT / "src"))
-sys.path.insert(0, str(SCRIPT_DIR))
-sys.path.insert(0, str(ARTIFACTS))
-sys.path.insert(0, str(CORENEURON_PROBE))
-
-from dendrobench.benchmark import make_structured_intervention_inputs  # noqa: E402
-from dendrobench.benchmark.dataset_schema import INTERVENTION_CONDITIONS, build_v1_dataset_manifest_template, provisional_v1_morphologies  # noqa: E402
-from generate_hay_neuron_dataset import SOMA_BIAS_MV, SOMA_CLIP_THRESHOLD_MV, SOMA_SCALE, local_peak_spike_labels  # noqa: E402
-from run_coreneuron_event_dropout_pair import _build_source_site_route, _summarize_input_routing, simulate_signed_trace_batch  # noqa: E402
-from run_coreneuron_hay_probe import load_probe_mechanisms  # noqa: E402
-from run_hay_neuron_driven_probe import collect_segments, sample_neuronio_inputs  # noqa: E402
-from generate_coreneuron_hay_dataset import apply_event_keep  # noqa: E402
+from dendrobench.benchmark import make_structured_intervention_inputs
+from dendrobench.benchmark.dataset_schema import INTERVENTION_CONDITIONS, build_v1_dataset_manifest_template, provisional_v1_morphologies
+from dendrobench.generation.generate_hay_neuron_dataset import SOMA_BIAS_MV, SOMA_CLIP_THRESHOLD_MV, SOMA_SCALE, local_peak_spike_labels
+from dendrobench.generation.run_coreneuron_event_dropout_pair import _build_source_site_route, _summarize_input_routing, simulate_signed_trace_batch
+from dendrobench.generation.run_coreneuron_hay_probe import load_probe_mechanisms
+from dendrobench.generation.run_hay_neuron_driven_probe import collect_segments, sample_neuronio_inputs
 
 
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
+    validate_positive(args.exc_gmax_scale, "exc-gmax-scale")
+    validate_positive(args.inh_gmax_scale, "inh-gmax-scale")
     if args.worker:
         code = worker_main(args)
         sys.stdout.flush()
@@ -76,8 +71,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--backend", choices=["neuron", "coreneuron"], default="neuron")
     parser.add_argument("--coreneuron-gpu", action="store_true")
     parser.add_argument("--seed", type=int, default=20260606)
-    parser.add_argument("--exc-event-keep-prob", type=float, default=0.925)
-    parser.add_argument("--inh-event-keep-prob", type=float, default=1.0)
+    parser.add_argument(
+        "--teacher-balance-label",
+        default="dendrobench_ei_balanced",
+        help="Human-readable label for the DendroBench teacher calibration stored in metadata.",
+    )
+    parser.add_argument("--exc-gmax-scale", type=float, default=0.925)
+    parser.add_argument("--inh-gmax-scale", type=float, default=1.0)
     parser.add_argument("--train-samples-per-morphology", type=int, default=0)
     parser.add_argument("--val-samples-per-morphology", type=int, default=1)
     parser.add_argument("--test-samples-per-morphology", type=int, default=0)
@@ -140,6 +140,12 @@ def orchestrator_main(args: argparse.Namespace) -> int:
         "backend": args.backend,
         "coreneuron_gpu": bool(args.coreneuron_gpu),
         "duration_ms": int(args.duration_ms),
+        "teacher_balance_label": args.teacher_balance_label,
+        "input_event_policy": "source_neuronio_sampler_unmodified",
+        "synaptic_conductance_scale": {
+            "excitatory": float(args.exc_gmax_scale),
+            "inhibitory": float(args.inh_gmax_scale),
+        },
         "parallelism": int(args.parallelism),
         "samples_per_shard": int(args.samples_per_shard),
         "intervention_samples_per_shard": int(intervention_samples_per_shard(args)),
@@ -299,8 +305,9 @@ def task_payload(
         "backend": args.backend,
         "coreneuron_gpu": bool(args.coreneuron_gpu),
         "seed": int(args.seed + 1009 * shard_index),
-        "exc_event_keep_prob": float(args.exc_event_keep_prob),
-        "inh_event_keep_prob": float(args.inh_event_keep_prob),
+        "teacher_balance_label": args.teacher_balance_label,
+        "exc_gmax_scale": float(args.exc_gmax_scale),
+        "inh_gmax_scale": float(args.inh_gmax_scale),
         "python": str(args.python),
     }
 
@@ -313,7 +320,8 @@ def run_tasks(tasks: list[dict[str, Any]], parallelism: int) -> None:
             task = pending.pop(0)
             cmd = [
                 task["python"],
-                str(Path(__file__).resolve()),
+                "-m",
+                "dendrobench.generation.run_v1_parallel_generation",
                 "--worker",
                 "--worker-kind",
                 task["kind"],
@@ -335,17 +343,19 @@ def run_tasks(tasks: list[dict[str, Any]], parallelism: int) -> None:
                 task["backend"],
                 "--seed",
                 str(task["seed"]),
-                "--exc-event-keep-prob",
-                str(task["exc_event_keep_prob"]),
-                "--inh-event-keep-prob",
-                str(task["inh_event_keep_prob"]),
+                "--teacher-balance-label",
+                task["teacher_balance_label"],
+                "--exc-gmax-scale",
+                str(task["exc_gmax_scale"]),
+                "--inh-gmax-scale",
+                str(task["inh_gmax_scale"]),
             ]
             if task["intervention"]:
                 cmd += ["--worker-intervention", task["intervention"]]
             if task["coreneuron_gpu"]:
                 cmd += ["--coreneuron-gpu"]
             env = os.environ.copy()
-            env["PYTHONPATH"] = f"src:{ARTIFACTS}:{CORENEURON_PROBE}:{env.get('PYTHONPATH', '')}"
+            env["PYTHONPATH"] = f"{ROOT / 'src'}:{ARTIFACTS}:{CORENEURON_PROBE}:{env.get('PYTHONPATH', '')}"
             running.append((subprocess.Popen(cmd, cwd=ROOT, env=env), task))
         next_running = []
         for proc, task in running:
@@ -378,6 +388,10 @@ def task_is_complete(task: dict[str, Any]) -> bool:
         meta.get("kind") == task["kind"]
         and meta.get("morphology_id") == task["morphology_id"]
         and int(meta.get("samples", -1)) == int(task["samples"])
+        and meta.get("teacher_balance_label") == task["teacher_balance_label"]
+        and meta.get("input_event_policy") == "source_neuronio_sampler_unmodified"
+        and abs(float(meta.get("exc_gmax_scale", float("nan"))) - float(task["exc_gmax_scale"])) < 1e-12
+        and abs(float(meta.get("inh_gmax_scale", float("nan"))) - float(task["inh_gmax_scale"])) < 1e-12
     )
 
 
@@ -404,8 +418,6 @@ def worker_main(args: argparse.Namespace) -> int:
             setup["source_segment_lengths"],
             duration_ms=args.duration_ms,
             seed=sample_seed,
-            exc_event_keep_prob=args.exc_event_keep_prob,
-            inh_event_keep_prob=args.inh_event_keep_prob,
         )
         baseline_inputs.append(signed_inputs)
         sample_id = f"{args.worker_morphology_id}:{args.worker_kind}:{args.worker_split or args.worker_intervention}:{args.worker_shard_index:05d}:{sample_index:04d}:seed{sample_seed}"
@@ -430,8 +442,8 @@ def worker_main(args: argparse.Namespace) -> int:
         backend=args.backend,
         signed_inputs_batch=np.stack(baseline_inputs).astype(np.int8, copy=False),
         v_init_mv=-76.0,
-        exc_gmax_scale=1.0,
-        inh_gmax_scale=1.0,
+        exc_gmax_scale=args.exc_gmax_scale,
+        inh_gmax_scale=args.inh_gmax_scale,
         input_routing="normalized_by_type",
         source_route=setup["source_route"],
     )
@@ -448,8 +460,8 @@ def worker_main(args: argparse.Namespace) -> int:
             backend=args.backend,
             signed_inputs_batch=np.stack(intervention_inputs).astype(np.int8, copy=False),
             v_init_mv=-76.0,
-            exc_gmax_scale=1.0,
-            inh_gmax_scale=1.0,
+            exc_gmax_scale=args.exc_gmax_scale,
+            inh_gmax_scale=args.inh_gmax_scale,
             input_routing="normalized_by_type",
             source_route=setup["source_route"],
         )
@@ -484,6 +496,10 @@ def worker_main(args: argparse.Namespace) -> int:
         "coreneuron_gpu": bool(args.coreneuron_gpu),
         "duration_ms": int(args.duration_ms),
         "elapsed_seconds": time.perf_counter() - started,
+        "teacher_balance_label": args.teacher_balance_label,
+        "input_event_policy": "source_neuronio_sampler_unmodified",
+        "exc_gmax_scale": float(args.exc_gmax_scale),
+        "inh_gmax_scale": float(args.inh_gmax_scale),
         "morphology_id": args.worker_morphology_id,
         "morphology_path": str(args.worker_morphology_path),
         "samples": int(args.worker_samples),
@@ -541,17 +557,18 @@ def sample_signed_inputs(
     *,
     duration_ms: int,
     seed: int,
-    exc_event_keep_prob: float,
-    inh_event_keep_prob: float,
 ) -> np.ndarray:
     rng = np.random.default_rng(seed)
     inputs_exc, inputs_inh = sample_neuronio_inputs(rng, duration_ms, source_segment_types, source_segment_lengths)
-    inputs_exc = apply_event_keep(rng, inputs_exc, exc_event_keep_prob)
-    inputs_inh = apply_event_keep(rng, inputs_inh, inh_event_keep_prob)
     signed_inputs = np.zeros((duration_ms, 2 * inputs_exc.shape[0]), dtype=np.int8)
     signed_inputs[:, : inputs_exc.shape[0]] = inputs_exc.T.astype(np.int8, copy=False)
     signed_inputs[:, inputs_exc.shape[0] :] = -inputs_inh.T.astype(np.int8, copy=False)
     return signed_inputs
+
+
+def validate_positive(value: float, name: str) -> None:
+    if float(value) <= 0.0:
+        raise ValueError(f"--{name} must be positive, got {value}")
 
 
 def write_split_manifests(output_root: Path) -> None:

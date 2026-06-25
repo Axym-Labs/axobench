@@ -1,18 +1,25 @@
+import importlib.util
 import json
-import os
+from pathlib import Path
+import sys
 import zipfile
 
-from dendrobench.kaggle_download import (
-    KaggleCredentials,
-    build_dataset_url,
-    find_zip_prefix_bytes,
-    load_kaggle_credentials,
-    parse_content_range_start,
-    replace_with_retry,
-    safe_extract_zip,
-    usable_zip_exists,
-    zip_members_present,
-)
+_SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "data" / "download_kaggle.py"
+_SPEC = importlib.util.spec_from_file_location("download_kaggle_script", _SCRIPT_PATH)
+assert _SPEC is not None and _SPEC.loader is not None
+download_kaggle = importlib.util.module_from_spec(_SPEC)
+sys.modules[_SPEC.name] = download_kaggle
+_SPEC.loader.exec_module(download_kaggle)
+
+KaggleCredentials = download_kaggle.KaggleCredentials
+build_dataset_url = download_kaggle.build_dataset_url
+find_zip_prefix_bytes = download_kaggle.find_zip_prefix_bytes
+load_kaggle_credentials = download_kaggle.load_kaggle_credentials
+parse_content_range_start = download_kaggle.parse_content_range_start
+replace_with_retry = download_kaggle.replace_with_retry
+safe_extract_zip = download_kaggle.safe_extract_zip
+usable_zip_exists = download_kaggle.usable_zip_exists
+zip_members_present = download_kaggle.zip_members_present
 
 
 def test_load_kaggle_credentials_from_json(tmp_path):

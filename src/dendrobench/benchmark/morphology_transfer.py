@@ -9,8 +9,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 import numpy as np
-import torch
 
+from dendrobench.metrics import binary_auc
 from dendrobench.benchmark.swc_utils import (
     create_routing_from_branches,
     extract_branches,
@@ -122,10 +122,8 @@ class MorphologyTransferEvaluator:
             # Compute metrics
             rmse_mv = np.sqrt(np.mean((preds[:, :, 1] - targets[:, :, 1]) ** 2)) / 0.1
 
-            from sklearn.metrics import roc_auc_score
-            try:
-                auc = roc_auc_score(targets[:, :, 0].flatten(), preds[:, :, 0].flatten())
-            except ValueError:
+            auc = binary_auc(preds[:, :, 0], targets[:, :, 0])
+            if np.isnan(auc):
                 auc = 0.5  # All same class
 
             results["test_results"].append({

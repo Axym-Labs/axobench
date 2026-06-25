@@ -6,16 +6,16 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import sys
 from pathlib import Path
 import time
 
 import numpy as np
 
-ARTIFACTS = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ARTIFACTS))
-
-from run_hay_neuron_driven_probe import collect_segments, sample_neuronio_inputs, summarize_trace  # noqa: E402
+from dendrobench.generation.run_hay_neuron_driven_probe import (
+    collect_segments,
+    sample_neuronio_inputs,
+    summarize_trace,
+)
 
 
 def main() -> int:
