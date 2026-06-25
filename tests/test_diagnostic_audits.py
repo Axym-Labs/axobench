@@ -2,13 +2,13 @@ import json
 
 import pytest
 
-from dendrobench.benchmark.diagnostic_audits import (
+from axobench.benchmark.diagnostic_audits import (
     DiagnosticAuditSources,
     adapter_fairness_diagnostic_rows,
     diagnostic_audit_rows,
     diagnostic_audit_rows_from_sources,
 )
-from dendrobench.benchmark.diagnostic_rows import DiagnosticContext, validate_diagnostic_rows
+from axobench.benchmark.diagnostic_rows import DiagnosticContext, validate_diagnostic_rows
 
 
 def test_artifact_audits_emit_regular_diagnostic_rows():

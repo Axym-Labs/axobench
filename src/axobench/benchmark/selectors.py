@@ -6,8 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from dendrobench.benchmark.dataset_schema import INTERVENTION_CONDITIONS, ORDINARY_SPLITS
-from dendrobench.data import ShardedNeuronIODataset
+from axobench.benchmark.dataset_schema import INTERVENTION_CONDITIONS, ORDINARY_SPLITS
+from axobench.data import ShardedNeuronIODataset
 
 
 DatasetCategory = Literal["train", "val", "test", "private-test"]

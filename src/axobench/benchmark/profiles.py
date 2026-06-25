@@ -1,4 +1,4 @@
-"""Default NEURO-BENCH evaluation profiles.
+"""Default AxoBench evaluation profiles.
 
 Profiles describe how benchmark axes should be composed before a runner turns
 them into concrete simulator/model jobs.  They intentionally avoid hard-coding
@@ -12,12 +12,12 @@ import math
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from dendrobench.benchmark.dataset_schema import (
+from axobench.benchmark.dataset_schema import (
     DIAGNOSTIC_SUITES,
     INTERVENTION_CONDITIONS,
     V1_MORPHOLOGY_COUNT,
 )
-from dendrobench.benchmark.state_metrics import STATE_DEFINITIONS
+from axobench.benchmark.state_metrics import STATE_DEFINITIONS
 
 
 DEFAULT_DIAGNOSTIC_SUITES = (

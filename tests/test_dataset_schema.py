@@ -1,6 +1,6 @@
 import pytest
 
-from dendrobench.benchmark.dataset_schema import (
+from axobench.benchmark.dataset_schema import (
     DIAGNOSTIC_SUITES,
     INTERVENTION_CONDITIONS,
     V1_MORPHOLOGY_COUNT,

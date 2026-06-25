@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from dendrobench.setup_workflow import DatasetSpec, SetupOptions, build_setup_plan
+from axobench.setup_workflow import DatasetSpec, SetupOptions, build_setup_plan
 
 
 def test_setup_plan_uses_safe_default_without_large_downloads():

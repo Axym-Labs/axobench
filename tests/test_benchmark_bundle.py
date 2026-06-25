@@ -2,9 +2,9 @@ import json
 
 import numpy as np
 
-from dendrobench.benchmark.bundle import infer_pair_metadata, run_v1_benchmark_bundle
-from dendrobench.benchmark.diagnostic_rows import DiagnosticContext
-from dendrobench.data import write_demo_shards
+from axobench.benchmark.bundle import infer_pair_metadata, run_v1_benchmark_bundle
+from axobench.benchmark.diagnostic_rows import DiagnosticContext
+from axobench.data import write_demo_shards
 
 
 def _write_pair(path):

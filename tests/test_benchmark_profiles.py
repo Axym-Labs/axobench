@@ -1,4 +1,4 @@
-from dendrobench.benchmark.profiles import (
+from axobench.benchmark.profiles import (
     DEFAULT_STATES,
     DEFAULT_DIAGNOSTIC_SUITES,
     build_axis_plan,

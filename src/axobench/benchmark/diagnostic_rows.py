@@ -11,15 +11,15 @@ from typing import Any
 
 import numpy as np
 
-from dendrobench.benchmark.dataset_schema import (
+from axobench.benchmark.dataset_schema import (
     DIAGNOSTIC_ROW_COLUMNS,
     default_diagnostic_specs,
     provisional_v1_morphologies,
 )
-from dendrobench.benchmark.mechanistic_response import compute_mechanistic_response_metrics
-from dendrobench.benchmark.structured_intervention import compute_paired_event_intervention_metrics
-from dendrobench.benchmark.suite import BenchmarkSuite
-from dendrobench.neuronio_raw import DEFAULT_Y_TRAIN_SOMA_BIAS
+from axobench.benchmark.mechanistic_response import compute_mechanistic_response_metrics
+from axobench.benchmark.structured_intervention import compute_paired_event_intervention_metrics
+from axobench.benchmark.suite import BenchmarkSuite
+from axobench.neuronio_raw import DEFAULT_Y_TRAIN_SOMA_BIAS
 
 
 DEFAULT_MODEL_ID = "model"
@@ -52,6 +52,7 @@ def evaluate_model_diagnostic_rows(
     *,
     context: DiagnosticContext | None = None,
     trace_ids: list[str] | None = None,
+    raw_soma_mv: np.ndarray | None = None,
 ) -> list[dict[str, Any]]:
     """Evaluate a model and return tidy v1 diagnostic rows.
 
@@ -80,6 +81,7 @@ def evaluate_model_diagnostic_rows(
         run_perturbation=False,
         model_name=context.model_id,
         trace_ids=trace_ids,
+        raw_soma_mv=raw_soma_mv,
         calibrated_spike_threshold=context.calibrated_spike_threshold,
     )
     rows: list[dict[str, Any]] = []
@@ -221,6 +223,12 @@ def paired_intervention_diagnostic_rows(
         for metric in (
             "soma_delta_rmse_mv",
             "soma_delta_mae_mv",
+            "response_sera_mv",
+            "response_rmse_mv",
+            "response_sera_over_rmse",
+            "response_relevance_mean",
+            "response_relevance_support_ge_0_5",
+            "response_relevance_support_ge_0_9",
             "soma_delta_rmse_per_trace",
             "soma_delta_correlation",
             "soma_delta_gain",
@@ -386,7 +394,15 @@ def _trace_core_rows(report: dict[str, Any], context: DiagnosticContext) -> list
         "lag_tolerant_voltage_rmse_mv",
         "state_trace_shape_distance",
         "spike_train_distance",
+        "voltage_sera_mv",
+        "voltage_sera_over_rmse",
+        "voltage_relevance_mean",
+        "voltage_relevance_support_ge_0_5",
+        "voltage_relevance_support_ge_0_9",
         "spike_auc",
+        "spike_f1_area",
+        "spike_f1_t_min_steps",
+        "spike_f1_t_max_steps",
         "spike_brier",
         "spike_log_loss",
         "spike_count_mae_per_trace",
@@ -459,6 +475,26 @@ def _spike_behavior_rows(
             rows.append(_row("spike_behavior", block_context, metric, block.get(metric), unit=_unit_for_metric(metric)))
     for metric in ("spike_auc", "spike_brier", "spike_log_loss"):
         rows.append(_row("spike_behavior", context, metric, report.get(metric), unit=_unit_for_metric(metric)))
+    curve = report.get("spike_f1_curve")
+    if isinstance(curve, list):
+        for item in curve:
+            if not isinstance(item, dict):
+                continue
+            tolerance = item.get("tolerance_steps")
+            curve_context = _replace_context_condition(context, f"{context.condition}:spike_f1_curve")
+            for metric in ("precision", "recall", "f1"):
+                row = _row(
+                    "spike_behavior",
+                    curve_context,
+                    f"{metric}_at_{tolerance}steps",
+                    item.get(metric),
+                    unit=_unit_for_metric(metric),
+                )
+                row["tolerance_steps"] = tolerance
+                rows.append(row)
+    for metric in ("spike_f1_area", "spike_f1_threshold", "spike_f1_t_min_steps", "spike_f1_t_max_steps"):
+        rows.append(_row("spike_behavior", context, metric, report.get(metric), unit=_unit_for_metric(metric)))
+    rows.append(_row("spike_behavior", context, "spike_f1_threshold_kind", report.get("spike_f1_threshold_kind"), unit="label"))
     return rows
 
 
@@ -695,8 +731,12 @@ def _unit_for_metric(metric: str) -> str:
         "fraction" in metric
         or metric in {"spike_auc", "spike_brier"}
         or metric.startswith(("precision_", "recall_", "f1_"))
+        or metric.endswith("_f1_area")
+        or "relevance_mean" in metric
     ):
         return "fraction"
+    if "support_ge" in metric:
+        return "count"
     if metric.endswith("_steps"):
         return "steps"
     if "count" in metric:

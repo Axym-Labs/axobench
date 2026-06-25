@@ -1,11 +1,11 @@
 import numpy as np
 
-from dendrobench.benchmark.regime_stratified import compute_regime_stratified_metrics
-from dendrobench.benchmark.morphology_transfer import MorphologyTransferEvaluator
-from dendrobench.benchmark.state_metrics import compute_state_conditioned_metrics
-from dendrobench.benchmark.suite import BenchmarkSuite
-from dendrobench.benchmark.trace_shape import compute_trace_shape_metrics
-from dendrobench.benchmark.structured_intervention import (
+from axobench.benchmark.regime_stratified import compute_regime_stratified_metrics
+from axobench.benchmark.morphology_transfer import MorphologyTransferEvaluator
+from axobench.benchmark.state_metrics import compute_state_conditioned_metrics
+from axobench.benchmark.suite import BenchmarkSuite
+from axobench.benchmark.trace_shape import compute_trace_shape_metrics
+from axobench.benchmark.structured_intervention import (
     compute_paired_event_intervention_metrics,
     make_event_dropout_inputs,
     make_selective_event_dropout_inputs,

@@ -1,6 +1,11 @@
 import json
 
-from dendrobench.benchmark.reports import summarize_diagnostic_rows, write_diagnostic_summary
+from axobench.benchmark.reports import (
+    core_metric_comparison_rows,
+    summarize_diagnostic_rows,
+    write_core_metric_comparison_table,
+    write_diagnostic_summary,
+)
 
 
 def _rows():
@@ -59,3 +64,30 @@ def test_write_diagnostic_summary_supports_json_and_markdown(tmp_path):
 
     assert json.loads(json_path.read_text(encoding="utf-8"))["row_count"] == 2
     assert "Benchmark Diagnostic Summary" in md_path.read_text(encoding="utf-8")
+
+
+def test_core_metric_comparison_rows_compute_inflation_factors(tmp_path):
+    models = [
+        {
+            "model_id": "model-a",
+            "voltage_sera_mv": 20.0,
+            "voltage_rmse_mv": 2.0,
+            "spike_f1_area": 0.2,
+            "spike_f1_area_0_5ms": 0.4,
+            "mean_response_sera_mv": 8.0,
+        }
+    ]
+    old = {"model-a": {"clipped_rmse_mv": 0.5, "spike_auc": 0.9}}
+
+    rows = core_metric_comparison_rows(models, old)
+
+    assert rows[0]["voltage_sera_inflation"] == 40.0
+    assert rows[0]["raw_voltage_rmse_inflation"] == 4.0
+    assert rows[0]["auc_over_exact_f1"] == 4.5
+    assert rows[0]["auc_over_f1_area_0_5ms"] == 2.25
+
+    table_path = tmp_path / "core.md"
+    write_core_metric_comparison_table(models, table_path, old)
+    table = table_path.read_text(encoding="utf-8")
+    assert "20 (40.0x)" in table
+    assert "0.2 (4.5x)" in table

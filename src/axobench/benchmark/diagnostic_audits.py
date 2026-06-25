@@ -17,8 +17,8 @@ from typing import Any, Iterable
 
 import numpy as np
 
-from dendrobench.benchmark.dataset_schema import default_diagnostic_specs
-from dendrobench.benchmark.diagnostic_rows import DiagnosticContext, validate_diagnostic_rows
+from axobench.benchmark.dataset_schema import default_diagnostic_specs
+from axobench.benchmark.diagnostic_rows import DiagnosticContext, validate_diagnostic_rows
 
 
 @dataclass(frozen=True)

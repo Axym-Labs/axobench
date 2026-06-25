@@ -1,7 +1,7 @@
 import numpy as np
 import json
 
-from dendrobench.data import (
+from axobench.data import (
     DeterministicWindowDataset,
     OfficialStyleFullTraceWindowDataset,
     RandomFullTraceWindowDataset,

@@ -56,7 +56,7 @@ def apply_paper_plot_style() -> None:
             "ytick.labelsize": 6.5,
             "legend.frameon": False,
             "svg.fonttype": "none",
-            "svg.hashsalt": "dendrobench-diagnostic-plots",
+            "svg.hashsalt": "axobench-diagnostic-plots",
             "pdf.fonttype": 42,
             "ps.fonttype": 42,
         }
@@ -201,11 +201,310 @@ def group_rows_by_model(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, 
     return dict(grouped)
 
 
+def write_core_metric_set_artifacts(
+    *,
+    summary: dict[str, Any] | str | Path,
+    output_dir: str | Path,
+    formats: tuple[str, ...] = PLOT_FORMATS,
+) -> dict[str, Any]:
+    """Write plots/tables for the promoted Voltage SERA/Spike F1/Response SERA set."""
+    apply_paper_plot_style()
+    payload = _load_json(summary) if isinstance(summary, (str, Path)) else summary
+    models = list(payload.get("models", []))
+    if not models:
+        raise ValueError("core metric summary contains no models")
+    output = Path(output_dir)
+    output.mkdir(parents=True, exist_ok=True)
+    figures = [
+        _plot_core_spike_f1_curves(models, output / "fig01_spike_f1_tolerance_curve", formats),
+        _plot_core_sera_pareto(models, output / "fig02_sera_model_size_pareto", formats, x_axis="parameters"),
+        _plot_core_sera_pareto(models, output / "fig03_sera_branch_memory_sweep", formats, x_axis="branch_memory"),
+    ]
+    tables = [
+        _write_core_metric_table(models, output / "table01_core_metric_set.md"),
+        _write_core_metric_configuration_table(payload, output / "table02_core_metric_configuration.md"),
+    ]
+    manifest = {
+        "artifact_kind": "axobench_core_metric_set",
+        "figures": figures,
+        "tables": tables,
+        "formats": list(formats),
+        "source_summary": str(summary) if isinstance(summary, (str, Path)) else None,
+    }
+    (output / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return manifest
+
+
 def _format_value(value: float) -> str:
     value = float(value)
     if value != 0.0 and (abs(value) < 1e-2 or abs(value) >= 1e3):
         return f"{value:.1e}"
     return f"{value:.2f}"
+
+
+def _plot_core_spike_f1_curves(models: list[dict[str, Any]], output: Path, formats: tuple[str, ...]) -> str:
+    fig, ax = plt.subplots(figsize=(5.9, 3.05))
+    colors = [OKABE_ITO["blue"], OKABE_ITO["orange"], OKABE_ITO["green"], OKABE_ITO["purple"], OKABE_ITO["red"]]
+    for index, model in enumerate(models):
+        curve = model.get("spike_f1_curve_full") or model.get("spike_f1_curve", [])
+        if not curve:
+            continue
+        x = [int(row["tolerance_steps"]) for row in curve]
+        y = [float(row["f1"]) if row.get("f1") is not None else np.nan for row in curve]
+        ax.plot(
+            x,
+            y,
+            marker="o",
+            linewidth=1.25,
+            markersize=3.2,
+            color=colors[index % len(colors)],
+            label=str(model.get("model_id", f"model_{index}")),
+        )
+    ax.set_xlabel("Spike timing tolerance (ms)")
+    ax.set_ylabel("Discrete event F1")
+    ax.set_ylim(0.0, min(1.0, max(0.25, _max_model_value(models, "spike_f1_area") * 2.4)))
+    ax.legend(loc="best")
+    ax.grid(True, alpha=0.35)
+    fig.tight_layout()
+    _save_figure(fig, output, formats)
+    plt.close(fig)
+    return str(output.with_suffix(f".{formats[0]}"))
+
+
+def _plot_core_sera_pareto(models: list[dict[str, Any]], output: Path, formats: tuple[str, ...], *, x_axis: str = "parameters") -> str:
+    if x_axis not in {"parameters", "branch_memory"}:
+        raise ValueError("x_axis must be 'parameters' or 'branch_memory'")
+    fig, axes = plt.subplots(1, 2, figsize=(7.2, 3.05), sharex=True)
+    legend_handles: dict[str, Any] = {}
+    panels = (
+        (axes[0], "voltage_sera_mv", "Voltage SERA (mV)"),
+        (axes[1], "mean_response_sera_mv", "Response SERA (mV)"),
+    )
+    for ax, metric, label in panels:
+        points = _core_metric_points(models, metric)
+        sweep = sorted((point for point in points if point["branch_elm_size"] is not None), key=lambda p: int(p["branch_elm_size"]))
+        best = [point for point in points if point["model_id"] == "branch_elm_best"]
+        other = [point for point in points if point["branch_elm_size"] is None and point["model_id"] != "branch_elm_best"]
+        use_branch_size_axis = x_axis == "branch_memory"
+        max_branch_size = max((int(point["branch_elm_size"]) for point in sweep), default=None)
+        if sweep:
+            ax.scatter(
+                [_core_metric_plot_x(point, branch_size_axis=use_branch_size_axis) for point in sweep],
+                [point["value"] for point in sweep],
+                s=23,
+                color=OKABE_ITO["blue"],
+                alpha=0.9,
+                zorder=3,
+                label="Branch-ELM sweep",
+            )
+            _plot_log_x_smooth_fit(ax, sweep, color=OKABE_ITO["blue"], branch_size_axis=use_branch_size_axis)
+            for point in sweep:
+                size = int(point["branch_elm_size"])
+                if _label_branch_elm_size(size):
+                    ax.annotate(
+                        f"$d_m$={size}",
+                        (_core_metric_plot_x(point, branch_size_axis=use_branch_size_axis), point["value"]),
+                        textcoords="offset points",
+                        xytext=(3, 3),
+                        fontsize=5.8,
+                    )
+        for point in best:
+            best_x = float(max_branch_size) if use_branch_size_axis and max_branch_size is not None else point["params"]
+            ax.scatter(
+                best_x,
+                point["value"],
+                s=46,
+                marker="*",
+                color=OKABE_ITO["orange"],
+                edgecolor="#222222",
+                linewidth=0.35,
+                zorder=4,
+                label="Best-effort checkpoint",
+            )
+            ax.annotate("best", (best_x, point["value"]), textcoords="offset points", xytext=(3, 3), fontsize=5.8)
+        colors = [OKABE_ITO["green"], OKABE_ITO["purple"], OKABE_ITO["red"], OKABE_ITO["gray"]]
+        if not use_branch_size_axis:
+            for index, point in enumerate(other):
+                ax.scatter(point["params"], point["value"], s=26, color=colors[index % len(colors)], zorder=3)
+                ax.annotate(point["model_id"].replace("branch_elm_", ""), (point["params"], point["value"]), textcoords="offset points", xytext=(3, 3), fontsize=5.8)
+        ax.set_xscale("log")
+        ax.set_xlabel(r"Branch memory size $d_m$" if use_branch_size_axis else "Parameters")
+        ax.set_ylabel(label)
+        ax.grid(True, alpha=0.35)
+        ax.margins(x=0.07, y=0.12)
+        handles, labels = ax.get_legend_handles_labels()
+        legend_handles.update(dict(zip(labels, handles, strict=False)))
+    if legend_handles:
+        fig.legend(
+            legend_handles.values(),
+            legend_handles.keys(),
+            loc="upper center",
+            bbox_to_anchor=(0.5, 1.01),
+            ncol=min(3, len(legend_handles)),
+        )
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.90))
+    _save_figure(fig, output, formats)
+    plt.close(fig)
+    return str(output.with_suffix(f".{formats[0]}"))
+
+
+def _core_metric_points(models: list[dict[str, Any]], metric: str) -> list[dict[str, Any]]:
+    points: list[dict[str, Any]] = []
+    for index, model in enumerate(models):
+        value = model.get(metric)
+        params = model.get("n_parameters")
+        if value is None or params is None:
+            continue
+        try:
+            value_f = float(value)
+            params_f = float(params)
+        except (TypeError, ValueError):
+            continue
+        if not (np.isfinite(value_f) and np.isfinite(params_f) and params_f > 0.0):
+            continue
+        model_id = str(model.get("model_id", f"model_{index}"))
+        points.append(
+            {
+                "model_id": model_id,
+                "params": params_f,
+                "value": value_f,
+                "branch_elm_size": _branch_elm_size(model_id),
+            }
+        )
+    return points
+
+
+def _branch_elm_size(model_id: str) -> int | None:
+    prefix = "branch_elm_m"
+    if not model_id.startswith(prefix):
+        return None
+    suffix = model_id[len(prefix) :]
+    if not suffix.isdigit():
+        return None
+    return int(suffix)
+
+
+def _label_branch_elm_size(size: int) -> bool:
+    return size in {1, 5, 10, 30, 100}
+
+
+def _core_metric_plot_x(point: dict[str, Any], *, branch_size_axis: bool) -> float:
+    if branch_size_axis and point["branch_elm_size"] is not None:
+        return float(point["branch_elm_size"])
+    return float(point["params"])
+
+
+def _plot_log_x_smooth_fit(ax: plt.Axes, points: list[dict[str, Any]], *, color: str, branch_size_axis: bool) -> None:
+    if len(points) < 4:
+        return
+    xs = np.asarray([_core_metric_plot_x(point, branch_size_axis=branch_size_axis) for point in points], dtype=float)
+    ys = np.asarray([point["value"] for point in points], dtype=float)
+    order = np.argsort(xs)
+    xs = xs[order]
+    ys = ys[order]
+    log_xs = np.log10(xs)
+    if len(np.unique(log_xs)) < 4:
+        return
+    grid = np.linspace(float(log_xs.min()), float(log_xs.max()), 180)
+    fit = _local_linear_smooth(log_xs, ys, grid, fraction=0.45)
+    ax.plot(10.0**grid, fit, color=color, linewidth=1.15, alpha=0.84, label="Smooth fit")
+
+
+def _local_linear_smooth(x: np.ndarray, y: np.ndarray, grid: np.ndarray, *, fraction: float) -> np.ndarray:
+    """Evaluate a LOWESS-style local linear smooth on one-dimensional data."""
+    if x.ndim != 1 or y.ndim != 1 or grid.ndim != 1 or x.size != y.size:
+        raise ValueError("x, y, and grid must be one-dimensional, with x and y the same length")
+    if x.size < 3:
+        return np.interp(grid, x, y)
+    span_count = max(3, int(np.ceil(float(fraction) * x.size)))
+    span_count = min(span_count, x.size)
+    smoothed = []
+    for point in grid:
+        distances = np.abs(x - point)
+        bandwidth = float(np.partition(distances, span_count - 1)[span_count - 1])
+        if bandwidth <= 0.0:
+            positive = distances[distances > 0.0]
+            bandwidth = float(np.min(positive)) if positive.size else 1.0
+        scaled = np.minimum(distances / bandwidth, 1.0)
+        weights = (1.0 - scaled**3) ** 3
+        if float(np.sum(weights)) <= 0.0:
+            smoothed.append(float(np.interp(point, x, y)))
+            continue
+        design = np.column_stack([np.ones_like(x), x - point])
+        weighted_design = design * weights[:, None]
+        weighted_y = y * weights
+        coefficients = np.linalg.lstsq(weighted_design, weighted_y, rcond=None)[0]
+        smoothed.append(float(coefficients[0]))
+    return np.asarray(smoothed, dtype=float)
+
+
+def _write_core_metric_table(models: list[dict[str, Any]], output: Path) -> str:
+    headers = (
+        "model",
+        "params",
+        "voltage SERA mV",
+        "voltage RMSE mV",
+        "spike F1 area",
+        "F1 area 0-5 ms",
+        "F1 t_max ms",
+        "mean response SERA mV",
+        "mean response RMSE mV",
+    )
+    rows = []
+    for model in models:
+        rows.append(
+            (
+                model.get("model_id"),
+                model.get("n_parameters"),
+                _fmt_table(model.get("voltage_sera_mv")),
+                _fmt_table(model.get("voltage_rmse_mv")),
+                _fmt_table(model.get("spike_f1_area")),
+                _fmt_table(model.get("spike_f1_area_0_5ms")),
+                model.get("spike_f1_t_max_steps"),
+                _fmt_table(model.get("mean_response_sera_mv")),
+                _fmt_table(model.get("mean_response_rmse_mv")),
+            )
+        )
+    _write_markdown_table(output, headers, rows)
+    return str(output)
+
+
+def _write_core_metric_configuration_table(payload: dict[str, Any], output: Path) -> str:
+    metadata = payload.get("metadata", {})
+    rows = [
+        ("evaluation split", metadata.get("evaluation_split")),
+        ("calibration split", metadata.get("calibration_split")),
+        ("ignore start", metadata.get("ignore_start")),
+        ("spike tolerance interval", metadata.get("spike_tolerance_interval")),
+        ("voltage target view", metadata.get("voltage_target_view")),
+        ("response target view", metadata.get("response_target_view")),
+        ("non-saturation criterion", metadata.get("non_saturation_criterion")),
+    ]
+    _write_markdown_table(output, ("setting", "value"), rows)
+    return str(output)
+
+
+def _save_figure(fig: plt.Figure, output: Path, formats: tuple[str, ...]) -> None:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    for suffix in formats:
+        fig.savefig(output.with_suffix(f".{suffix}"), dpi=240)
+
+
+def _max_model_value(models: list[dict[str, Any]], field: str) -> float:
+    values = [float(model[field]) for model in models if isinstance(model.get(field), (int, float)) and np.isfinite(model[field])]
+    return max(values) if values else 1.0
+
+
+def _fmt_table(value: Any) -> str:
+    if value is None:
+        return "NA"
+    try:
+        x = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if not np.isfinite(x):
+        return "NA"
+    return f"{x:.4g}"
 
 
 def write_analysis_audit_artifacts(
@@ -286,7 +585,7 @@ def write_analysis_audit_artifacts(
     if intervention_evidence:
         tables.append(_write_neuronio_intervention_table(neuronio_rows, output / "table06_neuronio_matched_interventions.md"))
     manifest = {
-        "artifact_kind": "dendrobench_analysis_audit_plots",
+        "artifact_kind": "axobench_analysis_audit_plots",
         "plotting_requirement": "matplotlib",
         "formats": list(formats),
         "figures": figures,

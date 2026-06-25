@@ -1,6 +1,6 @@
 """Dataset-generation backends and packaged simulator resources."""
 
-from dendrobench.generation.arbor_sim import (
+from axobench.generation.arbor_sim import (
     ArborHeteroConfig,
     parse_split_samples,
     write_arbor_hetero_dataset,

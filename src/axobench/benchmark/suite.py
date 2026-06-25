@@ -1,7 +1,7 @@
-"""NEURO-BENCH Suite: Combines all metric suites.
+"""AxoBench suite: combine all metric suites.
 
 Usage:
-    from dendrobench.benchmark import BenchmarkSuite
+    from axobench.benchmark import BenchmarkSuite
 
     suite = BenchmarkSuite()
     results = suite.evaluate_model(
@@ -20,12 +20,13 @@ from typing import Any, Callable
 
 import numpy as np
 
-from dendrobench.benchmark.regime_stratified import compute_regime_stratified_metrics
-from dendrobench.benchmark.state_metrics import compute_state_conditioned_metrics
-from dendrobench.benchmark.perturbation_stability import compute_perturbation_stability
-from dendrobench.benchmark.structured_intervention import compute_paired_event_intervention_metrics
-from dendrobench.benchmark.trace_shape import compute_trace_shape_metrics
-from dendrobench.neuronio_raw import DEFAULT_Y_TRAIN_SOMA_BIAS
+from axobench.benchmark.regime_stratified import compute_regime_stratified_metrics
+from axobench.benchmark.state_metrics import compute_state_conditioned_metrics
+from axobench.benchmark.perturbation_stability import compute_perturbation_stability
+from axobench.benchmark.structured_intervention import compute_paired_event_intervention_metrics
+from axobench.benchmark.trace_shape import compute_trace_shape_metrics
+from axobench.metrics import compute_core_metric_set
+from axobench.neuronio_raw import DEFAULT_Y_TRAIN_SOMA_BIAS
 
 
 class BenchmarkSuite:
@@ -48,6 +49,7 @@ class BenchmarkSuite:
         model_config: dict[str, Any] | None = None,
         dataset_path: str | None = None,
         trace_ids: list[str] | None = None,
+        raw_soma_mv: np.ndarray | None = None,
         m4_paired_intervention: dict[str, Any] | None = None,
         calibrated_spike_threshold: float | None = None,
     ) -> dict[str, Any]:
@@ -77,8 +79,10 @@ class BenchmarkSuite:
             predictions,
             targets,
             soma_scale,
+            soma_bias_mv,
             ignore_start,
             trace_ids,
+            raw_soma_mv=raw_soma_mv,
             calibrated_spike_threshold=calibrated_spike_threshold,
         )
         m1b = _compute_m1b_feature_fidelity(
@@ -180,6 +184,7 @@ class BenchmarkSuite:
                 "semantics": "drop the first ignore_start timesteps from every trace before metrics",
             },
             "calibrated_spike_threshold": calibrated_spike_threshold,
+            "raw_soma_mv_supplied": raw_soma_mv is not None,
         }
 
         limitations = [
@@ -261,6 +266,8 @@ class BenchmarkSuite:
                 "state_trace_shape_distance": m1.get("state_trace_shape_distance"),
                 "spike_train_distance": m1.get("spike_train_distance"),
                 "spike_auc": m1.get("spike_auc"),
+                "voltage_sera_mv": m1.get("voltage_sera_mv"),
+                "spike_f1_area": m1.get("spike_f1_area"),
                 "spike_brier": m1.get("spike_brier"),
                 "spike_count_mae_per_trace": m1.get("spike_count_mae_per_trace"),
                 "calibrated_spike_count_mae_per_trace": (
@@ -421,9 +428,11 @@ def _compute_m1_trace_fidelity(
     predictions: np.ndarray,
     targets: np.ndarray,
     soma_scale: float,
+    soma_bias_mv: float,
     ignore_start: int,
     trace_ids: list[str],
     *,
+    raw_soma_mv: np.ndarray | None = None,
     calibrated_spike_threshold: float | None = None,
 ) -> dict[str, Any]:
     pred = _apply_time_mask(np.asarray(predictions), ignore_start)
@@ -441,7 +450,7 @@ def _compute_m1_trace_fidelity(
     spike_labels = tgt[..., 0]
     spike_probs = _sigmoid(spike_scores)
 
-    from dendrobench.metrics import binary_auc
+    from axobench.metrics import binary_auc
 
     clipped = np.clip(spike_probs, 1e-7, 1.0 - 1e-7)
     target_binary = spike_labels > 0.5
@@ -453,6 +462,26 @@ def _compute_m1_trace_fidelity(
     target_counts = target_binary.sum(axis=1)
     calibrated_binary = spike_scores >= calibrated_spike_threshold if calibrated_spike_threshold is not None else None
     calibrated_counts = calibrated_binary.sum(axis=1) if calibrated_binary is not None else None
+    raw_masked = None
+    if raw_soma_mv is not None:
+        raw_masked = np.asarray(raw_soma_mv, dtype=np.float64)
+        if raw_masked.ndim == 1:
+            raw_masked = raw_masked[None, :]
+        elif raw_masked.ndim != 2:
+            leading = int(np.prod(raw_masked.shape[:-1]))
+            raw_masked = raw_masked.reshape(leading, raw_masked.shape[-1])
+        raw_masked = raw_masked[:, ignore_start:] if ignore_start > 0 else raw_masked
+        if raw_masked.shape != pred.shape[:2]:
+            raise ValueError(f"raw_soma_mv shape after mask must match traces/time, got {raw_masked.shape} and {pred.shape[:2]}")
+    core_metrics = compute_core_metric_set(
+        pred,
+        tgt,
+        raw_soma_mv=raw_masked,
+        soma_scale=soma_scale,
+        soma_bias_mv=soma_bias_mv,
+        spike_threshold=calibrated_spike_threshold,
+        spike_threshold_policy="prevalence",
+    )
     per_trace = _m1_per_trace_rows(
         residual_mv,
         target_binary,
@@ -469,6 +498,17 @@ def _compute_m1_trace_fidelity(
         "spike_auc": float(binary_auc(spike_scores, spike_labels)),
         "spike_brier": float(np.mean((spike_probs - spike_labels) ** 2)),
         "spike_log_loss": float(-np.mean(spike_labels * np.log(clipped) + (1.0 - spike_labels) * np.log(1.0 - clipped))),
+        "voltage_sera_mv": core_metrics["voltage_sera_mv"],
+        "voltage_sera_over_rmse": core_metrics["voltage"]["voltage_sera_over_rmse"],
+        "voltage_relevance_mean": core_metrics["voltage"]["relevance_mean"],
+        "voltage_relevance_support_ge_0_5": core_metrics["voltage"]["relevance_support_ge_0_5"],
+        "voltage_relevance_support_ge_0_9": core_metrics["voltage"]["relevance_support_ge_0_9"],
+        "spike_f1_area": core_metrics["spike_f1_area"],
+        "spike_f1_t_min_steps": core_metrics["spike"]["t_min_steps"],
+        "spike_f1_t_max_steps": core_metrics["spike"]["t_max_steps"],
+        "spike_f1_threshold": core_metrics["spike_threshold"],
+        "spike_f1_threshold_kind": core_metrics["spike_threshold_kind"],
+        "spike_f1_curve": core_metrics["spike"]["rows"],
         "spike_target_count": int(target_binary.sum()),
         "spike_predicted_count": int(spike_binary.sum()),
         "spike_count_mae_per_trace": float(np.mean(np.abs(pred_counts - target_counts))),

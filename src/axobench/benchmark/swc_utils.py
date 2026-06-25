@@ -236,7 +236,7 @@ def create_routing_from_branches(
 
 if __name__ == "__main__":
     # Test with downloaded L2/3 morphology
-    swc_path = "/home/davwis/main/workspace/dendrobench/data/morphologies/specimen_327962063.swc"
+    swc_path = "/home/davwis/main/workspace/axobench/data/morphologies/specimen_327962063.swc"
     swc_data = load_swc(swc_path)
     print(f"Loaded {len(swc_data)} nodes")
     

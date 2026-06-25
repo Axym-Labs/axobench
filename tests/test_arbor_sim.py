@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from dendrobench.generation.arbor_sim import (
+from axobench.generation.arbor_sim import (
     ArborHeteroConfig,
     _interlocking_branch_routing,
     _label_spikes,

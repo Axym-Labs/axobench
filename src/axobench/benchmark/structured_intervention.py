@@ -11,6 +11,8 @@ from typing import Any, Callable
 
 import numpy as np
 
+from axobench.metrics import response_sera
+
 
 def make_event_dropout_inputs(
     inputs: np.ndarray,
@@ -327,6 +329,14 @@ def _model_delta_summary(
         - (baseline_pred[..., 0] >= model_spike_threshold).sum(axis=1)
     )
     soma_delta_error = model_soma_delta - teacher_soma_delta
+    response_metrics = response_sera(
+        baseline_pred,
+        intervention_pred,
+        baseline_targets,
+        intervention_targets,
+        soma_scale=soma_scale,
+        ignore_start=0,
+    )
     per_trace_soma_rmse = np.sqrt(np.mean(soma_delta_error ** 2, axis=1))
     per_trace_spike_abs_error = np.abs(model_spike_delta - teacher_spike_delta)
     teacher_soma_mean = float(np.mean(teacher_soma_delta))
@@ -336,6 +346,12 @@ def _model_delta_summary(
     return {
         "soma_delta_rmse_mv": float(np.sqrt(np.mean(soma_delta_error ** 2))),
         "soma_delta_mae_mv": float(np.mean(np.abs(soma_delta_error))),
+        "response_sera_mv": response_metrics["response_sera_mv"],
+        "response_rmse_mv": response_metrics["response_rmse_mv"],
+        "response_sera_over_rmse": response_metrics["response_sera_over_rmse"],
+        "response_relevance_mean": response_metrics["relevance_mean"],
+        "response_relevance_support_ge_0_5": response_metrics["relevance_support_ge_0_5"],
+        "response_relevance_support_ge_0_9": response_metrics["relevance_support_ge_0_9"],
         "soma_delta_rmse_per_trace": _mean_interval(per_trace_soma_rmse),
         "soma_delta_correlation": _safe_corr(model_soma_delta.reshape(-1), teacher_soma_delta.reshape(-1)),
         "soma_delta_gain": _safe_gain(model_soma_mean, teacher_soma_mean),

@@ -11,7 +11,7 @@ import time
 
 import numpy as np
 
-from dendrobench.generation.run_hay_neuron_driven_probe import (
+from axobench.generation.run_hay_neuron_driven_probe import (
     collect_segments,
     sample_neuronio_inputs,
     summarize_trace,

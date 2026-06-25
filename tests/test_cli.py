@@ -3,7 +3,7 @@ import json
 
 import numpy as np
 
-from dendrobench.cli import main
+from axobench.cli import main
 
 
 def test_cli_smoke_writes_demo_data(tmp_path):

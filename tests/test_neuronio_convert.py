@@ -2,8 +2,8 @@ import pickle
 
 import numpy as np
 
-from dendrobench.data import ShardedNeuronIODataset
-from dendrobench.neuronio_raw import convert_neuronio_pickles, parse_neuronio_pickle
+from axobench.data import ShardedNeuronIODataset
+from axobench.neuronio_raw import convert_neuronio_pickles, parse_neuronio_pickle
 
 
 def test_parse_neuronio_pickle_matches_upstream_shapes(tmp_path):

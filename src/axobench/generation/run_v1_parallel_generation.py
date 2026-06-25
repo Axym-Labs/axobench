@@ -23,24 +23,24 @@ from neuron import h as _early_h  # noqa: F401
 
 
 ROOT = Path(__file__).resolve().parents[3]
-ARTIFACTS = Path(os.environ.get("DENDROBENCH_GENERATION_ARTIFACTS", ROOT / "artifacts" / "generation")).resolve()
+ARTIFACTS = Path(os.environ.get("AXOBENCH_GENERATION_ARTIFACTS", ROOT / "artifacts" / "generation")).resolve()
 CORENEURON_PROBE = ARTIFACTS / "coreneuron_hay_port_probe_20260605"
-SWC_MECH_ROOT = Path(os.environ.get("DENDROBENCH_SWC_MECH_ROOT", ARTIFACTS / "hay_swc_template")).resolve()
+SWC_MECH_ROOT = Path(os.environ.get("AXOBENCH_SWC_MECH_ROOT", ARTIFACTS / "hay_swc_template")).resolve()
 SOURCE_ROOT = Path(
     os.environ.get(
-        "DENDROBENCH_SOURCE_ROOT",
+        "AXOBENCH_SOURCE_ROOT",
         ARTIFACTS / "source_models" / "neuron_as_deep_net" / "L5PC_NEURON_simulation",
     )
 ).resolve()
-TEMPLATE_HOC = Path(os.environ.get("DENDROBENCH_SWC_TEMPLATE_HOC", SWC_MECH_ROOT / "L5PCtemplate_swc.hoc")).resolve()
+TEMPLATE_HOC = Path(os.environ.get("AXOBENCH_SWC_TEMPLATE_HOC", SWC_MECH_ROOT / "L5PCtemplate_swc.hoc")).resolve()
 DEFAULT_PYTHON = Path(".venv/bin/python")
 
-from dendrobench.benchmark import make_structured_intervention_inputs
-from dendrobench.benchmark.dataset_schema import INTERVENTION_CONDITIONS, build_v1_dataset_manifest_template, provisional_v1_morphologies
-from dendrobench.generation.generate_hay_neuron_dataset import SOMA_BIAS_MV, SOMA_CLIP_THRESHOLD_MV, SOMA_SCALE, local_peak_spike_labels
-from dendrobench.generation.run_coreneuron_event_dropout_pair import _build_source_site_route, _summarize_input_routing, simulate_signed_trace_batch
-from dendrobench.generation.run_coreneuron_hay_probe import load_probe_mechanisms
-from dendrobench.generation.run_hay_neuron_driven_probe import collect_segments, sample_neuronio_inputs
+from axobench.benchmark import make_structured_intervention_inputs
+from axobench.benchmark.dataset_schema import INTERVENTION_CONDITIONS, build_v1_dataset_manifest_template, provisional_v1_morphologies
+from axobench.generation.generate_hay_neuron_dataset import SOMA_BIAS_MV, SOMA_CLIP_THRESHOLD_MV, SOMA_SCALE, local_peak_spike_labels
+from axobench.generation.run_coreneuron_event_dropout_pair import _build_source_site_route, _summarize_input_routing, simulate_signed_trace_batch
+from axobench.generation.run_coreneuron_hay_probe import load_probe_mechanisms
+from axobench.generation.run_hay_neuron_driven_probe import collect_segments, sample_neuronio_inputs
 
 
 def main() -> int:
@@ -73,8 +73,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=20260606)
     parser.add_argument(
         "--teacher-balance-label",
-        default="dendrobench_ei_balanced",
-        help="Human-readable label for the DendroBench teacher calibration stored in metadata.",
+        default="axobench_ei_balanced",
+        help="Human-readable label for the AxoBench teacher calibration stored in metadata.",
     )
     parser.add_argument("--exc-gmax-scale", type=float, default=0.925)
     parser.add_argument("--inh-gmax-scale", type=float, default=1.0)
@@ -321,7 +321,7 @@ def run_tasks(tasks: list[dict[str, Any]], parallelism: int) -> None:
             cmd = [
                 task["python"],
                 "-m",
-                "dendrobench.generation.run_v1_parallel_generation",
+                "axobench.generation.run_v1_parallel_generation",
                 "--worker",
                 "--worker-kind",
                 task["kind"],
@@ -517,9 +517,9 @@ def prepare_neuron(backend: str, coreneuron_gpu: bool) -> dict[str, Any]:
         coreneuron.enable = True
         coreneuron.gpu = bool(coreneuron_gpu)
         if coreneuron_gpu:
-            coreneuron.cell_permute = int(os.environ.get("DENDROBENCH_CORENEURON_CELL_PERMUTE", "1"))
-        if os.environ.get("DENDROBENCH_CORENEURON_NUM_GPUS"):
-            coreneuron.num_gpus = int(os.environ["DENDROBENCH_CORENEURON_NUM_GPUS"])
+            coreneuron.cell_permute = int(os.environ.get("AXOBENCH_CORENEURON_CELL_PERMUTE", "1"))
+        if os.environ.get("AXOBENCH_CORENEURON_NUM_GPUS"):
+            coreneuron.num_gpus = int(os.environ["AXOBENCH_CORENEURON_NUM_GPUS"])
         coreneuron.verbose = 0
     else:
         coreneuron.enable = False

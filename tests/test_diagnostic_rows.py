@@ -1,7 +1,7 @@
 import numpy as np
 import json
 
-from dendrobench.benchmark.diagnostic_rows import (
+from axobench.benchmark.diagnostic_rows import (
     DiagnosticContext,
     evaluate_model_diagnostic_rows,
     mechanistic_response_diagnostic_rows,
@@ -40,6 +40,8 @@ def test_model_diagnostics_emit_dataframe_rows_for_overlapping_suites():
     assert {row["diagnostic"] for row in rows}.issuperset({"trace_core", "state_dynamics", "spike_behavior"})
     assert any(row["suite"] == "trace-core|paper-summary" for row in rows if row["diagnostic"] == "trace_core")
     assert any(row["trace_id"] == "trace-a" and row["metric"] == "soma_rmse_mv" for row in rows)
+    assert any(row["diagnostic"] == "trace_core" and row["metric"] == "voltage_sera_mv" for row in rows)
+    assert any(row["diagnostic"] == "spike_behavior" and row["metric"] == "spike_f1_area" for row in rows)
     assert any(row["state"] == "spiking" for row in rows if row["diagnostic"] == "state_dynamics")
     assert any(
         row["diagnostic"] == "spike_behavior"
@@ -158,6 +160,7 @@ def test_paired_intervention_rows_include_teacher_and_model_delta_metrics():
     assert metrics["delta_soma_mean_mv"] < 0
     assert metrics["response_detected"] == 1.0
     assert metrics["soma_delta_rmse_mv"] == 0.0
+    assert metrics["response_sera_mv"] == 0.0
     assert metrics["soma_delta_gain"] == 1.0
     assert metrics["spike_count_delta_teacher_mean"] == -1.0
     assert metrics["spike_count_delta_model_mean"] == -1.0

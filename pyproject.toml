@@ -3,9 +3,10 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "dendrobench"
+name = "axobench"
 version = "0.1.0"
 description = "Single-neuron surrogate benchmark and dataset generation workbench."
+readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
   "matplotlib>=3.8",
@@ -23,13 +24,13 @@ sim = [
 plots = []
 
 [project.scripts]
-dendrobench = "dendrobench.cli:main"
+axobench = "axobench.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-"dendrobench.generation" = ["assets/*.swc", "assets/*.json", "mechanisms/*.mod"]
+"axobench.generation" = ["assets/*.swc", "assets/*.json", "mechanisms/*.mod"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

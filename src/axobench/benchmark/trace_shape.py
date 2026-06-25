@@ -12,7 +12,7 @@ from typing import Any
 
 import numpy as np
 
-from dendrobench.benchmark.state_metrics import build_neuron_state_masks
+from axobench.benchmark.state_metrics import build_neuron_state_masks
 
 
 def compute_trace_shape_metrics(

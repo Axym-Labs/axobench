@@ -12,7 +12,7 @@ from typing import Any
 
 import numpy as np
 
-from dendrobench.generation.generate_hay_neuron_dataset import (
+from axobench.generation.generate_hay_neuron_dataset import (
     SOMA_BIAS_MV,
     SOMA_CLIP_THRESHOLD_MV,
     SOMA_SCALE,
@@ -21,8 +21,8 @@ from dendrobench.generation.generate_hay_neuron_dataset import (
     local_peak_spike_labels,
     summarize_written_trace,
 )
-from dendrobench.generation.run_coreneuron_hay_probe import attach_deterministic_synapses, load_probe_mechanisms
-from dendrobench.generation.run_hay_neuron_driven_probe import collect_segments, sample_neuronio_inputs
+from axobench.generation.run_coreneuron_hay_probe import attach_deterministic_synapses, load_probe_mechanisms
+from axobench.generation.run_hay_neuron_driven_probe import collect_segments, sample_neuronio_inputs
 
 
 def main() -> int:
@@ -39,8 +39,8 @@ def main() -> int:
     parser.add_argument("--v-init-mv", type=float, default=-76.0)
     parser.add_argument(
         "--teacher-balance-label",
-        default="dendrobench_ei_balanced",
-        help="Human-readable label for the DendroBench E/I calibration stored in metadata.",
+        default="axobench_ei_balanced",
+        help="Human-readable label for the AxoBench E/I calibration stored in metadata.",
     )
     parser.add_argument("--exc-gmax-scale", type=float, default=0.925)
     parser.add_argument("--inh-gmax-scale", type=float, default=1.0)

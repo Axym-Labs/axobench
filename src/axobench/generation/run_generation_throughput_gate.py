@@ -15,15 +15,15 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[3]
-ARTIFACTS = Path(os.environ.get("DENDROBENCH_GENERATION_ARTIFACTS", ROOT / "artifacts" / "generation")).resolve()
+ARTIFACTS = Path(os.environ.get("AXOBENCH_GENERATION_ARTIFACTS", ROOT / "artifacts" / "generation")).resolve()
 CPU_MECH_ROOT = ARTIFACTS / "coreneuron_hay_port_probe_20260605"
 GPU_MECH_ROOT = ARTIFACTS / "coreneuron_hay_gpu_probe_9_durable_20260606"
 SOURCE_ROOT = ARTIFACTS / "source_models" / "neuron_as_deep_net" / "L5PC_NEURON_simulation"
-DEFAULT_PYTHON = Path(os.environ.get("DENDROBENCH_PYTHON", "/home/davwis/miniconda3/envs/bnn_sim/bin/python"))
+DEFAULT_PYTHON = Path(os.environ.get("AXOBENCH_PYTHON", "/home/davwis/miniconda3/envs/bnn_sim/bin/python"))
 GPU_RUNTIME = Path("/home/davwis/.local/neuron-9.0.1-gpu-runtime")
 NVHPC = Path("/home/davwis/.local/nvidia/Linux_x86_64/26.3")
 BUILD_TOOLS = Path("/home/davwis/.local/neuron-build-tools")
-DENDROBENCH_ENV = Path(os.environ.get("DENDROBENCH_ENV", "/home/davwis/miniconda3/envs/bnn_sim"))
+AXOBENCH_ENV = Path(os.environ.get("AXOBENCH_ENV", "/home/davwis/miniconda3/envs/bnn_sim"))
 REPORT_PATH = ARTIFACTS / "generation_throughput_gate_20260606.md"
 JSON_PATH = ARTIFACTS / "generation_throughput_gate_20260606.json"
 
@@ -179,7 +179,7 @@ def run_or_load_generator(
         cmd = [
             str(python),
             "-m",
-            "dendrobench.generation.generate_coreneuron_hay_dataset",
+            "axobench.generation.generate_coreneuron_hay_dataset",
             "--source-root",
             str(SOURCE_ROOT),
             "--mechanism-root",
@@ -242,7 +242,7 @@ def run_or_load_parallel(
             cmd = [
                 str(python),
                 "-m",
-                "dendrobench.generation.generate_coreneuron_hay_dataset",
+                "axobench.generation.generate_coreneuron_hay_dataset",
                 "--source-root",
                 str(SOURCE_ROOT),
                 "--mechanism-root",
@@ -408,7 +408,7 @@ def gpu_runtime_env() -> dict[str, str]:
     path = f"{GPU_RUNTIME / 'bin'}:{BUILD_TOOLS / 'bin'}:{NVHPC / 'compilers/bin'}:{NVHPC / 'cuda/bin'}:{os.environ.get('PATH', '')}"
     pythonpath = f"{GPU_RUNTIME / 'lib/python'}:{ARTIFACTS}:{os.environ.get('PYTHONPATH', '')}"
     ld_library_path = (
-        f"{GPU_MECH_ROOT / 'x86_64'}:{GPU_RUNTIME / 'lib'}:{BUILD_TOOLS / 'lib'}:{DENDROBENCH_ENV / 'lib'}:"
+        f"{GPU_MECH_ROOT / 'x86_64'}:{GPU_RUNTIME / 'lib'}:{BUILD_TOOLS / 'lib'}:{AXOBENCH_ENV / 'lib'}:"
         f"{NVHPC / 'compilers/lib'}:{NVHPC / 'cuda/lib64'}:{os.environ.get('LD_LIBRARY_PATH', '')}"
     )
     return {

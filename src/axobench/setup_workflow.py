@@ -105,7 +105,7 @@ def build_setup_plan(options: SetupOptions) -> SetupPlan:
                 (
                     options.python_executable,
                     "-m",
-                    "dendrobench.cli",
+                    "axobench.cli",
                     "convert-neuronio",
                     "--input",
                     str(raw_dir),
@@ -120,7 +120,7 @@ def build_setup_plan(options: SetupOptions) -> SetupPlan:
     next_steps = (
         "Place kaggle.json under ~/.kaggle/ or set KAGGLE_USERNAME and KAGGLE_KEY before using --download-data.",
         "Convert downloaded raw files with --convert-raw if you did not convert during setup.",
-        "Run teacher/data diagnostics with: python -m dendrobench.cli benchmark-rows --mode teacher-qc --dataset-root <v1-dataset> --output runs/teacher_qc.jsonl",
+        "Run teacher/data diagnostics with: python -m axobench.cli benchmark-rows --mode teacher-qc --dataset-root <v1-dataset> --output runs/teacher_qc.jsonl",
     )
     return SetupPlan(steps=tuple(steps), next_steps=next_steps)
 

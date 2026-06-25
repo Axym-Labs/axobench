@@ -18,25 +18,25 @@ from neuron import coreneuron as _early_coreneuron  # noqa: F401
 from neuron import h as _early_h  # noqa: F401
 
 ROOT = Path(__file__).resolve().parents[3]
-ARTIFACTS = Path(os.environ.get("DENDROBENCH_GENERATION_ARTIFACTS", ROOT / "artifacts" / "generation")).resolve()
+ARTIFACTS = Path(os.environ.get("AXOBENCH_GENERATION_ARTIFACTS", ROOT / "artifacts" / "generation")).resolve()
 CORENEURON_PROBE = ARTIFACTS / "coreneuron_hay_port_probe_20260605"
 DEFAULT_SOURCE_ROOT = Path(
     os.environ.get(
-        "DENDROBENCH_SOURCE_ROOT",
+        "AXOBENCH_SOURCE_ROOT",
         ARTIFACTS / "source_models" / "neuron_as_deep_net" / "L5PC_NEURON_simulation",
     )
 ).resolve()
 
-from dendrobench.benchmark import compute_paired_event_intervention_metrics, make_structured_intervention_inputs
-from dendrobench.data import ShardedNeuronIODataset
-from dendrobench.generation.generate_hay_neuron_dataset import (
+from axobench.benchmark import compute_paired_event_intervention_metrics, make_structured_intervention_inputs
+from axobench.data import ShardedNeuronIODataset
+from axobench.generation.generate_hay_neuron_dataset import (
     SOMA_BIAS_MV,
     SOMA_CLIP_THRESHOLD_MV,
     SOMA_SCALE,
     local_peak_spike_labels,
 )
-from dendrobench.generation.run_coreneuron_hay_probe import attach_deterministic_synapses, load_probe_mechanisms
-from dendrobench.generation.run_hay_neuron_driven_probe import collect_segments
+from axobench.generation.run_coreneuron_hay_probe import attach_deterministic_synapses, load_probe_mechanisms
+from axobench.generation.run_hay_neuron_driven_probe import collect_segments
 
 
 def main() -> int:

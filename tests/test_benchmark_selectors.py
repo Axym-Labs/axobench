@@ -1,7 +1,7 @@
 import pytest
 
-from dendrobench.benchmark.selectors import V1DatasetLayout
-from dendrobench.data import write_demo_shards
+from axobench.benchmark.selectors import V1DatasetLayout
+from axobench.data import write_demo_shards
 
 
 def test_v1_dataset_layout_resolves_default_validation_selector(tmp_path):

@@ -8,14 +8,14 @@ from typing import Any
 
 import numpy as np
 
-from dendrobench.benchmark.diagnostic_rows import (
+from axobench.benchmark.diagnostic_rows import (
     DiagnosticContext,
     evaluate_model_diagnostic_rows,
     paired_intervention_diagnostic_rows,
     teacher_qc_diagnostic_rows,
     write_diagnostic_rows,
 )
-from dendrobench.benchmark.selectors import DatasetSelector
+from axobench.benchmark.selectors import DatasetSelector
 
 
 def load_selector_batch(
@@ -71,9 +71,23 @@ def run_model_diagnostics_on_selector(
     cache_shards: int = 1,
 ) -> list[dict[str, Any]]:
     """Run model diagnostics on a selected v1 dataset category."""
-    inputs, targets, trace_ids = load_selector_batch(selector, max_samples=max_samples, cache_shards=cache_shards)
+    dataset = selector.load(cache_shards=cache_shards)
+    n = len(dataset) if max_samples is None else min(int(max_samples), len(dataset))
+    if n <= 0:
+        raise ValueError("selector contains no samples")
+    indices = _leading_indices(n)
+    inputs, targets = dataset.get_batch(indices)
+    trace_ids = dataset.get_sample_ids(indices)
+    raw_soma_mv = dataset.get_optional_array_batch("soma_mv", indices)
     context = _context_for_selector(selector, context)
-    rows = evaluate_model_diagnostic_rows(model_fn, inputs, targets, context=context, trace_ids=trace_ids)
+    rows = evaluate_model_diagnostic_rows(
+        model_fn,
+        inputs,
+        targets,
+        context=context,
+        trace_ids=trace_ids,
+        raw_soma_mv=raw_soma_mv,
+    )
     if output is not None:
         write_diagnostic_rows(rows, output)
     return rows

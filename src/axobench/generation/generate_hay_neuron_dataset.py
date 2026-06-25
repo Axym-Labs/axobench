@@ -12,7 +12,7 @@ from typing import Any
 
 import numpy as np
 
-from dendrobench.generation.run_hay_neuron_driven_probe import (
+from axobench.generation.run_hay_neuron_driven_probe import (
     attach_synapses,
     collect_segments,
     load_mechanisms,

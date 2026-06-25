@@ -235,7 +235,7 @@ def provisional_v1_morphologies() -> tuple[MorphologySpec, ...]:
         MorphologySpec(
             specimen_id=488_683_425,
             role="reference_control",
-            swc_path="src/dendrobench/generation/assets/allen_l5_template.swc",
+            swc_path="src/axobench/generation/assets/allen_l5_template.swc",
             line_name="Rbp4-Cre_KL100",
             reconstruction_type="dendrite-only",
             compatibility_score_lower_better=0.0,
@@ -359,8 +359,14 @@ def default_diagnostic_specs() -> tuple[DiagnosticSpec, ...]:
                     consumes=("trace_core",),
                     description="Per-morphology trace, spike, count, and timing metric view.",
                 ),
+                PlotterSpec(
+                    name="voltage_sera_pareto",
+                    kind="atomic",
+                    consumes=("trace_core",),
+                    description="Model-size versus Voltage SERA view for raw/relevance-weighted voltage fidelity.",
+                ),
             ),
-            description="Trace fidelity, spike discrimination, count, and timing basics.",
+            description="Trace fidelity, Voltage SERA, spike discrimination, count, and timing basics.",
         ),
         DiagnosticSpec(
             name="state_dynamics",
@@ -387,8 +393,14 @@ def default_diagnostic_specs() -> tuple[DiagnosticSpec, ...]:
                     consumes=("spike_behavior",),
                     description="Spike calibration and threshold sensitivity view.",
                 ),
+                PlotterSpec(
+                    name="spike_f1_tolerance_curve",
+                    kind="atomic",
+                    consumes=("spike_behavior",),
+                    description="Discrete spike-event F1 across the promoted timing-tolerance interval.",
+                ),
             ),
-            description="Spike calibration, count, timing, and threshold behavior.",
+            description="Spike calibration, count, event-F1 timing, and threshold behavior.",
         ),
         DiagnosticSpec(
             name="feature_fidelity",
@@ -484,6 +496,12 @@ def default_diagnostic_specs() -> tuple[DiagnosticSpec, ...]:
                     kind="atomic",
                     consumes=("intervention_response",),
                     description="Teacher/model paired-delta direction and gain view.",
+                ),
+                PlotterSpec(
+                    name="response_sera_pareto",
+                    kind="atomic",
+                    consumes=("intervention_response",),
+                    description="Model-size versus Response SERA view for paired intervention-delta fidelity.",
                 ),
                 PlotterSpec(
                     name="neuronio_matched_intervention_response",

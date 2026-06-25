@@ -10,8 +10,8 @@ from typing import Any, Callable
 
 import numpy as np
 
-from dendrobench.metrics import binary_auc
-from dendrobench.benchmark.swc_utils import (
+from axobench.metrics import binary_auc
+from axobench.benchmark.swc_utils import (
     create_routing_from_branches,
     extract_branches,
     load_swc,

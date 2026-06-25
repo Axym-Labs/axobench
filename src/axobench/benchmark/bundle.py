@@ -10,15 +10,15 @@ from typing import Any, Literal
 
 import numpy as np
 
-from dendrobench.benchmark.dataset_schema import INTERVENTION_CONDITIONS
-from dendrobench.benchmark.diagnostic_rows import (
+from axobench.benchmark.dataset_schema import INTERVENTION_CONDITIONS
+from axobench.benchmark.diagnostic_rows import (
     DiagnosticContext,
     morphology_contrast_diagnostic_rows,
     morphology_routing_qc_rows,
     write_diagnostic_rows,
 )
-from dendrobench.benchmark.reports import write_diagnostic_summary
-from dendrobench.benchmark.runner import (
+from axobench.benchmark.reports import write_diagnostic_summary
+from axobench.benchmark.runner import (
     resolve_intervention_pair_paths,
     run_model_diagnostics_on_selector,
     run_paired_intervention_on_npz,
@@ -26,7 +26,7 @@ from dendrobench.benchmark.runner import (
     run_paired_intervention_on_selector,
     run_teacher_qc_on_selector,
 )
-from dendrobench.benchmark.selectors import V1DatasetLayout
+from axobench.benchmark.selectors import V1DatasetLayout
 
 
 DEFAULT_MODEL_SUITES = (

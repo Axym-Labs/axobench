@@ -15,7 +15,7 @@ from typing import Any
 
 import requests
 
-from dendrobench.benchmark.morphology_transfer import MorphologyTransferEvaluator
+from axobench.benchmark.morphology_transfer import MorphologyTransferEvaluator
 
 
 API = "https://api.brain-map.org/api/v2/data/query.json"
@@ -26,7 +26,7 @@ SWC_FILE_TYPE_ID = 303941301
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", default="data/morphologies/allen_mouse_l5_spiny")
-    parser.add_argument("--reference-swc", default="src/dendrobench/generation/assets/allen_l5_template.swc")
+    parser.add_argument("--reference-swc", default="src/axobench/generation/assets/allen_l5_template.swc")
     parser.add_argument("--branches", type=int, default=45)
     parser.add_argument("--json", default="docs/benchmark/artifacts/allen_l5_m3_candidates.json")
     parser.add_argument("--markdown", default="docs/benchmark/artifacts/allen_l5_m3_candidates.md")

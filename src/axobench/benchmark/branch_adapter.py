@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from dendrobench.metrics import binary_auc
+from axobench.metrics import binary_auc
 
 
 def adapt_branch_count(

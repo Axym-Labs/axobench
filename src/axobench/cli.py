@@ -8,34 +8,34 @@ from pathlib import Path
 
 import numpy as np
 
-from dendrobench.benchmark.bundle import run_v1_benchmark_bundle
-from dendrobench.benchmark.dataset_schema import (
+from axobench.benchmark.bundle import run_v1_benchmark_bundle
+from axobench.benchmark.dataset_schema import (
     build_diagnostic_suite_catalog,
     build_v1_dataset_manifest_template,
 )
-from dendrobench.benchmark.diagnostic_audits import DiagnosticAuditSources, diagnostic_audit_rows_from_sources
-from dendrobench.benchmark.diagnostic_rows import DiagnosticContext, write_diagnostic_rows
-from dendrobench.benchmark.profiles import (
+from axobench.benchmark.diagnostic_audits import DiagnosticAuditSources, diagnostic_audit_rows_from_sources
+from axobench.benchmark.diagnostic_rows import DiagnosticContext, write_diagnostic_rows
+from axobench.benchmark.profiles import (
     build_axis_plan,
     estimate_profile_cost,
     get_benchmark_profile,
     list_benchmark_profiles,
 )
-from dendrobench.benchmark.reports import write_diagnostic_summary
-from dendrobench.benchmark.runner import (
+from axobench.benchmark.reports import write_diagnostic_summary
+from axobench.benchmark.runner import (
     run_paired_intervention_on_npz,
     run_paired_intervention_on_selector,
     run_teacher_qc_on_selector,
 )
-from dendrobench.benchmark.selectors import V1DatasetLayout
-from dendrobench.data import repack_shards_as_npy, write_demo_shards
-from dendrobench.generation import ArborHeteroConfig, parse_split_samples, write_arbor_hetero_dataset, write_arbor_hetero_splits
-from dendrobench.neuronio_raw import convert_neuronio_pickles
+from axobench.benchmark.selectors import V1DatasetLayout
+from axobench.data import repack_shards_as_npy, write_demo_shards
+from axobench.generation import ArborHeteroConfig, parse_split_samples, write_arbor_hetero_dataset, write_arbor_hetero_splits
+from axobench.neuronio_raw import convert_neuronio_pickles
 
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    parser = argparse.ArgumentParser(prog="dendrobench")
+    parser = argparse.ArgumentParser(prog="axobench")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     demo = subparsers.add_parser("make-demo-data", help="write deterministic demo NPZ shards")
@@ -92,7 +92,7 @@ def main(argv: list[str] | None = None) -> int:
     repack.add_argument("--output", required=True)
     repack.add_argument("--input-dtype", choices=["int8", "float32"], default="int8")
 
-    profile = subparsers.add_parser("benchmark-profile", help="print a DendroBench axis/default profile")
+    profile = subparsers.add_parser("benchmark-profile", help="print an AxoBench axis/default profile")
     profile.add_argument("--name", default="paper-default", choices=list_benchmark_profiles())
     profile.add_argument("--plan", action="store_true", help="print the expanded axis-composition plan")
     profile.add_argument("--cost", action="store_true", help="print only the local capacity estimate")
@@ -292,7 +292,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "diagnostic-plots":
         try:
-            from dendrobench.benchmark.plots import write_analysis_audit_artifacts
+            from axobench.benchmark.plots import write_analysis_audit_artifacts
 
             manifest = write_analysis_audit_artifacts(
                 output_dir=args.output_dir,

@@ -2,16 +2,16 @@ import json
 
 import numpy as np
 
-from dendrobench.benchmark.diagnostic_rows import DiagnosticContext
-from dendrobench.benchmark.runner import (
+from axobench.benchmark.diagnostic_rows import DiagnosticContext
+from axobench.benchmark.runner import (
     load_selector_batch,
     run_paired_intervention_on_npz,
     run_paired_intervention_on_selector,
     run_model_diagnostics_on_selector,
     run_teacher_qc_on_selector,
 )
-from dendrobench.benchmark.selectors import V1DatasetLayout
-from dendrobench.data import write_demo_shards
+from axobench.benchmark.selectors import V1DatasetLayout
+from axobench.data import write_demo_shards
 
 
 def test_runner_loads_selector_batch(tmp_path):
