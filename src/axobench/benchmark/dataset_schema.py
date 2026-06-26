@@ -432,10 +432,10 @@ def default_diagnostic_specs() -> tuple[DiagnosticSpec, ...]:
                     description="Trace error conditioned on recent spikes and recent E/I drive.",
                 ),
                 PlotterSpec(
-                    name="mechanistic_behavior_matrix",
+                    name="mechanistic_behavior_profiles",
                     kind="atomic",
                     consumes=("mechanistic_response",),
-                    description="Model-by-behavior matrix over phase-plane, history, latency, and response-gain errors.",
+                    description="Behavior-coordinate profiles over phase-plane, history, latency, and response-gain errors.",
                 ),
                 PlotterSpec(
                     name="mechanistic_worst_examples",
@@ -458,10 +458,10 @@ def default_diagnostic_specs() -> tuple[DiagnosticSpec, ...]:
                     description="Per-morphology effect-size and uncertainty view.",
                 ),
                 PlotterSpec(
-                    name="morphology_intervention_response_heatmap",
+                    name="morphology_intervention_response",
                     kind="atomic",
                     consumes=("morphology_contrast", "intervention_response"),
-                    description="Morphology-by-intervention teacher response heatmap.",
+                    description="Morphology-by-intervention teacher response ranges.",
                 ),
                 PlotterSpec(
                     name="morphology_intervention_response_table",
@@ -507,7 +507,7 @@ def default_diagnostic_specs() -> tuple[DiagnosticSpec, ...]:
                     name="neuronio_matched_intervention_response",
                     kind="atomic",
                     consumes=("intervention_response", "protocol_coverage"),
-                    description="NeuronIO-source paired teacher-response matrix and spike-rate transition view.",
+                    description="NeuronIO-source paired teacher-response coordinates and spike-rate transition view.",
                 ),
                 PlotterSpec(
                     name="neuronio_matched_intervention_table",
@@ -564,10 +564,10 @@ def default_diagnostic_specs() -> tuple[DiagnosticSpec, ...]:
             selectors=("diagnostic_artifacts", "target_views"),
             plotters=(
                 PlotterSpec(
-                    name="target_view_distortion_map",
+                    name="target_view_distortion_profile",
                     kind="atomic",
                     consumes=("target_view_audit",),
-                    description="Model-by-target-view RMSE heatmap with clipping-distortion side panel.",
+                    description="Clipped/raw target-view RMSE profile with clipping-distortion side panel.",
                 ),
                 PlotterSpec(
                     name="target_protocol_table",
@@ -584,10 +584,10 @@ def default_diagnostic_specs() -> tuple[DiagnosticSpec, ...]:
             selectors=("diagnostic_artifacts", "interventions/<name>"),
             plotters=(
                 PlotterSpec(
-                    name="sparse_event_sensitivity_heatmap",
+                    name="sparse_event_sensitivity_profiles",
                     kind="atomic",
                     consumes=("robustness_directionality",),
-                    description="Budget-by-locality heatmap for targeted/random sparse-event sensitivity and edited-event fraction.",
+                    description="Budget-by-locality profiles for targeted/random sparse-event sensitivity and edited-event fraction.",
                 ),
                 PlotterSpec(
                     name="sparse_event_sensitivity_table",

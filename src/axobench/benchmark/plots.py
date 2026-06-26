@@ -64,7 +64,7 @@ def apply_paper_plot_style() -> None:
 
 
 def plot_mechanistic_metric_matrix(rows: list[dict[str, Any]], output: str | Path) -> None:
-    """Plot selected mechanistic-response rows as a compact model-by-metric matrix."""
+    """Plot selected mechanistic-response rows as compact metric profiles."""
     apply_paper_plot_style()
     selected = [
         ("phase_plane", "near_spike_phase_rmse_mv", "Near-spike\nphase RMSE"),
@@ -89,38 +89,29 @@ def plot_mechanistic_metric_matrix(rows: list[dict[str, Any]], output: str | Pat
     models = sorted(dict.fromkeys(models))
     if not models:
         return
-    matrix = np.full((len(models), len(selected)), np.nan, dtype=float)
+    values_by_metric = np.full((len(models), len(selected)), np.nan, dtype=float)
     for model_index, model in enumerate(models):
         for metric_index, (state, metric, _label) in enumerate(selected):
-            matrix[model_index, metric_index] = values.get((model, state, metric), np.nan)
+            values_by_metric[model_index, metric_index] = values.get((model, state, metric), np.nan)
 
-    # Column-wise robust normalization lets heterogeneous units share one plot.
-    normalized = matrix.copy()
-    for col in range(normalized.shape[1]):
-        finite = normalized[np.isfinite(normalized[:, col]), col]
-        if finite.size == 0:
+    n_cols = 4
+    n_rows = 2
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(7.4, 3.9))
+    colors = [OKABE_ITO["blue"], OKABE_ITO["orange"], OKABE_ITO["green"], OKABE_ITO["purple"]]
+    x = np.arange(len(models))
+    for metric_index, ax in enumerate(axes.flat):
+        if metric_index >= len(selected):
+            ax.axis("off")
             continue
-        lo = np.min(finite)
-        hi = np.max(finite)
-        if hi > lo:
-            normalized[:, col] = (normalized[:, col] - lo) / (hi - lo)
-        else:
-            normalized[:, col] = 0.5
-
-    fig, ax = plt.subplots(figsize=(7.4, 2.2 + 0.22 * len(models)))
-    image = ax.imshow(normalized, aspect="auto", cmap="magma_r", vmin=0.0, vmax=1.0)
-    ax.set_yticks(np.arange(len(models)), labels=models)
-    ax.set_xticks(np.arange(len(selected)), labels=[label for _, _, label in selected])
-    ax.tick_params(axis="x", rotation=0)
-    for i in range(matrix.shape[0]):
-        for j in range(matrix.shape[1]):
-            if np.isfinite(matrix[i, j]):
-                text_color = "white" if normalized[i, j] > 0.55 else "black"
-                ax.text(j, i, _format_value(matrix[i, j]), ha="center", va="center", fontsize=5.8, color=text_color)
-    ax.set_xlabel("Mechanistic diagnostic")
-    ax.set_ylabel("Checkpoint")
-    cbar = fig.colorbar(image, ax=ax, fraction=0.025, pad=0.02)
-    cbar.set_label("Column-normalized error")
+        _state, _metric, label = selected[metric_index]
+        y = values_by_metric[:, metric_index]
+        ax.plot(x, y, color="#B8C0CC", linewidth=0.9)
+        for model_index, value in enumerate(y):
+            if np.isfinite(value):
+                ax.scatter(model_index, value, s=21, color=colors[model_index % len(colors)], edgecolor="white", linewidth=0.5)
+        ax.set_xticks(x, labels=[model.replace("branch_elm_", "") for model in models], rotation=18)
+        ax.text(0.02, 0.94, label.replace("\n", " "), transform=ax.transAxes, ha="left", va="top", fontsize=6.8)
+        ax.grid(True, axis="y", alpha=0.32)
     fig.tight_layout()
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -542,10 +533,10 @@ def write_analysis_audit_artifacts(
 
     figures = [
         _plot_spike_metric_identification(point_metrics, output / "fig01_spike_metric_identification", formats),
-        _plot_mechanistic_behavior_matrix(mechanistic, output / "fig02_mechanistic_behavior_matrix", formats),
-        _plot_target_view_distortion_map(canonical, output / "fig03_target_view_distortion_map", formats),
-        _plot_sparse_event_sensitivity_heatmap(sparse, output / "fig04_sparse_event_sensitivity_heatmap", formats),
-        _plot_morphology_intervention_heatmap(morphology_rows, output / "fig05_morphology_intervention_heatmap", formats),
+        _plot_mechanistic_behavior_matrix(mechanistic, output / "fig02_mechanistic_behavior_profiles", formats),
+        _plot_target_view_distortion_map(canonical, output / "fig03_target_view_distortion_profile", formats),
+        _plot_sparse_event_sensitivity_profiles(sparse, output / "fig04_sparse_event_sensitivity_profiles", formats),
+        _plot_morphology_intervention_response(morphology_rows, output / "fig05_morphology_intervention_response", formats),
         _plot_tcn_preprocessing_trajectories(tcn, output / "fig06_tcn_preprocessing_trajectories", formats),
         (
             _plot_neuronio_matched_intervention_response(
@@ -673,30 +664,29 @@ def _plot_mechanistic_behavior_matrix(mechanistic: dict[str, Any], output: Path,
     reports = mechanistic["reports"]
     models = ["branch_elm_best", "branch_elm_m1", "branch_elm_m30", "branch_elm_m100"]
     metrics = [
-        ("phase\nnear-spike RMSE", "mV", lambda r: r["phase_plane"]["near_spike_phase_rmse_mv"]),
-        ("dV/dt\nsign error", "fraction", lambda r: 1.0 - r["phase_plane"]["high_dvdt_sign_agreement_fraction"]),
-        ("recent/quiet\nRMSE ratio", "x", lambda r: r["history_conditioned_error"]["recent_spike_history"]["voltage_rmse_mv"] / max(r["history_conditioned_error"]["quiet_history"]["voltage_rmse_mv"], 1e-12)),
-        ("exc latency\nerror", "ms", lambda r: abs(r["event_triggered_response"]["exc"]["latency_error_steps"])),
-        ("inh latency\nerror", "ms", lambda r: abs(r["event_triggered_response"]["inh"]["latency_error_steps"])),
-        ("inh gain\nerror", "|1-gain|", lambda r: abs(1.0 - r["event_triggered_response"]["inh"]["response_gain"])),
+        ("Near-spike phase RMSE", "mV", lambda r: r["phase_plane"]["near_spike_phase_rmse_mv"]),
+        ("High-dV/dt sign error", "fraction", lambda r: 1.0 - r["phase_plane"]["high_dvdt_sign_agreement_fraction"]),
+        ("Recent/quiet RMSE ratio", "x", lambda r: r["history_conditioned_error"]["recent_spike_history"]["voltage_rmse_mv"] / max(r["history_conditioned_error"]["quiet_history"]["voltage_rmse_mv"], 1e-12)),
+        ("Excitatory latency error", "ms", lambda r: abs(r["event_triggered_response"]["exc"]["latency_error_steps"])),
+        ("Inhibitory latency error", "ms", lambda r: abs(r["event_triggered_response"]["inh"]["latency_error_steps"])),
+        ("Inhibitory gain error", "|1-gain|", lambda r: abs(1.0 - r["event_triggered_response"]["inh"]["response_gain"])),
     ]
     raw = np.asarray([[getter(reports[model]) for _label, _unit, getter in metrics] for model in models], dtype=float)
-    normalized = raw.copy()
-    for col in range(raw.shape[1]):
-        finite = raw[np.isfinite(raw[:, col]), col]
-        lo, hi = float(np.min(finite)), float(np.max(finite))
-        normalized[:, col] = 0.5 if hi <= lo else (raw[:, col] - lo) / (hi - lo)
-    fig, ax = plt.subplots(figsize=(7.4, 3.15))
-    image = ax.imshow(normalized, cmap="magma_r", aspect="auto", vmin=0, vmax=1)
-    ax.set_xticks(np.arange(len(metrics)), labels=[label for label, _unit, _getter in metrics])
-    ax.set_yticks(np.arange(len(models)), labels=[_model_short(model) for model in models])
-    _style_heatmap_axis(ax, raw.shape[0], raw.shape[1])
-    for i in range(raw.shape[0]):
-        for j in range(raw.shape[1]):
-            text_color = "white" if normalized[i, j] > 0.55 else "black"
-            ax.text(j, i, _format_value(raw[i, j]), ha="center", va="center", fontsize=6.6, color=text_color)
-    cbar = fig.colorbar(image, ax=ax, fraction=0.028, pad=0.02)
-    cbar.set_label("column-normalized error")
+    fig, axes = plt.subplots(2, 3, figsize=(7.4, 4.25))
+    colors = [OKABE_ITO["orange"], OKABE_ITO["blue"], OKABE_ITO["green"], OKABE_ITO["purple"]]
+    x = np.arange(len(models))
+    for metric_index, ax in enumerate(axes.flat):
+        label, unit, _getter = metrics[metric_index]
+        y = raw[:, metric_index]
+        ax.plot(x, y, color="#B8C0CC", linewidth=0.9, zorder=1)
+        for model_index, value in enumerate(y):
+            ax.scatter(model_index, value, s=24, color=colors[model_index], edgecolor="white", linewidth=0.5, zorder=3)
+            ax.text(model_index, value, _format_value(value), ha="center", va="bottom", fontsize=5.5)
+        ax.set_xticks(x, labels=[_model_short(model).replace("branch_", "") for model in models], rotation=18)
+        ax.set_ylabel(unit)
+        ax.text(0.02, 0.94, label, transform=ax.transAxes, ha="left", va="top", fontsize=7.2)
+        ax.margins(y=0.28)
+        ax.grid(True, axis="y", alpha=0.32)
     fig.tight_layout()
     _save_figure(fig, output, formats)
     return output.name
@@ -705,79 +695,83 @@ def _plot_mechanistic_behavior_matrix(mechanistic: dict[str, Any], output: Path,
 def _plot_target_view_distortion_map(canonical: dict[str, Any], output: Path, formats: tuple[str, ...]) -> str:
     model_rows = canonical["validation"]["models"]
     models = [_model_short(row["model_id"]) for row in model_rows]
-    metrics = [
-        ("clipped\nvalid", "rmse_to_clipped_valid_mv"),
-        ("raw\nvalid", "rmse_to_raw_valid_mv"),
-        ("clipped\nnear spike", "rmse_to_clipped_near_spike_mv"),
-        ("raw\nnear spike", "rmse_to_raw_near_spike_mv"),
-        ("raw/clipped\nnear ratio", None),
+    y = np.arange(len(models))
+    fig, axes = plt.subplots(1, 2, figsize=(7.4, 3.25), sharey=True)
+    panels = [
+        (
+            axes[0],
+            "valid timesteps",
+            "rmse_to_clipped_valid_mv",
+            "rmse_to_raw_valid_mv",
+        ),
+        (
+            axes[1],
+            "action-potential neighborhood",
+            "rmse_to_clipped_near_spike_mv",
+            "rmse_to_raw_near_spike_mv",
+        ),
     ]
-    matrix = np.zeros((len(model_rows), len(metrics)), dtype=float)
-    for i, row in enumerate(model_rows):
-        for j, (_label, key) in enumerate(metrics):
-            if key is None:
-                matrix[i, j] = row["rmse_to_raw_near_spike_mv"] / max(row["rmse_to_clipped_near_spike_mv"], 1e-12)
-            else:
-                matrix[i, j] = row[key]
-    fig, ax = plt.subplots(figsize=(6.7, 3.05))
-    image = ax.imshow(np.log10(np.maximum(matrix, 1e-4)), cmap="YlOrRd", aspect="auto")
-    ax.set_xticks(np.arange(len(metrics)), labels=[label for label, _key in metrics])
-    ax.set_yticks(np.arange(len(models)), labels=models)
-    _style_heatmap_axis(ax, matrix.shape[0], matrix.shape[1])
-    for i in range(matrix.shape[0]):
-        for j in range(matrix.shape[1]):
-            ax.text(j, i, _format_value(matrix[i, j]), ha="center", va="center", fontsize=6.7)
-    cbar = fig.colorbar(image, ax=ax, fraction=0.035, pad=0.02)
-    cbar.set_label("log10(value)")
-    fig.subplots_adjust(left=0.12, right=0.96, bottom=0.22, top=0.94)
+    for ax, label, clipped_key, raw_key in panels:
+        clipped = np.asarray([float(row[clipped_key]) for row in model_rows], dtype=float)
+        raw = np.asarray([float(row[raw_key]) for row in model_rows], dtype=float)
+        for yy, clipped_value, raw_value in zip(y, clipped, raw):
+            ax.plot([clipped_value, raw_value], [yy, yy], color="#B8C0CC", linewidth=1.0, zorder=1)
+        ax.scatter(clipped, y, s=26, facecolor="white", edgecolor=OKABE_ITO["blue"], linewidth=0.9, label="clipped target", zorder=3)
+        ax.scatter(raw, y, s=30, color=OKABE_ITO["red"], edgecolor="white", linewidth=0.5, label="raw target", zorder=4)
+        if raw_key.endswith("near_spike_mv"):
+            for yy, clipped_value, raw_value in zip(y, clipped, raw):
+                ratio = raw_value / max(clipped_value, 1e-12)
+                ax.text(raw_value * 1.04, yy, f"{ratio:.1f}x", va="center", fontsize=5.8)
+        ax.set_xscale("log")
+        ax.set_xlabel("RMSE (mV)")
+        ax.text(0.03, 0.92, label, transform=ax.transAxes, ha="left", va="top", fontsize=7.2)
+        ax.grid(True, axis="x", alpha=0.35)
+    axes[0].set_yticks(y, labels=models)
+    axes[0].invert_yaxis()
+    handles, labels = axes[1].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.58, 1.02), ncol=2)
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.93))
     _save_figure(fig, output, formats)
     return output.name
 
 
-def _plot_sparse_event_sensitivity_heatmap(sparse: dict[str, Any], output: Path, formats: tuple[str, ...]) -> str:
+def _plot_sparse_event_sensitivity_profiles(sparse: dict[str, Any], output: Path, formats: tuple[str, ...]) -> str:
     ratios = sparse["ratios"]
     budgets = [8, 32, 128]
     edit_types = [("global", "global"), ("8 ms", "time_local_8"), ("32 ms", "time_local_32")]
     groups = ["quiet_or_low_spike", "spike_rich"]
-    data = np.full((len(groups), len(budgets) * len(edit_types)), np.nan)
-    changed = np.full_like(data, np.nan)
-    labels = []
-    for bi, budget in enumerate(budgets):
-        for ei, (short, needle) in enumerate(edit_types):
-            labels.append(f"{budget}\n{short}")
-            col = bi * len(edit_types) + ei
-            for gi, group in enumerate(groups):
-                row = next(
-                    row
-                    for row in ratios
-                    if row["window_group"] == group and int(row["budget"]) == budget and needle in row["targeted"]
-                )
-                data[gi, col] = row["median_soma_delta_ratio"]
-                changed[gi, col] = 100.0 * row["changed_fraction_of_events_median"]
-    fig, axes = plt.subplots(2, 1, figsize=(7.4, 4.15), sharex=True, gridspec_kw={"height_ratios": [2.1, 1.0], "hspace": 0.12})
-    im = axes[0].imshow(data, cmap="YlOrRd", vmin=0.0, vmax=max(18.0, float(np.nanmax(data))), aspect="auto")
-    axes[0].set_yticks(np.arange(len(groups)), labels=["quiet/low-spike", "spike-rich"])
-    _style_heatmap_axis(axes[0], data.shape[0], data.shape[1])
-    for i in range(data.shape[0]):
-        for j in range(data.shape[1]):
-            axes[0].text(j, i, f"{data[i, j]:.1f}x", ha="center", va="center", fontsize=7.0)
-    cbar = fig.colorbar(im, ax=axes[0], fraction=0.025, pad=0.02)
-    cbar.set_label("median ratio")
-    im2 = axes[1].imshow(changed, cmap="Blues", aspect="auto")
-    axes[1].set_yticks(np.arange(len(groups)), labels=["quiet edited %", "spike edited %"])
-    axes[1].set_xticks(np.arange(len(labels)), labels=labels)
-    axes[1].set_xlabel("edit budget and locality")
-    _style_heatmap_axis(axes[1], changed.shape[0], changed.shape[1])
-    for i in range(changed.shape[0]):
-        for j in range(changed.shape[1]):
-            axes[1].text(j, i, f"{changed[i, j]:.2f}", ha="center", va="center", fontsize=6.8)
-    fig.colorbar(im2, ax=axes[1], fraction=0.025, pad=0.02).set_label("% existing events")
-    fig.subplots_adjust(left=0.13, right=0.95, bottom=0.18, top=0.90)
+    fig, axes = plt.subplots(1, 2, figsize=(7.4, 3.25), sharex=True)
+    colors = {"global": OKABE_ITO["blue"], "8 ms": OKABE_ITO["orange"], "32 ms": OKABE_ITO["green"]}
+    markers = {"quiet_or_low_spike": "o", "spike_rich": "s"}
+    for group in groups:
+        for short, needle in edit_types:
+            selected = [
+                row
+                for row in ratios
+                if row["window_group"] == group and needle in row["targeted"]
+            ]
+            selected = sorted(selected, key=lambda row: int(row["budget"]))
+            x = np.asarray([int(row["budget"]) for row in selected], dtype=float)
+            ratio = np.asarray([float(row["median_soma_delta_ratio"]) for row in selected], dtype=float)
+            changed = np.asarray([100.0 * float(row["changed_fraction_of_events_median"]) for row in selected], dtype=float)
+            label = f"{short}, {'spike-rich' if group == 'spike_rich' else 'quiet'}"
+            axes[0].plot(x, ratio, marker=markers[group], markersize=3.2, linewidth=1.05, color=colors[short], alpha=0.86, label=label)
+            axes[1].plot(x, changed, marker=markers[group], markersize=3.2, linewidth=1.05, color=colors[short], alpha=0.86)
+    for ax in axes:
+        ax.set_xscale("log", base=2)
+        ax.set_xticks(budgets, labels=[str(item) for item in budgets])
+        ax.set_xlabel("edited events")
+        ax.grid(True, alpha=0.34)
+    axes[0].set_ylabel("targeted/random soma-delta ratio")
+    axes[1].set_ylabel("edited existing events (%)")
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, 1.02), ncol=3, fontsize=5.6)
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.90))
     _save_figure(fig, output, formats)
     return output.name
 
 
-def _plot_morphology_intervention_heatmap(rows: list[dict[str, Any]], output: Path, formats: tuple[str, ...]) -> str:
+def _plot_morphology_intervention_response(rows: list[dict[str, Any]], output: Path, formats: tuple[str, ...]) -> str:
     if not rows:
         _plot_morphology_axis(output, formats)
         return output.name
@@ -796,20 +790,26 @@ def _plot_morphology_intervention_heatmap(rows: list[dict[str, Any]], output: Pa
         col = interventions.index(intervention)
         for morph, value in row["morphology_values"].items():
             matrix[morphologies.index(morph), col] = float(value)
-    vmax = float(np.nanmax(np.abs(matrix))) if np.isfinite(matrix).any() else 1.0
-    fig, ax = plt.subplots(figsize=(7.4, 3.55))
-    im = ax.imshow(matrix, cmap="RdBu_r", vmin=-vmax, vmax=vmax, aspect="auto")
-    ax.set_xticks(np.arange(len(interventions)), labels=[item.replace("_", "\n") for item in interventions])
-    ax.set_yticks(np.arange(len(morphologies)), labels=[item.replace("specimen_", "") for item in morphologies])
+    fig, ax = plt.subplots(figsize=(7.4, 3.35))
+    x = np.arange(len(interventions))
+    for row_index, morph in enumerate(morphologies):
+        jitter = (row_index - (len(morphologies) - 1) / 2.0) * 0.035
+        ax.plot(x + jitter, matrix[row_index], color="#B8C0CC", linewidth=0.65, alpha=0.72, zorder=1)
+        ax.scatter(x + jitter, matrix[row_index], s=17, color=OKABE_ITO["gray"], alpha=0.75, zorder=2)
+    mean = np.nanmean(matrix, axis=0)
+    low = np.nanmin(matrix, axis=0)
+    high = np.nanmax(matrix, axis=0)
+    ax.vlines(x, low, high, color=OKABE_ITO["blue"], linewidth=2.0, alpha=0.85, zorder=3)
+    ax.scatter(x, mean, s=38, color=OKABE_ITO["orange"], edgecolor="white", linewidth=0.6, zorder=4, label="mean")
+    for xx, yy, lo, hi in zip(x, mean, low, high):
+        ax.text(xx, hi + 1.5, f"{lo:+.0f} to {hi:+.0f}", ha="center", va="bottom", fontsize=5.8)
+        ax.text(xx, yy, f"{yy:+.1f}", ha="center", va="center", fontsize=5.6, color="white")
+    ax.axhline(0.0, color="#222222", linewidth=0.7, alpha=0.55)
+    ax.set_xticks(x, labels=[item.replace("_", "\n") for item in interventions])
     ax.set_xlabel("intervention")
-    ax.set_ylabel("specimen")
-    _style_heatmap_axis(ax, matrix.shape[0], matrix.shape[1])
-    for i in range(matrix.shape[0]):
-        for j in range(matrix.shape[1]):
-            if np.isfinite(matrix[i, j]):
-                ax.text(j, i, f"{matrix[i, j]:+.0f}", ha="center", va="center", fontsize=6.9)
-    cbar = fig.colorbar(im, ax=ax, fraction=0.025, pad=0.02)
-    cbar.set_label("teacher spike-count delta")
+    ax.set_ylabel("teacher spike-count delta")
+    ax.legend(loc="lower left")
+    ax.grid(True, axis="y", alpha=0.34)
     fig.tight_layout()
     _save_figure(fig, output, formats)
     return output.name
@@ -884,38 +884,31 @@ def _plot_neuronio_matched_intervention_response(
     if not table:
         return _plot_teacher_intervention_contract(output.with_name("fig07_teacher_intervention_contract"), formats)
     interventions = [row["intervention"] for row in table]
-    labels = [name.replace("_", "\n").replace("-", "\n") for name in interventions]
-    metrics = [
-        ("event Δ\n(pp)", "event_fraction_delta_pct", "{:+.2f}"),
-        ("spike-rate Δ\n(Hz)", "delta_spike_rate_per_1000_steps", "{:+.2f}"),
-        ("mean soma Δ\n(mV)", "delta_soma_mean_mv", "{:+.2f}"),
-        ("mean |soma Δ|\n(mV)", "delta_soma_abs_mean_mv", "{:.2f}"),
-    ]
-    raw = np.asarray([[float(row[key]) for _label, key, _fmt in metrics] for row in table], dtype=float)
-    normalized = np.zeros_like(raw)
-    for col in range(raw.shape[1]):
-        scale = float(np.nanmax(np.abs(raw[:, col])))
-        normalized[:, col] = raw[:, col] / scale if scale > 0 else 0.0
+    labels = [name.replace("_", " ").replace("-", " ") for name in interventions]
+    fig = plt.figure(figsize=(7.4, 4.55))
+    gs = fig.add_gridspec(2, 2, width_ratios=[1.15, 1.0], height_ratios=[1.0, 1.0], wspace=0.42, hspace=0.32)
+    y = np.arange(len(interventions))
 
-    fig = plt.figure(figsize=(7.4, 4.65))
-    gs = fig.add_gridspec(1, 2, width_ratios=[1.65, 1.25], wspace=0.34)
-    ax = fig.add_subplot(gs[0, 0])
-    im = ax.imshow(normalized, cmap="RdBu_r", vmin=-1, vmax=1, aspect="auto")
-    ax.set_yticks(np.arange(len(interventions)), labels=labels)
-    ax.set_xticks(np.arange(len(metrics)), labels=[label for label, _key, _fmt in metrics])
-    ax.set_xlabel("teacher-response coordinate")
-    _style_heatmap_axis(ax, raw.shape[0], raw.shape[1])
-    for i in range(raw.shape[0]):
-        for j, (_label, _key, fmt) in enumerate(metrics):
-            text_color = "white" if abs(normalized[i, j]) > 0.55 else "black"
-            ax.text(j, i, fmt.format(raw[i, j]), ha="center", va="center", fontsize=6.4, color=text_color)
-    cbar = fig.colorbar(im, ax=ax, fraction=0.030, pad=0.02)
-    cbar.set_label("column-normalized signed response")
+    ax = fig.add_subplot(gs[:, 0])
+    spike_delta = np.asarray([float(row["delta_spike_rate_per_1000_steps"]) for row in table], dtype=float)
+    soma_delta = np.asarray([float(row["delta_soma_mean_mv"]) for row in table], dtype=float)
+    ax.axvline(0.0, color="#222222", linewidth=0.65, alpha=0.55)
+    ax.plot(spike_delta, y - 0.10, color=OKABE_ITO["blue"], linewidth=0.9, alpha=0.85)
+    ax.plot(soma_delta, y + 0.10, color=OKABE_ITO["orange"], linewidth=0.9, alpha=0.85)
+    ax.scatter(spike_delta, y - 0.10, s=25, color=OKABE_ITO["blue"], edgecolor="white", linewidth=0.5, label="spike-rate delta")
+    ax.scatter(soma_delta, y + 0.10, s=25, color=OKABE_ITO["orange"], edgecolor="white", linewidth=0.5, label="mean soma delta")
+    for yy, spike_value, soma_value in zip(y, spike_delta, soma_delta):
+        ax.text(spike_value, yy - 0.27, f"{spike_value:+.2f}", ha="center", va="top", fontsize=5.5, color=OKABE_ITO["blue"])
+        ax.text(soma_value, yy + 0.27, f"{soma_value:+.2f}", ha="center", va="bottom", fontsize=5.5, color=OKABE_ITO["orange"])
+    ax.set_yticks(y, labels=labels)
+    ax.invert_yaxis()
+    ax.set_xlabel("signed teacher response")
+    ax.legend(loc="lower right")
+    ax.grid(True, axis="x", alpha=0.32)
 
     ax2 = fig.add_subplot(gs[0, 1])
     baseline = np.asarray([float(row["baseline_spike_rate_per_1000_steps"]) for row in table], dtype=float)
     intervention = np.asarray([float(row["intervention_spike_rate_per_1000_steps"]) for row in table], dtype=float)
-    y = np.arange(len(interventions))
     colors = [OKABE_ITO["red"] if b > a else OKABE_ITO["blue"] for a, b in zip(baseline, intervention)]
     for yy, base, intervened, color in zip(y, baseline, intervention, colors):
         ax2.plot([base, intervened], [yy, yy], color="#A7AEB8", linewidth=1.0, zorder=1)
@@ -929,9 +922,22 @@ def _plot_neuronio_matched_intervention_response(
     ax2.scatter([], [], s=30, color=OKABE_ITO["blue"], edgecolor="white", label="intervention")
     ax2.legend(loc="lower right")
     ax2.set_xlim(0, max(10.0, float(np.max(intervention)) + 1.2))
+
+    ax3 = fig.add_subplot(gs[1, 1])
+    abs_soma = np.asarray([float(row["delta_soma_abs_mean_mv"]) for row in table], dtype=float)
+    event_delta = np.asarray([float(row["event_fraction_delta_pct"]) for row in table], dtype=float)
+    ax3.scatter(abs_soma, event_delta, s=28, color=OKABE_ITO["green"], edgecolor="white", linewidth=0.6)
+    for name, xx, yy in zip(interventions, abs_soma, event_delta):
+        if name in {"exc_dropout", "inh_dropout", "morphology-3", "temporal_jitter"}:
+            ax3.annotate(name.replace("_", " "), (xx, yy), textcoords="offset points", xytext=(3, 3), fontsize=5.6)
+    ax3.axhline(0.0, color="#222222", linewidth=0.65, alpha=0.55)
+    ax3.set_xlabel("mean |soma delta| (mV)")
+    ax3.set_ylabel("event-fraction delta (pp)")
+    ax3.grid(True, alpha=0.32)
     _add_panel_label(ax, "A")
     _add_panel_label(ax2, "B")
-    fig.subplots_adjust(left=0.14, right=0.94, bottom=0.15, top=0.89)
+    _add_panel_label(ax3, "C")
+    fig.subplots_adjust(left=0.18, right=0.97, bottom=0.12, top=0.96)
     _save_figure(fig, output, formats)
     return output.name
 
@@ -1059,15 +1065,6 @@ def _plot_morphology_axis(output: Path, formats: tuple[str, ...]) -> None:
     _save_figure(fig, output, formats)
 
 
-def _style_heatmap_axis(ax: plt.Axes, n_rows: int, n_cols: int) -> None:
-    """Draw cell boundaries at half-integers and disable centerline grids."""
-    ax.grid(False)
-    ax.set_xticks(np.arange(-0.5, n_cols, 1), minor=True)
-    ax.set_yticks(np.arange(-0.5, n_rows, 1), minor=True)
-    ax.grid(which="minor", color="white", linewidth=0.55)
-    ax.tick_params(which="minor", bottom=False, left=False)
-
-
 def _add_panel_label(ax: plt.Axes, label: str) -> None:
     ax.text(
         -0.12,
@@ -1103,11 +1100,11 @@ def _write_point_artifact_table(
     )
     rows = [
         ("1-2", "metric_decoupling", "fig01_spike_metric_identification", "AUC/F1 scatter plus prevalence-matching inset"),
-        ("3", "mechanistic_response", "fig02_mechanistic_behavior_matrix", "Model-by-behavior heatmap over phase, history, latency, and gain"),
-        ("4-5", "target_view_audit", "fig03_target_view_distortion_map + table03", "Model-by-target-view RMSE matrix plus exact clipping-distortion table"),
+        ("3", "mechanistic_response", "fig02_mechanistic_behavior_profiles", "Small-multiple behavior profiles over phase, history, latency, and gain"),
+        ("4-5", "target_view_audit", "fig03_target_view_distortion_profile + table03", "Clipped/raw RMSE dot profiles plus exact clipping-distortion table"),
         ("6", "metric_decoupling", "table02_metric_decoupling", "Zero-threshold spike counts kept as a table, where exact counts matter more than bars"),
-        ("7", "robustness_directionality", "fig04_sparse_event_sensitivity_heatmap", "Budget/locality/spike-richness heatmap plus edited-event fraction"),
-        ("8", "morphology_contrast", "fig05_morphology_intervention_heatmap", "Morphology-by-intervention teacher-response heatmap"),
+        ("7", "robustness_directionality", "fig04_sparse_event_sensitivity_profiles", "Budget/locality response-amplification profiles plus edited-event fraction"),
+        ("8", "morphology_contrast", "fig05_morphology_intervention_response", "Morphology-by-intervention teacher-response ranges"),
         ("9", "adapter_fairness", "fig06_tcn_preprocessing_trajectories + table03", "TCN RMSE trajectories across target-dependent preprocessing views"),
         ("10", "protocol_coverage", point_10_artifact, point_10_role),
     ]
@@ -1257,13 +1254,13 @@ def _write_group_evidence_table(
         (
             "Metrics",
             "Need better headline metrics",
-            "AUC/F1 decoupling; prevalence rescue failure; behavior matrix; clipped/raw target map; TCN preprocessing trajectories",
-            "AUC and RMSE stay as compatibility rows, not headline simulator-fidelity metrics.",
+            "AUC/F1 decoupling; prevalence rescue failure; behavior profiles; clipped/raw target profile; TCN preprocessing trajectories",
+            "AUC and RMSE significantly inflate simulator fidelity in the evaluated regimes.",
         ),
         (
             "Data",
             "Need richer training/evaluation data",
-            "Clipped target audit; morphology/intervention response matrix; raw target-view requirement",
+            "Clipped target audit; morphology/intervention response ranges; raw target-view requirement",
             "NeuronIO remains useful for comparability but is too narrow as a simulator-replacement benchmark.",
         ),
         (

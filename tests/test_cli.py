@@ -149,7 +149,7 @@ def test_cli_writes_diagnostic_plot_and_table_artifacts(tmp_path, capsys):
     assert len(payload["figures"]) == 8
     assert len(payload["tables"]) == 6
     assert (output / "fig01_spike_metric_identification.svg").exists()
-    assert (output / "fig05_morphology_intervention_heatmap.png").exists()
+    assert (output / "fig05_morphology_intervention_response.png").exists()
     assert (output / "fig07_neuronio_matched_intervention_response.svg").exists()
     assert (output / "fig08_neuronio_matched_trace_examples.svg").exists()
     assert "AUC Versus Event Timing" in (output / "table02_metric_decoupling.md").read_text(encoding="utf-8")
