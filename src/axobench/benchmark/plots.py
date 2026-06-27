@@ -6,7 +6,7 @@ from collections import defaultdict
 import json
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 os.environ.setdefault("SOURCE_DATE_EPOCH", "1782252000")
 
@@ -183,6 +183,604 @@ def plot_phase_plane_example(example: dict[str, Any], output: str | Path) -> Non
     for suffix in ("png", "pdf"):
         fig.savefig(output.with_suffix(f".{suffix}"), dpi=240)
     plt.close(fig)
+
+
+def plot_state_space_surface(
+    *,
+    output: str | Path,
+    targets: np.ndarray,
+    predictions_by_model: Mapping[str, np.ndarray] | None = None,
+    raw_soma_mv: np.ndarray | None = None,
+    statistic: str = "voltage_rmse",
+    ignore_start: int = 0,
+    soma_scale: float = 0.1,
+    soma_bias_mv: float = -67.7,
+    bins: int | tuple[int, int] = 52,
+    min_bin_count: int = 4,
+    formats: tuple[str, ...] = PLOT_FORMATS,
+) -> str:
+    """Plot a binned teacher phase-plane statistic over voltage and dV/dt.
+
+    Supported statistics are:
+    - ``voltage_rmse``: per-bin RMSE for each model in ``predictions_by_model``.
+    - ``teacher_spike_rate``: fraction of teacher-spike timesteps per bin.
+    - ``sample_fraction``: empirical support per bin.
+    """
+    apply_paper_plot_style()
+    targets = np.asarray(targets)
+    if targets.ndim != 3 or targets.shape[-1] < 2:
+        raise ValueError(f"targets must have shape (samples, time, channels>=2), got {targets.shape}")
+    if ignore_start < 0:
+        raise ValueError("ignore_start must be non-negative")
+    if min_bin_count <= 0:
+        raise ValueError("min_bin_count must be positive")
+    statistic = statistic.lower().strip()
+    if statistic not in {"voltage_rmse", "teacher_spike_rate", "sample_fraction"}:
+        raise ValueError("statistic must be 'voltage_rmse', 'teacher_spike_rate', or 'sample_fraction'")
+    if statistic == "voltage_rmse" and not predictions_by_model:
+        raise ValueError("predictions_by_model is required for voltage_rmse")
+
+    teacher_soma = _soma_mv_from_targets(targets, raw_soma_mv=raw_soma_mv, soma_scale=soma_scale, soma_bias_mv=soma_bias_mv)
+    trim = slice(ignore_start, None)
+    teacher_soma = teacher_soma[:, trim]
+    teacher_spikes = targets[:, trim, 0] > 0.5
+    teacher_dvdt = np.diff(teacher_soma, axis=1, prepend=teacher_soma[:, :1])
+    valid = np.isfinite(teacher_soma) & np.isfinite(teacher_dvdt)
+    voltage = teacher_soma[valid]
+    dvdt = teacher_dvdt[valid]
+    if voltage.size == 0:
+        raise ValueError("state-space surface has no finite teacher timesteps")
+
+    v_edges, d_edges = _state_space_edges(voltage, dvdt, bins=bins)
+    panels: list[tuple[str, np.ndarray]] = []
+    color_label = ""
+    cmap = "magma"
+    if statistic == "voltage_rmse":
+        assert predictions_by_model is not None
+        for model_name, prediction in predictions_by_model.items():
+            pred = np.asarray(prediction)
+            if pred.shape[:2] != targets.shape[:2] or pred.shape[-1] < 2:
+                raise ValueError(f"prediction for {model_name!r} must match target time shape and have >=2 channels")
+            pred_soma = pred[:, trim, 1] / soma_scale + soma_bias_mv
+            error = pred_soma - teacher_soma
+            panel = _state_space_rmse(
+                voltage=teacher_soma,
+                dvdt=teacher_dvdt,
+                error=error,
+                valid=valid,
+                v_edges=v_edges,
+                d_edges=d_edges,
+                min_bin_count=min_bin_count,
+            )
+            panels.append((_display_model_name(model_name), panel))
+        color_label = "Voltage RMSE (mV)"
+        cmap = "magma"
+    elif statistic == "teacher_spike_rate":
+        panel = _state_space_mean(
+            voltage=teacher_soma,
+            dvdt=teacher_dvdt,
+            values=teacher_spikes.astype(float),
+            valid=valid,
+            v_edges=v_edges,
+            d_edges=d_edges,
+            min_bin_count=min_bin_count,
+        )
+        panels.append(("teacher spikes", panel))
+        color_label = "Spike fraction"
+        cmap = "cividis"
+    else:
+        count = _state_space_count(teacher_soma, teacher_dvdt, valid=valid, v_edges=v_edges, d_edges=d_edges)
+        panel = count / np.nansum(count)
+        panel[count < min_bin_count] = np.nan
+        panels.append(("teacher support", panel))
+        color_label = "Fraction of timesteps"
+        cmap = "cividis"
+
+    output_path = Path(output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    _plot_state_space_panels(
+        panels,
+        output_path,
+        v_edges=v_edges,
+        d_edges=d_edges,
+        color_label=color_label,
+        cmap=cmap,
+        formats=formats,
+    )
+    return str(output_path.with_suffix(f".{formats[0]}"))
+
+
+def plot_state_embedding_surface(
+    *,
+    output: str | Path,
+    targets: np.ndarray,
+    predictions_by_model: Mapping[str, np.ndarray] | None = None,
+    inputs: np.ndarray | None = None,
+    raw_soma_mv: np.ndarray | None = None,
+    statistic: str = "voltage_rmse",
+    reducer: str = "umap",
+    ignore_start: int = 0,
+    soma_scale: float = 0.1,
+    soma_bias_mv: float = -67.7,
+    max_points: int = 15_000,
+    bins: int | tuple[int, int] = 58,
+    min_bin_count: int = 3,
+    random_seed: int = 0,
+    formats: tuple[str, ...] = PLOT_FORMATS,
+) -> str:
+    """Plot model error over a low-dimensional embedding of neuron state.
+
+    Unlike ``plot_state_space_surface``, which is a voltage/dVdt phase-plane
+    diagnostic, this function embeds a richer state descriptor containing
+    voltage, voltage history, recent teacher spikes, and recent input drive.
+    ``reducer='umap'`` uses UMAP when installed; ``reducer='pca'`` is a
+    dependency-free deterministic fallback.
+    """
+    apply_paper_plot_style()
+    targets = np.asarray(targets)
+    if targets.ndim != 3 or targets.shape[-1] < 2:
+        raise ValueError(f"targets must have shape (samples, time, channels>=2), got {targets.shape}")
+    if max_points <= 0:
+        raise ValueError("max_points must be positive")
+    statistic = statistic.lower().strip()
+    if statistic not in {"voltage_rmse", "teacher_spike_rate"}:
+        raise ValueError("statistic must be 'voltage_rmse' or 'teacher_spike_rate'")
+    if statistic == "voltage_rmse" and not predictions_by_model:
+        raise ValueError("predictions_by_model is required for voltage_rmse")
+    teacher_soma_full = _soma_mv_from_targets(targets, raw_soma_mv=raw_soma_mv, soma_scale=soma_scale, soma_bias_mv=soma_bias_mv)
+    features, flat = _state_embedding_features(
+        targets=targets,
+        teacher_soma_mv=teacher_soma_full,
+        inputs=None if inputs is None else np.asarray(inputs),
+        ignore_start=ignore_start,
+        max_points=max_points,
+        random_seed=random_seed,
+    )
+    embedding = _reduce_state_embedding(features, reducer=reducer, random_seed=random_seed)
+    bins_x, bins_y = _embedding_edges(embedding, bins=bins)
+    panels: list[tuple[str, np.ndarray]] = []
+    color_label = ""
+    cmap = "magma"
+    if statistic == "voltage_rmse":
+        assert predictions_by_model is not None
+        for model_name, prediction in predictions_by_model.items():
+            pred = np.asarray(prediction)
+            if pred.shape[:2] != targets.shape[:2] or pred.shape[-1] < 2:
+                raise ValueError(f"prediction for {model_name!r} must match target time shape and have >=2 channels")
+            pred_soma = pred[..., 1] / soma_scale + soma_bias_mv
+            error = pred_soma[flat["sample_index"], flat["time_index"]] - flat["teacher_soma_mv"]
+            panel = _embedding_rmse(
+                embedding,
+                error=error,
+                x_edges=bins_x,
+                y_edges=bins_y,
+                min_bin_count=min_bin_count,
+            )
+            panels.append((_display_model_name(model_name), panel))
+        color_label = "Voltage RMSE (mV)"
+        cmap = "magma"
+    else:
+        panel = _embedding_mean(
+            embedding,
+            values=flat["teacher_spike"].astype(float),
+            x_edges=bins_x,
+            y_edges=bins_y,
+            min_bin_count=min_bin_count,
+        )
+        panels.append(("teacher spikes", panel))
+        color_label = "Spike fraction"
+        cmap = "cividis"
+
+    output_path = Path(output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    _plot_embedding_panels(
+        panels,
+        output_path,
+        x_edges=bins_x,
+        y_edges=bins_y,
+        color_label=color_label,
+        cmap=cmap,
+        reducer=reducer,
+        formats=formats,
+    )
+    return str(output_path.with_suffix(f".{formats[0]}"))
+
+
+def _soma_mv_from_targets(
+    targets: np.ndarray,
+    *,
+    raw_soma_mv: np.ndarray | None,
+    soma_scale: float,
+    soma_bias_mv: float,
+) -> np.ndarray:
+    if raw_soma_mv is not None:
+        raw = np.asarray(raw_soma_mv, dtype=float)
+        if raw.shape != targets.shape[:2]:
+            raise ValueError(f"raw_soma_mv must have shape {targets.shape[:2]}, got {raw.shape}")
+        return raw
+    return np.asarray(targets[..., 1], dtype=float) / soma_scale + soma_bias_mv
+
+
+def _state_embedding_features(
+    *,
+    targets: np.ndarray,
+    teacher_soma_mv: np.ndarray,
+    inputs: np.ndarray | None,
+    ignore_start: int,
+    max_points: int,
+    random_seed: int,
+) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+    if ignore_start < 0:
+        raise ValueError("ignore_start must be non-negative")
+    if ignore_start >= targets.shape[1]:
+        raise ValueError("ignore_start leaves no timesteps to embed")
+    soma = np.asarray(teacher_soma_mv, dtype=float)
+    spikes = targets[..., 0] > 0.5
+    dvdt = np.diff(soma, axis=1, prepend=soma[:, :1])
+    time_mask = np.zeros(targets.shape[:2], dtype=bool)
+    time_mask[:, ignore_start:] = True
+    valid = time_mask & np.isfinite(soma) & np.isfinite(dvdt)
+    candidate = np.flatnonzero(valid.ravel())
+    if candidate.size == 0:
+        raise ValueError("state embedding has no valid timesteps")
+    flat_spikes = spikes.ravel()
+    flat_dvdt = np.abs(dvdt).ravel()
+    high_dvdt_threshold = np.nanquantile(flat_dvdt[candidate], 0.95)
+    priority_mask = flat_spikes | (flat_dvdt >= high_dvdt_threshold)
+    priority = candidate[priority_mask[candidate]]
+    rng = np.random.default_rng(random_seed)
+    if candidate.size > max_points:
+        remaining_budget = max(0, max_points - min(priority.size, max_points // 2))
+        priority_keep = (
+            rng.choice(priority, size=max_points - remaining_budget, replace=False)
+            if priority.size > max_points - remaining_budget
+            else priority
+        )
+        rest = np.setdiff1d(candidate, priority_keep, assume_unique=False)
+        if rest.size > remaining_budget:
+            rest = rng.choice(rest, size=remaining_budget, replace=False)
+        selected = np.concatenate([priority_keep, rest])
+        rng.shuffle(selected)
+    else:
+        selected = candidate
+    sample_index, time_index = np.unravel_index(selected, targets.shape[:2])
+    feature_columns = [
+        soma[sample_index, time_index],
+        dvdt[sample_index, time_index],
+        _lagged_at(soma, sample_index, time_index, 1),
+        _lagged_at(soma, sample_index, time_index, 5),
+        _lagged_at(soma, sample_index, time_index, 20),
+        _lagged_at(dvdt, sample_index, time_index, 1),
+        _lagged_at(dvdt, sample_index, time_index, 5),
+        _window_sum(spikes.astype(float), sample_index, time_index, 5),
+        _window_sum(spikes.astype(float), sample_index, time_index, 25),
+    ]
+    if inputs is not None:
+        if inputs.shape[:2] != targets.shape[:2]:
+            raise ValueError(f"inputs must match target sample/time shape {targets.shape[:2]}, got {inputs.shape[:2]}")
+        input_activity = np.abs(inputs).sum(axis=-1).astype(float)
+        input_positive = (inputs > 0).sum(axis=-1).astype(float)
+        input_negative = (inputs < 0).sum(axis=-1).astype(float)
+        for activity in (input_activity, input_positive, input_negative):
+            feature_columns.extend(
+                [
+                    _window_sum(activity, sample_index, time_index, 1),
+                    _window_sum(activity, sample_index, time_index, 5),
+                    _window_sum(activity, sample_index, time_index, 25),
+                ]
+            )
+    features = np.column_stack(feature_columns).astype(float)
+    features = _standardize_features(features)
+    flat = {
+        "sample_index": sample_index,
+        "time_index": time_index,
+        "teacher_soma_mv": soma[sample_index, time_index],
+        "teacher_spike": spikes[sample_index, time_index],
+    }
+    return features, flat
+
+
+def _lagged_at(values: np.ndarray, sample_index: np.ndarray, time_index: np.ndarray, lag: int) -> np.ndarray:
+    lagged_index = np.maximum(time_index - lag, 0)
+    return values[sample_index, lagged_index]
+
+
+def _window_sum(values: np.ndarray, sample_index: np.ndarray, time_index: np.ndarray, window: int) -> np.ndarray:
+    if window <= 0:
+        return values[sample_index, time_index]
+    cumsum = np.cumsum(values, axis=1)
+    end = time_index
+    start = np.maximum(time_index - window + 1, 0)
+    total = cumsum[sample_index, end]
+    before = np.zeros_like(total, dtype=float)
+    has_before = start > 0
+    before[has_before] = cumsum[sample_index[has_before], start[has_before] - 1]
+    return total - before
+
+
+def _standardize_features(features: np.ndarray) -> np.ndarray:
+    median = np.nanmedian(features, axis=0)
+    q25, q75 = np.nanquantile(features, [0.25, 0.75], axis=0)
+    scale = q75 - q25
+    scale[~np.isfinite(scale) | (scale <= 1e-8)] = 1.0
+    standardized = (features - median) / scale
+    return np.nan_to_num(standardized, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def _reduce_state_embedding(features: np.ndarray, *, reducer: str, random_seed: int) -> np.ndarray:
+    reducer = reducer.lower().strip()
+    if reducer == "umap":
+        try:
+            from umap import UMAP  # type: ignore
+        except ImportError as error:
+            raise ImportError("UMAP state embeddings require the optional dependency 'umap-learn'") from error
+        embedding = UMAP(
+            n_neighbors=35,
+            min_dist=0.08,
+            metric="euclidean",
+            random_state=random_seed,
+            low_memory=True,
+        ).fit_transform(features)
+    elif reducer == "pca":
+        embedding = _pca_embedding(features)
+    else:
+        raise ValueError("reducer must be 'umap' or 'pca'")
+    embedding = np.asarray(embedding, dtype=float)
+    if embedding.shape[1] != 2:
+        raise ValueError(f"state embedding reducer returned shape {embedding.shape}, expected second dimension 2")
+    return embedding
+
+
+def _pca_embedding(features: np.ndarray) -> np.ndarray:
+    centered = features - np.mean(features, axis=0, keepdims=True)
+    _u, _s, vh = np.linalg.svd(centered, full_matrices=False)
+    components = vh[:2].T
+    if components.shape[1] < 2:
+        components = np.pad(components, ((0, 0), (0, 2 - components.shape[1])))
+    return centered @ components
+
+
+def _embedding_edges(embedding: np.ndarray, *, bins: int | tuple[int, int]) -> tuple[np.ndarray, np.ndarray]:
+    if isinstance(bins, int):
+        if bins <= 1:
+            raise ValueError("bins must be greater than 1")
+        x_bins = y_bins = bins
+    else:
+        x_bins, y_bins = bins
+        if x_bins <= 1 or y_bins <= 1:
+            raise ValueError("both bin counts must be greater than 1")
+    x_lo, x_hi = np.nanquantile(embedding[:, 0], [0.005, 0.995])
+    y_lo, y_hi = np.nanquantile(embedding[:, 1], [0.005, 0.995])
+    x_pad = max(1e-3, 0.03 * float(x_hi - x_lo))
+    y_pad = max(1e-3, 0.03 * float(y_hi - y_lo))
+    return (
+        np.linspace(float(x_lo - x_pad), float(x_hi + x_pad), int(x_bins) + 1),
+        np.linspace(float(y_lo - y_pad), float(y_hi + y_pad), int(y_bins) + 1),
+    )
+
+
+def _embedding_rmse(
+    embedding: np.ndarray,
+    *,
+    error: np.ndarray,
+    x_edges: np.ndarray,
+    y_edges: np.ndarray,
+    min_bin_count: int,
+) -> np.ndarray:
+    valid = np.isfinite(error) & np.isfinite(embedding[:, 0]) & np.isfinite(embedding[:, 1])
+    count = np.histogram2d(embedding[valid, 0], embedding[valid, 1], bins=(x_edges, y_edges))[0]
+    squared_sum = np.histogram2d(
+        embedding[valid, 0],
+        embedding[valid, 1],
+        bins=(x_edges, y_edges),
+        weights=np.square(error[valid]),
+    )[0]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        rmse = np.sqrt(squared_sum / count)
+    rmse[count < min_bin_count] = np.nan
+    return rmse
+
+
+def _embedding_mean(
+    embedding: np.ndarray,
+    *,
+    values: np.ndarray,
+    x_edges: np.ndarray,
+    y_edges: np.ndarray,
+    min_bin_count: int,
+) -> np.ndarray:
+    valid = np.isfinite(values) & np.isfinite(embedding[:, 0]) & np.isfinite(embedding[:, 1])
+    count = np.histogram2d(embedding[valid, 0], embedding[valid, 1], bins=(x_edges, y_edges))[0]
+    total = np.histogram2d(
+        embedding[valid, 0],
+        embedding[valid, 1],
+        bins=(x_edges, y_edges),
+        weights=values[valid],
+    )[0]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        mean = total / count
+    mean[count < min_bin_count] = np.nan
+    return mean
+
+
+def _plot_embedding_panels(
+    panels: list[tuple[str, np.ndarray]],
+    output: Path,
+    *,
+    x_edges: np.ndarray,
+    y_edges: np.ndarray,
+    color_label: str,
+    cmap: str,
+    reducer: str,
+    formats: tuple[str, ...],
+) -> None:
+    n_panels = len(panels)
+    n_cols = min(3, n_panels)
+    n_rows = int(np.ceil(n_panels / n_cols))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(2.45 * n_cols + 0.45, 2.3 * n_rows), squeeze=False)
+    finite_values = [panel[np.isfinite(panel)] for _label, panel in panels if np.any(np.isfinite(panel))]
+    values = np.concatenate(finite_values) if finite_values else np.asarray([], dtype=float)
+    vmax = float(np.nanpercentile(values, 96)) if values.size else 1.0
+    if not np.isfinite(vmax) or vmax <= 0.0:
+        vmax = 1.0
+    mesh = None
+    for ax, (label, panel) in zip(axes.flat, panels, strict=False):
+        mesh = ax.pcolormesh(x_edges, y_edges, panel.T, cmap=cmap, vmin=0.0, vmax=vmax, shading="auto")
+        ax.text(0.04, 0.93, label, transform=ax.transAxes, ha="left", va="top", fontsize=6.8)
+        ax.set_box_aspect(1.0)
+        ax.grid(False)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_xlabel(f"{reducer.upper()} state 1")
+        ax.set_ylabel(f"{reducer.upper()} state 2")
+    for ax in list(axes.flat)[n_panels:]:
+        ax.axis("off")
+    fig.subplots_adjust(left=0.08, right=0.86, bottom=0.14, top=0.96, wspace=0.35, hspace=0.42)
+    if mesh is not None:
+        cax = fig.add_axes([0.89, 0.24, 0.018, 0.60])
+        cbar = fig.colorbar(mesh, cax=cax)
+        cbar.set_label(color_label)
+    _save_figure(fig, output, formats)
+    plt.close(fig)
+
+
+def _state_space_edges(
+    voltage: np.ndarray,
+    dvdt: np.ndarray,
+    *,
+    bins: int | tuple[int, int],
+) -> tuple[np.ndarray, np.ndarray]:
+    if isinstance(bins, int):
+        if bins <= 1:
+            raise ValueError("bins must be greater than 1")
+        x_bins = y_bins = bins
+    else:
+        x_bins, y_bins = bins
+        if x_bins <= 1 or y_bins <= 1:
+            raise ValueError("both bin counts must be greater than 1")
+    v_lo, v_hi = np.nanquantile(voltage, [0.002, 0.998])
+    d_limit = float(np.nanquantile(np.abs(dvdt), 0.998))
+    d_limit = max(d_limit, 1e-3)
+    if not np.isfinite(v_hi) or v_hi <= v_lo:
+        center = float(np.nanmean(voltage)) if voltage.size else 0.0
+        v_lo, v_hi = center - 1.0, center + 1.0
+    v_pad = max(0.5, 0.025 * float(v_hi - v_lo))
+    return (
+        np.linspace(float(v_lo - v_pad), float(v_hi + v_pad), int(x_bins) + 1),
+        np.linspace(-d_limit, d_limit, int(y_bins) + 1),
+    )
+
+
+def _state_space_count(
+    voltage: np.ndarray,
+    dvdt: np.ndarray,
+    *,
+    valid: np.ndarray,
+    v_edges: np.ndarray,
+    d_edges: np.ndarray,
+) -> np.ndarray:
+    return np.histogram2d(voltage[valid], dvdt[valid], bins=(v_edges, d_edges))[0].astype(float)
+
+
+def _state_space_rmse(
+    *,
+    voltage: np.ndarray,
+    dvdt: np.ndarray,
+    error: np.ndarray,
+    valid: np.ndarray,
+    v_edges: np.ndarray,
+    d_edges: np.ndarray,
+    min_bin_count: int,
+) -> np.ndarray:
+    value_valid = valid & np.isfinite(error)
+    count = _state_space_count(voltage, dvdt, valid=value_valid, v_edges=v_edges, d_edges=d_edges)
+    squared_sum = np.histogram2d(
+        voltage[value_valid],
+        dvdt[value_valid],
+        bins=(v_edges, d_edges),
+        weights=np.square(error[value_valid]),
+    )[0]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        rmse = np.sqrt(squared_sum / count)
+    rmse[count < min_bin_count] = np.nan
+    return rmse
+
+
+def _state_space_mean(
+    *,
+    voltage: np.ndarray,
+    dvdt: np.ndarray,
+    values: np.ndarray,
+    valid: np.ndarray,
+    v_edges: np.ndarray,
+    d_edges: np.ndarray,
+    min_bin_count: int,
+) -> np.ndarray:
+    value_valid = valid & np.isfinite(values)
+    count = _state_space_count(voltage, dvdt, valid=value_valid, v_edges=v_edges, d_edges=d_edges)
+    total = np.histogram2d(
+        voltage[value_valid],
+        dvdt[value_valid],
+        bins=(v_edges, d_edges),
+        weights=values[value_valid],
+    )[0]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        mean = total / count
+    mean[count < min_bin_count] = np.nan
+    return mean
+
+
+def _plot_state_space_panels(
+    panels: list[tuple[str, np.ndarray]],
+    output: Path,
+    *,
+    v_edges: np.ndarray,
+    d_edges: np.ndarray,
+    color_label: str,
+    cmap: str,
+    formats: tuple[str, ...],
+) -> None:
+    n_panels = len(panels)
+    n_cols = min(3, n_panels)
+    n_rows = int(np.ceil(n_panels / n_cols))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(2.35 * n_cols + 0.45, 2.25 * n_rows), squeeze=False)
+    finite_values = [panel[np.isfinite(panel)] for _label, panel in panels if np.any(np.isfinite(panel))]
+    values = np.concatenate(finite_values) if finite_values else np.asarray([], dtype=float)
+    if values.size:
+        vmax = float(np.nanpercentile(values, 96))
+        if not np.isfinite(vmax) or vmax <= 0.0:
+            vmax = float(np.nanmax(values))
+    else:
+        vmax = 1.0
+    vmin = 0.0
+    mesh = None
+    for ax, (label, panel) in zip(axes.flat, panels, strict=False):
+        mesh = ax.pcolormesh(v_edges, d_edges, panel.T, cmap=cmap, vmin=vmin, vmax=vmax, shading="auto")
+        ax.text(0.04, 0.93, label, transform=ax.transAxes, ha="left", va="top", fontsize=6.8)
+        ax.set_box_aspect(1.0)
+        ax.grid(False)
+        ax.set_xlabel("Teacher soma voltage (mV)")
+        ax.set_ylabel(r"Teacher $\Delta V$ (mV/step)")
+    for ax in list(axes.flat)[n_panels:]:
+        ax.axis("off")
+    fig.subplots_adjust(left=0.08, right=0.86, bottom=0.14, top=0.96, wspace=0.42, hspace=0.46)
+    if mesh is not None:
+        cax = fig.add_axes([0.89, 0.24, 0.018, 0.60])
+        cbar = fig.colorbar(mesh, cax=cax)
+        cbar.set_label(color_label)
+    _save_figure(fig, output, formats)
+    plt.close(fig)
+
+
+def _display_model_name(model_name: str) -> str:
+    return (
+        model_name.replace("branch_elm_", "Branch-ELM ")
+        .replace("sera_weighted_", "SERA ")
+        .replace("baseline", "uniform MSE")
+        .replace("0p5", "0.5")
+        .replace("1p0", "1.0")
+        .replace("_", " ")
+    )
 
 
 def group_rows_by_model(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:

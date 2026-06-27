@@ -61,9 +61,16 @@ def test_diagnostic_specs_use_variable_length_plotter_lists():
     diagnostics = default_diagnostic_specs()
     clipping = next(diagnostic for diagnostic in diagnostics if diagnostic.name == "clipping_distortion")
     feature = next(diagnostic for diagnostic in diagnostics if diagnostic.name == "feature_fidelity")
+    state = next(diagnostic for diagnostic in diagnostics if diagnostic.name == "state_dynamics")
 
     assert len(clipping.plotters) == 2
     assert len(feature.plotters) == 0
+    assert {plotter.name for plotter in state.plotters} >= {
+        "state_metric_matrix",
+        "state_space_voltage_error_surface",
+        "state_space_teacher_surface",
+        "state_embedding_error_surface",
+    }
     assert {plotter.kind for plotter in clipping.plotters} == {"atomic", "example"}
     assert all(hasattr(diagnostic, "plotters") for diagnostic in diagnostics)
     assert not any(hasattr(diagnostic, "plot_main") or hasattr(diagnostic, "plot_breakdown") for diagnostic in diagnostics)
