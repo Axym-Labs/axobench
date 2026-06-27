@@ -67,8 +67,8 @@ def test_diagnostic_specs_use_variable_length_plotter_lists():
     assert len(feature.plotters) == 0
     assert {plotter.name for plotter in state.plotters} >= {
         "state_metric_matrix",
-        "state_space_voltage_error_surface",
-        "state_space_teacher_surface",
+        "phase_plane_voltage_error_surface",
+        "phase_plane_teacher_surface",
         "state_embedding_error_surface",
     }
     assert {plotter.kind for plotter in clipping.plotters} == {"atomic", "example"}

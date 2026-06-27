@@ -380,13 +380,13 @@ def default_diagnostic_specs() -> tuple[DiagnosticSpec, ...]:
                     description="Metric-by-state matrix for dense behavior-specific failure inspection.",
                 ),
                 PlotterSpec(
-                    name="state_space_voltage_error_surface",
+                    name="phase_plane_voltage_error_surface",
                     kind="atomic",
                     consumes=("state_dynamics",),
                     description="Binned voltage/dVdt phase-plane surface for model error over teacher state.",
                 ),
                 PlotterSpec(
-                    name="state_space_teacher_surface",
+                    name="phase_plane_teacher_surface",
                     kind="atomic",
                     consumes=("state_dynamics",),
                     description="Binned voltage/dVdt phase-plane surface for teacher support or spike sparsity.",

@@ -1,9 +1,9 @@
 import numpy as np
 
-from axobench.benchmark.plots import plot_state_embedding_surface, plot_state_space_surface
+from axobench.benchmark.plots import plot_state_embedding_surface, plot_phase_plane_surface
 
 
-def test_state_space_surface_writes_model_and_teacher_plots(tmp_path):
+def test_phase_plane_surface_writes_model_and_teacher_plots(tmp_path):
     time = np.linspace(0.0, 1.0, 48, dtype=np.float32)
     raw = np.stack(
         [
@@ -18,8 +18,8 @@ def test_state_space_surface_writes_model_and_teacher_plots(tmp_path):
     prediction = targets.copy()
     prediction[..., 1] += 0.05
 
-    model_path = plot_state_space_surface(
-        output=tmp_path / "state_space_error",
+    model_path = plot_phase_plane_surface(
+        output=tmp_path / "phase_plane_error",
         targets=targets,
         predictions_by_model={"baseline": prediction},
         raw_soma_mv=raw,
@@ -27,8 +27,8 @@ def test_state_space_surface_writes_model_and_teacher_plots(tmp_path):
         min_bin_count=1,
         formats=("svg", "png"),
     )
-    teacher_path = plot_state_space_surface(
-        output=tmp_path / "state_space_spikes",
+    teacher_path = plot_phase_plane_surface(
+        output=tmp_path / "phase_plane_spikes",
         targets=targets,
         raw_soma_mv=raw,
         statistic="teacher_spike_rate",
@@ -38,10 +38,10 @@ def test_state_space_surface_writes_model_and_teacher_plots(tmp_path):
     )
 
     assert model_path.endswith(".svg")
-    assert (tmp_path / "state_space_error.svg").exists()
-    assert (tmp_path / "state_space_error.png").exists()
+    assert (tmp_path / "phase_plane_error.svg").exists()
+    assert (tmp_path / "phase_plane_error.png").exists()
     assert teacher_path.endswith(".svg")
-    assert (tmp_path / "state_space_spikes.svg").exists()
+    assert (tmp_path / "phase_plane_spikes.svg").exists()
 
 
 def test_state_embedding_surface_writes_pca_plot_without_optional_umap(tmp_path):

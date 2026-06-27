@@ -185,7 +185,7 @@ def plot_phase_plane_example(example: dict[str, Any], output: str | Path) -> Non
     plt.close(fig)
 
 
-def plot_state_space_surface(
+def plot_phase_plane_surface(
     *,
     output: str | Path,
     targets: np.ndarray,
@@ -229,9 +229,9 @@ def plot_state_space_surface(
     voltage = teacher_soma[valid]
     dvdt = teacher_dvdt[valid]
     if voltage.size == 0:
-        raise ValueError("state-space surface has no finite teacher timesteps")
+        raise ValueError("phase-plane surface has no finite teacher timesteps")
 
-    v_edges, d_edges = _state_space_edges(voltage, dvdt, bins=bins)
+    v_edges, d_edges = _phase_plane_edges(voltage, dvdt, bins=bins)
     panels: list[tuple[str, np.ndarray]] = []
     color_label = ""
     cmap = "magma"
@@ -243,7 +243,7 @@ def plot_state_space_surface(
                 raise ValueError(f"prediction for {model_name!r} must match target time shape and have >=2 channels")
             pred_soma = pred[:, trim, 1] / soma_scale + soma_bias_mv
             error = pred_soma - teacher_soma
-            panel = _state_space_rmse(
+            panel = _phase_plane_rmse(
                 voltage=teacher_soma,
                 dvdt=teacher_dvdt,
                 error=error,
@@ -256,7 +256,7 @@ def plot_state_space_surface(
         color_label = "Voltage RMSE (mV)"
         cmap = "magma"
     elif statistic == "teacher_spike_rate":
-        panel = _state_space_mean(
+        panel = _phase_plane_mean(
             voltage=teacher_soma,
             dvdt=teacher_dvdt,
             values=teacher_spikes.astype(float),
@@ -269,7 +269,7 @@ def plot_state_space_surface(
         color_label = "Spike fraction"
         cmap = "cividis"
     else:
-        count = _state_space_count(teacher_soma, teacher_dvdt, valid=valid, v_edges=v_edges, d_edges=d_edges)
+        count = _phase_plane_count(teacher_soma, teacher_dvdt, valid=valid, v_edges=v_edges, d_edges=d_edges)
         panel = count / np.nansum(count)
         panel[count < min_bin_count] = np.nan
         panels.append(("teacher support", panel))
@@ -278,7 +278,7 @@ def plot_state_space_surface(
 
     output_path = Path(output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    _plot_state_space_panels(
+    _plot_phase_plane_panels(
         panels,
         output_path,
         v_edges=v_edges,
@@ -288,6 +288,11 @@ def plot_state_space_surface(
         formats=formats,
     )
     return str(output_path.with_suffix(f".{formats[0]}"))
+
+
+def plot_state_space_surface(*args: Any, **kwargs: Any) -> str:
+    """Compatibility alias for the old phase-plane surface name."""
+    return plot_phase_plane_surface(*args, **kwargs)
 
 
 def plot_state_embedding_surface(
@@ -310,7 +315,7 @@ def plot_state_embedding_surface(
 ) -> str:
     """Plot model error over a low-dimensional embedding of neuron state.
 
-    Unlike ``plot_state_space_surface``, which is a voltage/dVdt phase-plane
+    Unlike ``plot_phase_plane_surface``, which is a voltage/dVdt phase-plane
     diagnostic, this function embeds a richer state descriptor containing
     voltage, voltage history, recent teacher spikes, and recent input drive.
     ``reducer='umap'`` uses UMAP when installed; ``reducer='pca'`` is a
@@ -644,7 +649,7 @@ def _plot_embedding_panels(
     plt.close(fig)
 
 
-def _state_space_edges(
+def _phase_plane_edges(
     voltage: np.ndarray,
     dvdt: np.ndarray,
     *,
@@ -671,7 +676,7 @@ def _state_space_edges(
     )
 
 
-def _state_space_count(
+def _phase_plane_count(
     voltage: np.ndarray,
     dvdt: np.ndarray,
     *,
@@ -682,7 +687,7 @@ def _state_space_count(
     return np.histogram2d(voltage[valid], dvdt[valid], bins=(v_edges, d_edges))[0].astype(float)
 
 
-def _state_space_rmse(
+def _phase_plane_rmse(
     *,
     voltage: np.ndarray,
     dvdt: np.ndarray,
@@ -693,7 +698,7 @@ def _state_space_rmse(
     min_bin_count: int,
 ) -> np.ndarray:
     value_valid = valid & np.isfinite(error)
-    count = _state_space_count(voltage, dvdt, valid=value_valid, v_edges=v_edges, d_edges=d_edges)
+    count = _phase_plane_count(voltage, dvdt, valid=value_valid, v_edges=v_edges, d_edges=d_edges)
     squared_sum = np.histogram2d(
         voltage[value_valid],
         dvdt[value_valid],
@@ -706,7 +711,7 @@ def _state_space_rmse(
     return rmse
 
 
-def _state_space_mean(
+def _phase_plane_mean(
     *,
     voltage: np.ndarray,
     dvdt: np.ndarray,
@@ -717,7 +722,7 @@ def _state_space_mean(
     min_bin_count: int,
 ) -> np.ndarray:
     value_valid = valid & np.isfinite(values)
-    count = _state_space_count(voltage, dvdt, valid=value_valid, v_edges=v_edges, d_edges=d_edges)
+    count = _phase_plane_count(voltage, dvdt, valid=value_valid, v_edges=v_edges, d_edges=d_edges)
     total = np.histogram2d(
         voltage[value_valid],
         dvdt[value_valid],
@@ -730,7 +735,7 @@ def _state_space_mean(
     return mean
 
 
-def _plot_state_space_panels(
+def _plot_phase_plane_panels(
     panels: list[tuple[str, np.ndarray]],
     output: Path,
     *,
