@@ -95,6 +95,7 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "evaluate_model": ("axobench.benchmark.iteration_evaluator", "evaluate_model"),
     "evaluate_predictions": ("axobench.benchmark.iteration_evaluator", "evaluate_predictions"),
     "format_evaluation_report": ("axobench.benchmark.iteration_evaluator", "format_evaluation_report"),
+    "write_evaluation_report": ("axobench.benchmark.iteration_evaluator", "write_evaluation_report"),
 }
 
 __all__ = sorted(_EXPORTS)

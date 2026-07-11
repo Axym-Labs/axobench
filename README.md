@@ -29,11 +29,23 @@ report = evaluate_model(
     predict,
     dataset_root="data/axobench-v1",
     model_id="candidate-17",
-    max_samples=64,
-    max_intervention_samples=8,
     config=EvaluationConfig(default_spike_threshold=0.0),
 )
 print(format_evaluation_report(report))
+```
+
+The default iteration profile uses 240 morphology-balanced validation traces,
+60 paired traces per intervention, 16 traces per model batch, and four parallel
+CPU intervention loaders. These defaults were selected from trace-level,
+morphology-stratified 95% bootstrap intervals; all limits remain configurable.
+
+Evaluation only prints by default. Persist a strict JSON or tidy CSV report
+when needed:
+
+```python
+from axobench.benchmark import write_evaluation_report
+
+write_evaluation_report(report, "runs/candidate-17.csv")
 ```
 
 The terminal report is bounded to eight metric rows and 24 diagnostic rows.

@@ -8,8 +8,12 @@ measurement protocol and terminal report.
 from __future__ import annotations
 
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+import csv
 from dataclasses import dataclass
+import json
 from pathlib import Path
+import re
 import time
 from typing import Any, Iterable
 
@@ -23,6 +27,12 @@ from axobench.metrics import (
     voltage_sera,
 )
 from axobench.data import ShardedNeuronIODataset
+
+
+DEFAULT_STANDARD_SAMPLES = 240
+DEFAULT_INTERVENTION_SAMPLES = 60
+DEFAULT_INTERVENTION_WORKERS = 4
+DEFAULT_BATCH_SIZE = 16
 
 
 ATTENTION_BASES = {
@@ -121,10 +131,11 @@ def evaluate_model(
     *,
     dataset_root: str | Path,
     model_id: str = "model",
-    max_samples: int = 64,
-    batch_size: int = 8,
-    max_intervention_samples: int = 8,
+    max_samples: int = DEFAULT_STANDARD_SAMPLES,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    max_intervention_samples: int = DEFAULT_INTERVENTION_SAMPLES,
     max_interventions: int = 8,
+    intervention_workers: int = DEFAULT_INTERVENTION_WORKERS,
     intervention_names: Iterable[str] | None = None,
     cache_shards: int = 1,
     config: EvaluationConfig | None = None,
@@ -139,6 +150,8 @@ def evaluate_model(
         raise ValueError("max_samples must be at least two")
     if batch_size <= 0 or max_intervention_samples <= 0 or max_interventions < 0:
         raise ValueError("batch and intervention limits must be positive")
+    if intervention_workers <= 0:
+        raise ValueError("intervention_workers must be positive")
     started_at = time.perf_counter()
     root = Path(dataset_root)
     validation = ShardedNeuronIODataset(root / "val", cache_shards=cache_shards)
@@ -179,6 +192,7 @@ def evaluate_model(
         batch_size=batch_size,
         max_samples=max_intervention_samples,
         max_interventions=max_interventions,
+        workers=intervention_workers,
         intervention_names=intervention_names,
     )
     prediction_array = np.concatenate(predictions, axis=0)
@@ -361,6 +375,130 @@ def format_evaluation_report(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def write_evaluation_report(report: dict[str, Any], path: str | Path) -> Path:
+    """Write the report as strict JSON or tidy CSV, selected by suffix."""
+    output = Path(path)
+    suffix = output.suffix.lower()
+    if suffix not in {".json", ".csv"}:
+        raise ValueError("evaluation report path must end in .json or .csv")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    if suffix == ".json":
+        output.write_text(
+            json.dumps(_json_safe(report), indent=2, sort_keys=True, allow_nan=False) + "\n",
+            encoding="utf-8",
+        )
+        return output
+
+    fieldnames = (
+        "model_id",
+        "samples",
+        "calibration_samples",
+        "scored_samples",
+        "spike_threshold",
+        "evaluation_seconds",
+        "row_type",
+        "id",
+        "value",
+        "unit",
+        "attention",
+        "condition",
+        "trigger",
+        "basis",
+        "meaning",
+    )
+    with output.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(_report_csv_rows(report))
+    return output
+
+
+def _report_csv_rows(report: dict[str, Any]) -> list[dict[str, Any]]:
+    common = {
+        "model_id": report.get("model_id"),
+        "samples": report.get("samples"),
+        "calibration_samples": report.get("calibration_samples"),
+        "scored_samples": report.get("scored_samples"),
+        "spike_threshold": _csv_value(report.get("spike_threshold")),
+        "evaluation_seconds": _csv_value(report.get("evaluation_seconds")),
+    }
+    rows: list[dict[str, Any]] = []
+    for metric in report.get("metrics", []):
+        rows.append(
+            {
+                **common,
+                "row_type": "metric",
+                "id": metric.get("id"),
+                "value": _csv_value(metric.get("value")),
+                "unit": metric.get("unit"),
+                "meaning": metric.get("meaning"),
+            }
+        )
+    for diagnostic in report.get("diagnostics", []):
+        rows.append(
+            {
+                **common,
+                "row_type": "diagnostic",
+                "id": diagnostic.get("id"),
+                "value": _csv_value(diagnostic.get("value")),
+                "unit": diagnostic.get("unit"),
+                "attention": diagnostic.get("attention"),
+                "condition": _diagnostic_condition(diagnostic.get("primary")),
+                "trigger": diagnostic.get("trigger"),
+                "basis": diagnostic.get("basis"),
+            }
+        )
+    intervention_units = {
+        "response_sera_mv": "mV",
+        "zero_response_sera_mv": "mV",
+        "response_skill": "skill",
+        "direction_agreement": "fraction",
+        "response_gain": "ratio",
+    }
+    for intervention in report.get("interventions", []):
+        for identifier, unit in intervention_units.items():
+            rows.append(
+                {
+                    **common,
+                    "row_type": "intervention",
+                    "id": identifier,
+                    "value": _csv_value(intervention.get(identifier)),
+                    "unit": unit,
+                    "condition": intervention.get("name"),
+                }
+            )
+    return rows
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, np.generic):
+        return _json_safe(value.item())
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, float) and not np.isfinite(value):
+        return None
+    return value
+
+
+def _csv_value(value: Any) -> Any:
+    if value is None:
+        return ""
+    if isinstance(value, (float, np.floating)) and not np.isfinite(value):
+        return ""
+    return value
+
+
+def _diagnostic_condition(primary: Any) -> str:
+    text = str(primary or "")
+    if "[" not in text or not text.endswith("]"):
+        return ""
+    return text.rsplit("[", 1)[1][:-1]
+
+
 def _run_dataset_interventions(
     model_fn: Callable[[np.ndarray], np.ndarray],
     *,
@@ -368,6 +506,7 @@ def _run_dataset_interventions(
     batch_size: int,
     max_samples: int,
     max_interventions: int,
+    workers: int,
     intervention_names: Iterable[str] | None,
 ) -> list[PairedInterventionPredictions]:
     interventions_root = root / "interventions"
@@ -383,21 +522,38 @@ def _run_dataset_interventions(
         raise FileNotFoundError(f"intervention folders not found: {sorted(missing)}")
 
     results = []
-    for directory in directories:
-        pair = _load_intervention_directory(directory, max_samples=max_samples)
-        base_prediction = _predict_in_batches(model_fn, pair["baseline_inputs"], batch_size=batch_size)
-        intervention_prediction = _predict_in_batches(model_fn, pair["intervention_inputs"], batch_size=batch_size)
-        results.append(
-            PairedInterventionPredictions(
-                name=directory.name,
-                baseline_prediction=base_prediction,
-                intervention_prediction=intervention_prediction,
-                baseline_target=pair["baseline_targets"],
-                intervention_target=pair["intervention_targets"],
-                baseline_raw_soma_mv=pair.get("baseline_soma_mv"),
-                intervention_raw_soma_mv=pair.get("intervention_soma_mv"),
-            )
+    worker_count = min(workers, len(directories))
+    if worker_count <= 1:
+        loaded_pairs = (_load_intervention_directory(path, max_samples=max_samples) for path in directories)
+        executor = None
+    else:
+        executor = ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="axobench-intervention")
+        loaded_pairs = executor.map(
+            lambda path: _load_intervention_directory(path, max_samples=max_samples),
+            directories,
         )
+    try:
+        for directory, pair in zip(directories, loaded_pairs, strict=True):
+            base_prediction = _predict_in_batches(model_fn, pair["baseline_inputs"], batch_size=batch_size)
+            intervention_prediction = _predict_in_batches(
+                model_fn,
+                pair["intervention_inputs"],
+                batch_size=batch_size,
+            )
+            results.append(
+                PairedInterventionPredictions(
+                    name=directory.name,
+                    baseline_prediction=base_prediction,
+                    intervention_prediction=intervention_prediction,
+                    baseline_target=pair["baseline_targets"],
+                    intervention_target=pair["intervention_targets"],
+                    baseline_raw_soma_mv=pair.get("baseline_soma_mv"),
+                    intervention_raw_soma_mv=pair.get("intervention_soma_mv"),
+                )
+            )
+    finally:
+        if executor is not None:
+            executor.shutdown(wait=True)
     return results
 
 
@@ -439,11 +595,39 @@ def _round_robin_group_order(trace_ids: list[str]) -> np.ndarray:
 
 
 def _load_intervention_directory(path: Path, *, max_samples: int) -> dict[str, np.ndarray]:
+    paths = sorted(path.glob("*.npz"))
+    if not paths:
+        raise FileNotFoundError(f"no paired intervention NPZ files found in {path}")
+    groups: dict[str, list[Path]] = {}
+    for pair_path in paths:
+        groups.setdefault(_pair_morphology_id(pair_path), []).append(pair_path)
+    names = sorted(groups)
+    base, extra = divmod(int(max_samples), len(names))
+    loaded: list[tuple[str, dict[str, np.ndarray]]] = []
+    for position, name in enumerate(names):
+        quota = base + int(position < extra)
+        if quota > 0:
+            loaded.append((name, _load_intervention_paths(groups[name], max_samples=quota)))
+    if not loaded:
+        raise ValueError("max_samples must be positive")
+
+    required = ("baseline_inputs", "baseline_targets", "intervention_inputs", "intervention_targets")
+    result = {name: np.concatenate([item[name] for _, item in loaded], axis=0) for name in required}
+    for name in ("baseline_soma_mv", "intervention_soma_mv"):
+        if all(name in item for _, item in loaded):
+            result[name] = np.concatenate([item[name] for _, item in loaded], axis=0)
+    result["morphology_ids"] = np.concatenate(
+        [np.repeat(name, item["baseline_inputs"].shape[0]) for name, item in loaded]
+    )
+    return result
+
+
+def _load_intervention_paths(paths: list[Path], *, max_samples: int) -> dict[str, np.ndarray]:
     required = ("baseline_inputs", "baseline_targets", "intervention_inputs", "intervention_targets")
     optional = ("baseline_soma_mv", "intervention_soma_mv")
     chunks: dict[str, list[np.ndarray]] = {name: [] for name in (*required, *optional)}
     remaining = int(max_samples)
-    for pair_path in sorted(path.glob("*.npz")):
+    for pair_path in paths:
         if remaining <= 0:
             break
         with np.load(pair_path, allow_pickle=False) as payload:
@@ -461,12 +645,17 @@ def _load_intervention_directory(path: Path, *, max_samples: int) -> dict[str, n
                 del full_array
         remaining -= count
     if not chunks["baseline_inputs"]:
-        raise FileNotFoundError(f"no paired intervention NPZ files found in {path}")
+        raise FileNotFoundError("paired intervention files contain no samples")
     result = {name: np.concatenate(values, axis=0) for name, values in chunks.items() if values}
     for name in optional:
         if chunks[name] and sum(chunk.shape[0] for chunk in chunks[name]) != result["baseline_inputs"].shape[0]:
             result.pop(name, None)
     return result
+
+
+def _pair_morphology_id(path: Path) -> str:
+    match = re.match(r"(specimen_[^_]+)", path.stem)
+    return match.group(1) if match else "unknown"
 
 
 def _predict_in_batches(

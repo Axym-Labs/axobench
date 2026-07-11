@@ -1,15 +1,26 @@
 from __future__ import annotations
 
+import csv
+import json
+from threading import Lock
+import time
+
 import numpy as np
 
 import axobench.benchmark as benchmark
+from axobench.benchmark import iteration_evaluator
 
 from axobench.benchmark.iteration_evaluator import (
+    DEFAULT_BATCH_SIZE,
+    DEFAULT_INTERVENTION_SAMPLES,
+    DEFAULT_INTERVENTION_WORKERS,
+    DEFAULT_STANDARD_SAMPLES,
     EvaluationConfig,
     PairedInterventionPredictions,
     evaluate_model,
     evaluate_predictions,
     format_evaluation_report,
+    write_evaluation_report,
 )
 
 
@@ -60,11 +71,19 @@ def _by_id(report: dict, section: str) -> dict[str, dict]:
     return {row["id"]: row for row in report[section]}
 
 
+def test_iteration_defaults_match_uncertainty_and_throughput_study() -> None:
+    assert DEFAULT_STANDARD_SAMPLES == 240
+    assert DEFAULT_INTERVENTION_SAMPLES == 60
+    assert DEFAULT_INTERVENTION_WORKERS == 4
+    assert DEFAULT_BATCH_SIZE == 16
+
+
 def test_iteration_evaluator_is_available_from_public_benchmark_api() -> None:
     assert benchmark.EvaluationConfig is EvaluationConfig
     assert benchmark.evaluate_model is evaluate_model
     assert benchmark.evaluate_predictions is evaluate_predictions
     assert benchmark.format_evaluation_report is format_evaluation_report
+    assert benchmark.write_evaluation_report is write_evaluation_report
 
 
 def test_perfect_predictions_clear_available_attention_rows() -> None:
@@ -291,3 +310,117 @@ def test_model_runner_balances_grouped_morphology_shards(tmp_path) -> None:
     morphology = _by_id(report, "diagnostics")["morphology_error_disparity"]
     assert morphology["attention"] == "NO"
     assert morphology["value"] == 1.0
+
+
+def test_machine_readable_report_writes_json_or_tidy_csv_only_when_called(tmp_path) -> None:
+    prediction, target, inputs, trace_ids = _ordinary_fixture()
+    report = evaluate_predictions(
+        prediction,
+        target,
+        inputs=inputs,
+        trace_ids=trace_ids,
+        interventions=[_intervention_fixture()],
+        config=EvaluationConfig(ignore_start=0, calibration_fraction=0.25),
+        model_id="candidate",
+    )
+    assert list(tmp_path.iterdir()) == []
+
+    json_path = tmp_path / "report.json"
+    csv_path = tmp_path / "report.csv"
+    write_evaluation_report(report, json_path)
+    write_evaluation_report(report, csv_path)
+
+    assert json.loads(json_path.read_text())["model_id"] == "candidate"
+    with csv_path.open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    assert {row["row_type"] for row in rows} == {"metric", "diagnostic", "intervention"}
+    assert len([row for row in rows if row["row_type"] == "metric"]) == 8
+    assert len([row for row in rows if row["row_type"] == "diagnostic"]) == 24
+    exact = next(row for row in rows if row["id"] == "spike_f1_exact")
+    assert exact["model_id"] == "candidate"
+    assert float(exact["value"]) == 1.0
+
+
+def test_intervention_loading_can_overlap_without_concurrent_model_calls(tmp_path, monkeypatch) -> None:
+    dataset_root = tmp_path / "dataset"
+    val_root = dataset_root / "val"
+    val_root.mkdir(parents=True)
+    prediction, target, inputs, trace_ids = _ordinary_fixture()
+    inputs = np.zeros((8, 80, 4), dtype=np.float32)
+    inputs[..., :2] = target
+    np.savez_compressed(val_root / "val.npz", inputs=inputs, targets=target, sample_ids=np.asarray(trace_ids))
+    for name in ("a", "b"):
+        folder = dataset_root / "interventions" / name
+        folder.mkdir(parents=True)
+        (folder / "placeholder.npz").touch()
+
+    active_loaders = 0
+    max_active_loaders = 0
+    model_active = 0
+    lock = Lock()
+
+    def fake_loader(path, *, max_samples):
+        nonlocal active_loaders, max_active_loaders
+        with lock:
+            active_loaders += 1
+            max_active_loaders = max(max_active_loaders, active_loaders)
+        time.sleep(0.03)
+        with lock:
+            active_loaders -= 1
+        pair_inputs = np.zeros((1, 80, 4), dtype=np.float32)
+        pair_inputs[..., :2] = target[:1]
+        return {
+            "baseline_inputs": pair_inputs,
+            "baseline_targets": target[:1],
+            "intervention_inputs": pair_inputs,
+            "intervention_targets": target[:1],
+        }
+
+    def model_fn(batch):
+        nonlocal model_active
+        with lock:
+            assert model_active == 0
+            model_active += 1
+        output = batch[..., :2]
+        with lock:
+            model_active -= 1
+        return output
+
+    monkeypatch.setattr(
+        "axobench.benchmark.iteration_evaluator._load_intervention_directory",
+        fake_loader,
+    )
+    evaluate_model(
+        model_fn,
+        dataset_root=dataset_root,
+        max_samples=6,
+        batch_size=2,
+        max_intervention_samples=1,
+        intervention_workers=2,
+        config=EvaluationConfig(ignore_start=0, calibration_fraction=0.25),
+    )
+
+    assert max_active_loaders == 2
+
+
+def test_intervention_sample_is_balanced_across_morphology_files(tmp_path) -> None:
+    folder = tmp_path / "intervention"
+    folder.mkdir()
+    for morphology_index, morphology in enumerate(("specimen_100", "specimen_200"), start=1):
+        inputs = np.full((4, 6, 3), morphology_index, dtype=np.int8)
+        targets = np.zeros((4, 6, 2), dtype=np.float32)
+        targets[..., 1] = morphology_index
+        np.savez_compressed(
+            folder / f"{morphology}_intervention_pair_00001.npz",
+            baseline_inputs=inputs,
+            baseline_targets=targets,
+            intervention_inputs=inputs,
+            intervention_targets=targets,
+        )
+
+    pair = iteration_evaluator._load_intervention_directory(folder, max_samples=4)
+
+    assert pair["baseline_inputs"].shape[0] == 4
+    assert np.count_nonzero(pair["baseline_targets"][:, 0, 1] == 1) == 2
+    assert np.count_nonzero(pair["baseline_targets"][:, 0, 1] == 2) == 2
+    assert pair["morphology_ids"].tolist() == ["specimen_100"] * 2 + ["specimen_200"] * 2
