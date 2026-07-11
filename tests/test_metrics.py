@@ -3,6 +3,7 @@ import numpy as np
 from axobench.metrics import (
     binary_auc,
     compute_core_metric_set,
+    dynamics_sera,
     response_sera,
     root_sera,
     soma_rmse,
@@ -63,6 +64,26 @@ def test_voltage_sera_emphasizes_relevant_teacher_regions():
     assert result["relevance_support_ge_0_9"] > 0
 
 
+def test_dynamics_sera_complements_voltage_level_error():
+    target = np.zeros((1, 12, 2), dtype=np.float32)
+    target[0, :, 1] = np.linspace(-0.4, 0.4, 12)
+    shifted = target.copy()
+    shifted[..., 1] += 0.5
+    distorted = target.copy()
+    distorted[0, 5:7, 1] += np.array([0.5, -0.5])
+
+    shifted_result = dynamics_sera(shifted, target, ignore_start=0)
+    distorted_result = dynamics_sera(distorted, target, ignore_start=0)
+    faster_sampling_result = dynamics_sera(distorted, target, timestep_ms=0.5, ignore_start=0)
+
+    assert np.isclose(shifted_result["dynamics_sera_mv_per_ms"], 0.0, atol=1e-6)
+    assert distorted_result["dynamics_sera_mv_per_ms"] > 0.0
+    assert np.isclose(
+        faster_sampling_result["dynamics_sera_mv_per_ms"],
+        2.0 * distorted_result["dynamics_sera_mv_per_ms"],
+    )
+
+
 def test_spike_f1_curve_uses_one_to_one_event_matching():
     predicted = np.array([[0.0, 2.0, 2.0, 0.0]])
     target = np.array([[0.0, 1.0, 0.0, 1.0]])
@@ -85,8 +106,27 @@ def test_compute_core_metric_set_returns_promoted_metrics():
     result = compute_core_metric_set(prediction, target, ignore_start=0, spike_tolerances_steps=(0, 1, 2))
 
     assert result["voltage_sera_mv"] == 0.0
+    assert result["dynamics_sera_mv_per_ms"] == 0.0
     assert result["spike_f1_area"] == 1.0
     assert result["spike_threshold_kind"] == "prevalence_matched"
+    assert "voltage_rmse_mv" not in result
+
+
+def test_compute_core_metric_set_includes_response_sera_when_pair_is_given():
+    baseline = np.zeros((1, 8, 2), dtype=np.float32)
+    intervention = baseline.copy()
+    intervention[..., 1] = 0.5
+
+    result = compute_core_metric_set(
+        baseline,
+        baseline,
+        intervention_prediction=intervention,
+        intervention_target=intervention,
+        ignore_start=2,
+    )
+
+    assert result["response_sera_mv"] == 0.0
+    assert result["response"]["response_sera_mv"] == 0.0
 
 
 def test_response_sera_is_zero_for_correct_intervention_delta():

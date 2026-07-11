@@ -20,7 +20,7 @@ from typing import Any, Iterable
 import numpy as np
 
 from axobench.metrics import (
-    binary_auc,
+    dynamics_sera,
     prevalence_matched_threshold,
     response_sera,
     spike_f1_curve,
@@ -32,7 +32,7 @@ from axobench.data import ShardedNeuronIODataset
 DEFAULT_STANDARD_SAMPLES = 240
 DEFAULT_INTERVENTION_SAMPLES = 60
 DEFAULT_INTERVENTION_WORKERS = 4
-DEFAULT_BATCH_SIZE = 16
+DEFAULT_BATCH_SIZE = 128
 
 
 ATTENTION_BASES = {
@@ -277,9 +277,14 @@ def evaluate_predictions(
         soma_scale=cfg.soma_scale,
         soma_bias_mv=cfg.soma_bias_mv,
     )
-    clipped_rmse = _finite_rmse((pred_score[..., 1] - tgt_score[..., 1]) / cfg.soma_scale)
-    finite_spikes = np.isfinite(spike_scores)
-    auc = binary_auc(spike_scores[finite_spikes], spike_labels[finite_spikes]) if finite_spikes.any() else float("nan")
+    dynamics = dynamics_sera(
+        pred_score,
+        tgt_score,
+        raw_soma_mv=raw_score,
+        soma_scale=cfg.soma_scale,
+        soma_bias_mv=cfg.soma_bias_mv,
+        timestep_ms=cfg.timestep_ms,
+    )
 
     intervention_reports = [
         _evaluate_intervention(item, cfg)
@@ -291,6 +296,12 @@ def evaluate_predictions(
 
     metrics = [
         _metric("voltage_sera_mv", voltage["voltage_sera_mv"], "mV", "teacher-relevance voltage error"),
+        _metric(
+            "dynamics_sera_mv_per_ms",
+            dynamics["dynamics_sera_mv_per_ms"],
+            "mV/ms",
+            "teacher-relevance voltage-transition error",
+        ),
         _metric("spike_f1_area_0_5ms", f1["f1_area"], "fraction", "mean F1 over timing tolerance"),
         _metric(
             "spike_f1_exact",
@@ -305,9 +316,6 @@ def evaluate_predictions(
             f"F1 at {tolerant_step * cfg.timestep_ms:g} ms",
         ),
         _metric("response_sera_mv", response_sera_value, "mV", "paired intervention response error"),
-        _metric("raw_voltage_rmse_mv", voltage["voltage_rmse_mv"], "mV", "raw-voltage compatibility"),
-        _metric("clipped_voltage_rmse_mv", clipped_rmse, "mV", "legacy target-view compatibility"),
-        _metric("spike_auc", auc, "fraction", "legacy ranking compatibility"),
     ]
 
     diagnostics = _ordinary_attention_rows(
@@ -1184,7 +1192,7 @@ def _format_value(value: float | None, unit: str) -> str:
     if value is None or not np.isfinite(value):
         return "NA"
     rendered = _format_number(value)
-    if unit in {"mV", "ms"}:
+    if unit not in {"fraction", "ratio"}:
         return f"{rendered} {unit}"
     return rendered
 

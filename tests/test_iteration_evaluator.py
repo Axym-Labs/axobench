@@ -75,7 +75,7 @@ def test_iteration_defaults_match_uncertainty_and_throughput_study() -> None:
     assert DEFAULT_STANDARD_SAMPLES == 240
     assert DEFAULT_INTERVENTION_SAMPLES == 60
     assert DEFAULT_INTERVENTION_WORKERS == 4
-    assert DEFAULT_BATCH_SIZE == 16
+    assert DEFAULT_BATCH_SIZE == 128
 
 
 def test_iteration_evaluator_is_available_from_public_benchmark_api() -> None:
@@ -102,7 +102,11 @@ def test_perfect_predictions_clear_available_attention_rows() -> None:
     assert metrics["spike_f1_5ms"]["value"] == 1.0
     assert metrics["spike_f1_area_0_5ms"]["value"] == 1.0
     assert metrics["voltage_sera_mv"]["value"] == 0.0
+    assert metrics["dynamics_sera_mv_per_ms"]["value"] == 0.0
     assert metrics["response_sera_mv"]["value"] == 0.0
+    assert "raw_voltage_rmse_mv" not in metrics
+    assert "clipped_voltage_rmse_mv" not in metrics
+    assert "spike_auc" not in metrics
 
     diagnostics = report["diagnostics"]
     assert len(diagnostics) == 24
@@ -182,6 +186,7 @@ def test_report_format_is_deterministic_and_bounded() -> None:
     assert "CORE METRICS" in rendered
     assert "ATTENTION PANEL" in rendered
     assert "spike_f1_exact" in rendered
+    assert "mV/ms" in rendered
     assert "YES = early watch" in rendered
     assert len(rendered.splitlines()) <= 45
     assert rendered == format_evaluation_report(report)
@@ -334,7 +339,7 @@ def test_machine_readable_report_writes_json_or_tidy_csv_only_when_called(tmp_pa
     with csv_path.open(newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
     assert {row["row_type"] for row in rows} == {"metric", "diagnostic", "intervention"}
-    assert len([row for row in rows if row["row_type"] == "metric"]) == 8
+    assert len([row for row in rows if row["row_type"] == "metric"]) == 6
     assert len([row for row in rows if row["row_type"] == "diagnostic"]) == 24
     exact = next(row for row in rows if row["id"] == "spike_f1_exact")
     assert exact["model_id"] == "candidate"

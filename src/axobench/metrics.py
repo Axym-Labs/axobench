@@ -187,6 +187,46 @@ def voltage_sera(
     }
 
 
+def dynamics_sera(
+    prediction: np.ndarray,
+    target: np.ndarray,
+    *,
+    raw_soma_mv: np.ndarray | None = None,
+    soma_scale: float = 0.1,
+    soma_bias_mv: float = -67.7,
+    timestep_ms: float = 1.0,
+    ignore_start: int = 0,
+    relevance_kwargs: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Compute teacher-relevance SERA on soma-voltage transitions."""
+    if timestep_ms <= 0.0:
+        raise ValueError("timestep_ms must be positive")
+    pred, tgt, raw = _prepare_prediction_target(
+        prediction,
+        target,
+        raw_soma_mv=raw_soma_mv,
+        ignore_start=ignore_start,
+    )
+    if pred.shape[1] < 2:
+        raise ValueError("Dynamics SERA requires at least two scored timesteps")
+    pred_soma_mv = pred[..., 1] / soma_scale + soma_bias_mv
+    target_soma_mv = raw if raw is not None else tgt[..., 1] / soma_scale + soma_bias_mv
+    target_spikes = tgt[..., 0] > 0.5
+    relevance = voltage_relevance(target_soma_mv, target_spikes, **(relevance_kwargs or {}))
+    transition_relevance = np.maximum(relevance[:, :-1], relevance[:, 1:])
+    pred_rate = np.diff(pred_soma_mv, axis=1) / timestep_ms
+    target_rate = np.diff(target_soma_mv, axis=1) / timestep_ms
+    error = pred_rate - target_rate
+    sera_curve = root_sera(error, transition_relevance, return_curve=True)
+    return {
+        "dynamics_sera_mv_per_ms": float(sera_curve["value"]),
+        "relevance_mean": float(np.mean(transition_relevance)),
+        "relevance_support_ge_0_5": int((transition_relevance >= 0.5).sum()),
+        "relevance_support_ge_0_9": int((transition_relevance >= 0.9).sum()),
+        "sera_curve": sera_curve,
+    }
+
+
 def spike_event_confusion(
     predicted_spikes: np.ndarray,
     target_spikes: np.ndarray,
@@ -341,6 +381,10 @@ def compute_core_metric_set(
     spike_threshold_policy: str = "prevalence",
     spike_tolerances_steps: tuple[int, ...] | list[int] = (0, 1, 2, 3, 4, 5),
     relevance_kwargs: dict[str, Any] | None = None,
+    timestep_ms: float = 1.0,
+    intervention_prediction: np.ndarray | None = None,
+    intervention_target: np.ndarray | None = None,
+    intervention_raw_soma_mv: np.ndarray | None = None,
 ) -> dict[str, Any]:
     """Easy entrypoint for the recommended AxoBench core metrics."""
     pred, tgt, raw = _prepare_prediction_target(prediction, target, raw_soma_mv=raw_soma_mv, ignore_start=ignore_start)
@@ -350,6 +394,15 @@ def compute_core_metric_set(
         raw_soma_mv=raw,
         soma_scale=soma_scale,
         soma_bias_mv=soma_bias_mv,
+        relevance_kwargs=relevance_kwargs,
+    )
+    dynamics = dynamics_sera(
+        pred,
+        tgt,
+        raw_soma_mv=raw,
+        soma_scale=soma_scale,
+        soma_bias_mv=soma_bias_mv,
+        timestep_ms=timestep_ms,
         relevance_kwargs=relevance_kwargs,
     )
     target_spikes = tgt[..., 0] > 0.5
@@ -371,15 +424,34 @@ def compute_core_metric_set(
         tolerances_steps=spike_tolerances_steps,
     )
     spike["threshold_kind"] = threshold_kind
-    return {
+    result = {
         "voltage": voltage,
+        "dynamics": dynamics,
         "spike": spike,
         "voltage_sera_mv": voltage["voltage_sera_mv"],
-        "voltage_rmse_mv": voltage["voltage_rmse_mv"],
+        "dynamics_sera_mv_per_ms": dynamics["dynamics_sera_mv_per_ms"],
         "spike_f1_area": spike["f1_area"],
         "spike_threshold": float(spike_threshold),
         "spike_threshold_kind": threshold_kind,
     }
+    if (intervention_prediction is None) != (intervention_target is None):
+        raise ValueError("intervention_prediction and intervention_target must be supplied together")
+    if intervention_prediction is not None and intervention_target is not None:
+        response = response_sera(
+            prediction,
+            intervention_prediction,
+            target,
+            intervention_target,
+            baseline_raw_soma_mv=raw_soma_mv,
+            intervention_raw_soma_mv=intervention_raw_soma_mv,
+            soma_scale=soma_scale,
+            soma_bias_mv=soma_bias_mv,
+            ignore_start=ignore_start,
+            relevance_kwargs=relevance_kwargs,
+        )
+        result["response"] = response
+        result["response_sera_mv"] = response["response_sera_mv"]
+    return result
 
 
 def _prepare_prediction_target(

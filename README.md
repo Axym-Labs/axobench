@@ -35,7 +35,7 @@ print(format_evaluation_report(report))
 ```
 
 The default iteration profile uses 240 morphology-balanced validation traces,
-60 paired traces per intervention, 16 traces per model batch, and four parallel
+60 paired traces per intervention, 128 traces per model batch, and four parallel
 CPU intervention loaders. These defaults were selected from trace-level,
 morphology-stratified 95% bootstrap intervals; all limits remain configurable.
 
@@ -48,7 +48,7 @@ from axobench.benchmark import write_evaluation_report
 write_evaluation_report(report, "runs/candidate-17.csv")
 ```
 
-The terminal report is bounded to eight metric rows and 24 diagnostic rows.
+The terminal report is bounded to six metric rows and 24 diagnostic rows.
 `attention=YES` is an early watch, `NO` is clear at the stated trigger, and
 `NA` makes missing evidence explicit. Each diagnostic row also carries its
 mathematical or physiological `basis` in the returned report.
