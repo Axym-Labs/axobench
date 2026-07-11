@@ -13,12 +13,15 @@ from axobench.benchmark import iteration_evaluator
 from axobench.benchmark.iteration_evaluator import (
     DEFAULT_BATCH_SIZE,
     DEFAULT_INTERVENTION_SAMPLES,
+    DEFAULT_MULTIPLE_MORPHOLOGY_INTERVENTION_SAMPLES,
+    DEFAULT_MULTIPLE_MORPHOLOGY_STANDARD_SAMPLES,
     DEFAULT_INTERVENTION_WORKERS,
     DEFAULT_STANDARD_SAMPLES,
     EvaluationConfig,
     PairedInterventionPredictions,
     evaluate_model,
     evaluate_predictions,
+    default_iteration_sample_limits,
     format_evaluation_report,
     write_evaluation_report,
 )
@@ -72,8 +75,12 @@ def _by_id(report: dict, section: str) -> dict[str, dict]:
 
 
 def test_iteration_defaults_match_uncertainty_and_throughput_study() -> None:
-    assert DEFAULT_STANDARD_SAMPLES == 240
-    assert DEFAULT_INTERVENTION_SAMPLES == 60
+    assert DEFAULT_STANDARD_SAMPLES == 120
+    assert DEFAULT_INTERVENTION_SAMPLES == 40
+    assert DEFAULT_MULTIPLE_MORPHOLOGY_STANDARD_SAMPLES == 120
+    assert DEFAULT_MULTIPLE_MORPHOLOGY_INTERVENTION_SAMPLES == 40
+    assert default_iteration_sample_limits() == (120, 40)
+    assert default_iteration_sample_limits(multiple_morphologies=True) == (120, 40)
     assert DEFAULT_INTERVENTION_WORKERS == 4
     assert DEFAULT_BATCH_SIZE == 128
 
@@ -82,6 +89,7 @@ def test_iteration_evaluator_is_available_from_public_benchmark_api() -> None:
     assert benchmark.EvaluationConfig is EvaluationConfig
     assert benchmark.evaluate_model is evaluate_model
     assert benchmark.evaluate_predictions is evaluate_predictions
+    assert benchmark.default_iteration_sample_limits is default_iteration_sample_limits
     assert benchmark.format_evaluation_report is format_evaluation_report
     assert benchmark.write_evaluation_report is write_evaluation_report
 
@@ -237,6 +245,7 @@ def test_model_runner_batches_inference_and_discovers_interventions(tmp_path) ->
         max_samples=6,
         batch_size=2,
         max_intervention_samples=4,
+        multiple_morphologies=True,
         config=EvaluationConfig(ignore_start=0, calibration_fraction=0.25),
     )
 
@@ -309,6 +318,7 @@ def test_model_runner_balances_grouped_morphology_shards(tmp_path) -> None:
         max_samples=6,
         batch_size=2,
         max_interventions=0,
+        multiple_morphologies=True,
         config=EvaluationConfig(ignore_start=0, calibration_fraction=0.25),
     )
 
@@ -344,6 +354,7 @@ def test_machine_readable_report_writes_json_or_tidy_csv_only_when_called(tmp_pa
     exact = next(row for row in rows if row["id"] == "spike_f1_exact")
     assert exact["model_id"] == "candidate"
     assert float(exact["value"]) == 1.0
+    assert "morphology_mode" in exact
 
 
 def test_intervention_loading_can_overlap_without_concurrent_model_calls(tmp_path, monkeypatch) -> None:
@@ -364,7 +375,7 @@ def test_intervention_loading_can_overlap_without_concurrent_model_calls(tmp_pat
     model_active = 0
     lock = Lock()
 
-    def fake_loader(path, *, max_samples):
+    def fake_loader(path, *, max_samples, multiple_morphologies, morphology_id):
         nonlocal active_loaders, max_active_loaders
         with lock:
             active_loaders += 1
@@ -423,9 +434,92 @@ def test_intervention_sample_is_balanced_across_morphology_files(tmp_path) -> No
             intervention_targets=targets,
         )
 
-    pair = iteration_evaluator._load_intervention_directory(folder, max_samples=4)
+    pair = iteration_evaluator._load_intervention_directory(
+        folder,
+        max_samples=4,
+        multiple_morphologies=True,
+    )
 
     assert pair["baseline_inputs"].shape[0] == 4
     assert np.count_nonzero(pair["baseline_targets"][:, 0, 1] == 1) == 2
     assert np.count_nonzero(pair["baseline_targets"][:, 0, 1] == 2) == 2
     assert pair["morphology_ids"].tolist() == ["specimen_100"] * 2 + ["specimen_200"] * 2
+
+
+def test_single_morphology_is_default_for_validation_and_interventions(tmp_path) -> None:
+    dataset_root = tmp_path / "dataset"
+    val_root = dataset_root / "val"
+    intervention_root = dataset_root / "interventions" / "drive"
+    val_root.mkdir(parents=True)
+    intervention_root.mkdir(parents=True)
+    traces, steps = 8, 12
+    inputs = np.zeros((traces, steps, 4), dtype=np.float32)
+    targets = np.zeros((traces, steps, 2), dtype=np.float32)
+    sample_ids = np.asarray(
+        [f"specimen_100:trace_{index}" for index in range(4)]
+        + [f"specimen_200:trace_{index}" for index in range(4)]
+    )
+    np.savez_compressed(val_root / "val.npz", inputs=inputs, targets=targets, sample_ids=sample_ids)
+    for morphology, value in (("specimen_100", 1.0), ("specimen_200", 2.0)):
+        pair_inputs = np.full((4, steps, 4), value, dtype=np.float32)
+        np.savez_compressed(
+            intervention_root / f"{morphology}_pair.npz",
+            baseline_inputs=pair_inputs,
+            baseline_targets=targets[:4],
+            intervention_inputs=pair_inputs,
+            intervention_targets=targets[:4],
+        )
+
+    seen_values: list[float] = []
+
+    def model_fn(batch: np.ndarray) -> np.ndarray:
+        seen_values.extend(np.unique(batch).tolist())
+        return np.zeros((*batch.shape[:2], 2), dtype=np.float32)
+
+    report = evaluate_model(
+        model_fn,
+        dataset_root=dataset_root,
+        max_samples=4,
+        max_intervention_samples=4,
+        config=EvaluationConfig(ignore_start=0, calibration_fraction=0.25),
+    )
+
+    assert report["morphology_mode"] == "single"
+    assert report["morphology_ids"] == ["specimen_100"]
+    assert report["interventions"][0]["samples"] == 4
+    assert 2.0 not in seen_values
+
+
+def test_requested_single_morphology_is_used_consistently(tmp_path) -> None:
+    dataset_root = tmp_path / "dataset"
+    val_root = dataset_root / "val"
+    val_root.mkdir(parents=True)
+    traces, steps = 8, 12
+    targets = np.zeros((traces, steps, 2), dtype=np.float32)
+    inputs = np.zeros((traces, steps, 4), dtype=np.float32)
+    inputs[4:] = 2.0
+    sample_ids = np.asarray(
+        [f"specimen_100:trace_{index}" for index in range(4)]
+        + [f"specimen_200:trace_{index}" for index in range(4)]
+    )
+    np.savez_compressed(val_root / "val.npz", inputs=inputs, targets=targets, sample_ids=sample_ids)
+
+    seen: list[float] = []
+
+    def model_fn(batch: np.ndarray) -> np.ndarray:
+        seen.extend(np.unique(batch).tolist())
+        return np.zeros((*batch.shape[:2], 2), dtype=np.float32)
+
+    report = evaluate_model(
+        model_fn,
+        dataset_root=dataset_root,
+        morphology_id="specimen_200",
+        max_samples=4,
+        max_interventions=0,
+        config=EvaluationConfig(ignore_start=0, calibration_fraction=0.25),
+    )
+
+    assert report["morphology_ids"] == ["specimen_200"]
+    assert report["sample_profile"] == "iteration"
+    assert report["intervention_sample_limit_per_condition"] == 40
+    assert seen == [2.0]

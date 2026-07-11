@@ -34,10 +34,12 @@ report = evaluate_model(
 print(format_evaluation_report(report))
 ```
 
-The default iteration profile uses 240 morphology-balanced validation traces,
-60 paired traces per intervention, 128 traces per model batch, and four parallel
-CPU intervention loaders. These defaults were selected from trace-level,
-morphology-stratified 95% bootstrap intervals; all limits remain configurable.
+The default iteration profile evaluates one morphology with 120 validation
+traces, 40 paired traces per intervention, 128 traces per model batch, and four
+parallel CPU intervention loaders. Set `multiple_morphologies=True` to
+distribute the same 120/40 profile across all available morphologies, or pass
+`morphology_id` to choose one specimen. Trace-level uncertainty differs among
+specimens, so confirmation runs can raise either limit explicitly.
 
 Evaluation only prints by default. Persist a strict JSON or tidy CSV report
 when needed:

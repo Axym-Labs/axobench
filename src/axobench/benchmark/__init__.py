@@ -93,6 +93,10 @@ _EXPORTS: dict[str, tuple[str, str]] = {
         "PairedInterventionPredictions",
     ),
     "evaluate_model": ("axobench.benchmark.iteration_evaluator", "evaluate_model"),
+    "default_iteration_sample_limits": (
+        "axobench.benchmark.iteration_evaluator",
+        "default_iteration_sample_limits",
+    ),
     "evaluate_predictions": ("axobench.benchmark.iteration_evaluator", "evaluate_predictions"),
     "format_evaluation_report": ("axobench.benchmark.iteration_evaluator", "format_evaluation_report"),
     "write_evaluation_report": ("axobench.benchmark.iteration_evaluator", "write_evaluation_report"),

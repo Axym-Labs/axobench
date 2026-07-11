@@ -29,8 +29,12 @@ from axobench.metrics import (
 from axobench.data import ShardedNeuronIODataset
 
 
-DEFAULT_STANDARD_SAMPLES = 240
-DEFAULT_INTERVENTION_SAMPLES = 60
+DEFAULT_SINGLE_MORPHOLOGY_STANDARD_SAMPLES = 120
+DEFAULT_SINGLE_MORPHOLOGY_INTERVENTION_SAMPLES = 40
+DEFAULT_MULTIPLE_MORPHOLOGY_STANDARD_SAMPLES = 120
+DEFAULT_MULTIPLE_MORPHOLOGY_INTERVENTION_SAMPLES = 40
+DEFAULT_STANDARD_SAMPLES = DEFAULT_SINGLE_MORPHOLOGY_STANDARD_SAMPLES
+DEFAULT_INTERVENTION_SAMPLES = DEFAULT_SINGLE_MORPHOLOGY_INTERVENTION_SAMPLES
 DEFAULT_INTERVENTION_WORKERS = 4
 DEFAULT_BATCH_SIZE = 128
 
@@ -131,12 +135,14 @@ def evaluate_model(
     *,
     dataset_root: str | Path,
     model_id: str = "model",
-    max_samples: int = DEFAULT_STANDARD_SAMPLES,
+    max_samples: int | None = None,
     batch_size: int = DEFAULT_BATCH_SIZE,
-    max_intervention_samples: int = DEFAULT_INTERVENTION_SAMPLES,
+    max_intervention_samples: int | None = None,
     max_interventions: int = 8,
     intervention_workers: int = DEFAULT_INTERVENTION_WORKERS,
     intervention_names: Iterable[str] | None = None,
+    multiple_morphologies: bool = False,
+    morphology_id: str | None = None,
     cache_shards: int = 1,
     config: EvaluationConfig | None = None,
 ) -> dict[str, Any]:
@@ -146,16 +152,32 @@ def evaluate_model(
     outputs, targets, raw soma voltage, and two compact E/I event-count channels
     are retained for the diagnostic pass.
     """
+    default_standard, default_intervention = default_iteration_sample_limits(
+        multiple_morphologies=multiple_morphologies
+    )
+    max_samples = default_standard if max_samples is None else int(max_samples)
+    max_intervention_samples = (
+        default_intervention
+        if max_intervention_samples is None
+        else int(max_intervention_samples)
+    )
     if max_samples < 2:
         raise ValueError("max_samples must be at least two")
     if batch_size <= 0 or max_intervention_samples <= 0 or max_interventions < 0:
         raise ValueError("batch and intervention limits must be positive")
     if intervention_workers <= 0:
         raise ValueError("intervention_workers must be positive")
+    if multiple_morphologies and morphology_id is not None:
+        raise ValueError("morphology_id cannot be combined with multiple_morphologies=True")
     started_at = time.perf_counter()
     root = Path(dataset_root)
     validation = ShardedNeuronIODataset(root / "val", cache_shards=cache_shards)
-    selected_indices = _balanced_validation_indices(validation, min(int(max_samples), len(validation)))
+    selected_indices, selected_morphologies = _validation_indices(
+        validation,
+        min(int(max_samples), len(validation)),
+        multiple_morphologies=multiple_morphologies,
+        morphology_id=morphology_id,
+    )
     sample_count = len(selected_indices)
     predictions: list[np.ndarray] = []
     targets: list[np.ndarray] = []
@@ -194,6 +216,8 @@ def evaluate_model(
         max_interventions=max_interventions,
         workers=intervention_workers,
         intervention_names=intervention_names,
+        multiple_morphologies=multiple_morphologies,
+        morphology_id=None if multiple_morphologies else selected_morphologies[0],
     )
     prediction_array = np.concatenate(predictions, axis=0)
     target_array = np.concatenate(targets, axis=0)
@@ -211,7 +235,25 @@ def evaluate_model(
         model_id=model_id,
     )
     report["evaluation_seconds"] = float(time.perf_counter() - started_at)
+    report["morphology_mode"] = "multiple" if multiple_morphologies else "single"
+    report["morphology_ids"] = selected_morphologies
+    report["standard_sample_limit"] = max_samples
+    report["intervention_sample_limit_per_condition"] = max_intervention_samples
+    report["sample_profile"] = "iteration"
     return report
+
+
+def default_iteration_sample_limits(*, multiple_morphologies: bool = False) -> tuple[int, int]:
+    """Return ordinary and per-intervention defaults for a morphology mode."""
+    if multiple_morphologies:
+        return (
+            DEFAULT_MULTIPLE_MORPHOLOGY_STANDARD_SAMPLES,
+            DEFAULT_MULTIPLE_MORPHOLOGY_INTERVENTION_SAMPLES,
+        )
+    return (
+        DEFAULT_SINGLE_MORPHOLOGY_STANDARD_SAMPLES,
+        DEFAULT_SINGLE_MORPHOLOGY_INTERVENTION_SAMPLES,
+    )
 
 
 def evaluate_predictions(
@@ -347,10 +389,13 @@ def evaluate_predictions(
 def format_evaluation_report(report: dict[str, Any]) -> str:
     """Render a deterministic, bounded plain-text report."""
     runtime = "" if "evaluation_seconds" not in report else f"  runtime={report['evaluation_seconds']:.2f}s"
+    morphology = ""
+    if report.get("morphology_mode"):
+        morphology = f"  morphologies={report['morphology_mode']}:{','.join(report.get('morphology_ids', []))}"
     lines = [
         f"MODEL: {report['model_id']}  samples={report['samples']} "
         f"(calibration={report['calibration_samples']}, scored={report['scored_samples']}) "
-        f"spike_threshold={_format_number(report['spike_threshold'])}{runtime}",
+        f"spike_threshold={_format_number(report['spike_threshold'])}{morphology}{runtime}",
         "",
         "CORE METRICS",
     ]
@@ -404,6 +449,11 @@ def write_evaluation_report(report: dict[str, Any], path: str | Path) -> Path:
         "scored_samples",
         "spike_threshold",
         "evaluation_seconds",
+        "morphology_mode",
+        "morphology_ids",
+        "sample_profile",
+        "standard_sample_limit",
+        "intervention_sample_limit_per_condition",
         "row_type",
         "id",
         "value",
@@ -429,6 +479,13 @@ def _report_csv_rows(report: dict[str, Any]) -> list[dict[str, Any]]:
         "scored_samples": report.get("scored_samples"),
         "spike_threshold": _csv_value(report.get("spike_threshold")),
         "evaluation_seconds": _csv_value(report.get("evaluation_seconds")),
+        "morphology_mode": report.get("morphology_mode"),
+        "morphology_ids": ";".join(report.get("morphology_ids", [])),
+        "sample_profile": report.get("sample_profile"),
+        "standard_sample_limit": report.get("standard_sample_limit"),
+        "intervention_sample_limit_per_condition": report.get(
+            "intervention_sample_limit_per_condition"
+        ),
     }
     rows: list[dict[str, Any]] = []
     for metric in report.get("metrics", []):
@@ -516,6 +573,8 @@ def _run_dataset_interventions(
     max_interventions: int,
     workers: int,
     intervention_names: Iterable[str] | None,
+    multiple_morphologies: bool,
+    morphology_id: str | None,
 ) -> list[PairedInterventionPredictions]:
     interventions_root = root / "interventions"
     if not interventions_root.exists() or max_interventions == 0:
@@ -532,12 +591,25 @@ def _run_dataset_interventions(
     results = []
     worker_count = min(workers, len(directories))
     if worker_count <= 1:
-        loaded_pairs = (_load_intervention_directory(path, max_samples=max_samples) for path in directories)
+        loaded_pairs = (
+            _load_intervention_directory(
+                path,
+                max_samples=max_samples,
+                multiple_morphologies=multiple_morphologies,
+                morphology_id=morphology_id,
+            )
+            for path in directories
+        )
         executor = None
     else:
         executor = ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="axobench-intervention")
         loaded_pairs = executor.map(
-            lambda path: _load_intervention_directory(path, max_samples=max_samples),
+            lambda path: _load_intervention_directory(
+                path,
+                max_samples=max_samples,
+                multiple_morphologies=multiple_morphologies,
+                morphology_id=morphology_id,
+            ),
             directories,
         )
     try:
@@ -587,6 +659,33 @@ def _balanced_validation_indices(dataset: ShardedNeuronIODataset, sample_count: 
     return sorted(selected)
 
 
+def _validation_indices(
+    dataset: ShardedNeuronIODataset,
+    sample_count: int,
+    *,
+    multiple_morphologies: bool,
+    morphology_id: str | None,
+) -> tuple[list[int], list[str]]:
+    all_indices = list(range(len(dataset)))
+    all_ids = dataset.get_sample_ids(all_indices)
+    groups: dict[str, list[int]] = {}
+    for index, trace_id in zip(all_indices, all_ids, strict=True):
+        groups.setdefault(_morphology_id(trace_id), []).append(index)
+    names = sorted(groups)
+    if not names:
+        raise ValueError("validation dataset contains no morphology groups")
+    if multiple_morphologies:
+        selected = _balanced_validation_indices(dataset, sample_count)
+        selected_names = sorted({_morphology_id(all_ids[index]) for index in selected})
+        return selected, selected_names
+    selected_name = morphology_id or names[0]
+    if selected_name not in groups:
+        raise ValueError(
+            f"morphology {selected_name!r} is unavailable; choose one of {names}"
+        )
+    return groups[selected_name][:sample_count], [selected_name]
+
+
 def _round_robin_group_order(trace_ids: list[str]) -> np.ndarray:
     groups: dict[str, list[int]] = {}
     for index, trace_id in enumerate(trace_ids):
@@ -602,7 +701,13 @@ def _round_robin_group_order(trace_ids: list[str]) -> np.ndarray:
     return np.asarray(ordered, dtype=int)
 
 
-def _load_intervention_directory(path: Path, *, max_samples: int) -> dict[str, np.ndarray]:
+def _load_intervention_directory(
+    path: Path,
+    *,
+    max_samples: int,
+    multiple_morphologies: bool = False,
+    morphology_id: str | None = None,
+) -> dict[str, np.ndarray]:
     paths = sorted(path.glob("*.npz"))
     if not paths:
         raise FileNotFoundError(f"no paired intervention NPZ files found in {path}")
@@ -610,12 +715,22 @@ def _load_intervention_directory(path: Path, *, max_samples: int) -> dict[str, n
     for pair_path in paths:
         groups.setdefault(_pair_morphology_id(pair_path), []).append(pair_path)
     names = sorted(groups)
-    base, extra = divmod(int(max_samples), len(names))
     loaded: list[tuple[str, dict[str, np.ndarray]]] = []
-    for position, name in enumerate(names):
-        quota = base + int(position < extra)
-        if quota > 0:
-            loaded.append((name, _load_intervention_paths(groups[name], max_samples=quota)))
+    if multiple_morphologies:
+        base, extra = divmod(int(max_samples), len(names))
+        for position, name in enumerate(names):
+            quota = base + int(position < extra)
+            if quota > 0:
+                loaded.append((name, _load_intervention_paths(groups[name], max_samples=quota)))
+    else:
+        selected_name = morphology_id or names[0]
+        if selected_name not in groups:
+            raise ValueError(
+                f"morphology {selected_name!r} is unavailable in {path}; choose one of {names}"
+            )
+        loaded.append(
+            (selected_name, _load_intervention_paths(groups[selected_name], max_samples=max_samples))
+        )
     if not loaded:
         raise ValueError("max_samples must be positive")
 
@@ -857,6 +972,7 @@ def _evaluate_intervention(item: PairedInterventionPredictions, config: Evaluati
     gain = _least_squares_gain(teacher_delta.reshape(-1), model_delta.reshape(-1))
     return {
         "name": item.name,
+        "samples": int(base_pred.shape[0]),
         "response_sera_mv": float(measured["response_sera_mv"]),
         "zero_response_sera_mv": null_sera,
         "response_skill": skill,
