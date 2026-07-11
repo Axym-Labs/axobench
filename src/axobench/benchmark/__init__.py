@@ -87,6 +87,14 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "run_v1_benchmark_bundle": ("axobench.benchmark.bundle", "run_v1_benchmark_bundle"),
     "infer_pair_metadata": ("axobench.benchmark.bundle", "infer_pair_metadata"),
     "BenchmarkSuite": ("axobench.benchmark.suite", "BenchmarkSuite"),
+    "EvaluationConfig": ("axobench.benchmark.iteration_evaluator", "EvaluationConfig"),
+    "PairedInterventionPredictions": (
+        "axobench.benchmark.iteration_evaluator",
+        "PairedInterventionPredictions",
+    ),
+    "evaluate_model": ("axobench.benchmark.iteration_evaluator", "evaluate_model"),
+    "evaluate_predictions": ("axobench.benchmark.iteration_evaluator", "evaluate_predictions"),
+    "format_evaluation_report": ("axobench.benchmark.iteration_evaluator", "format_evaluation_report"),
 }
 
 __all__ = sorted(_EXPORTS)
