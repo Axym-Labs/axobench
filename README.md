@@ -55,5 +55,11 @@ The terminal report is bounded to six metric rows and 24 diagnostic rows.
 `NA` makes missing evidence explicit. Each diagnostic row also carries its
 mathematical or physiological `basis` in the returned report.
 
+For iterative comparisons, create and save a baseline with
+`create_model_evaluation_cache`, then use `evaluate_model_against_cache` for
+each candidate. Paired metric deltas use morphology-stratified 95% bootstrap
+intervals without rerunning the baseline. The corresponding `improved`,
+`regressed`, and `uncertain` labels are evidence, not a model-promotion rule.
+
 The active exploration arc lives in `docs/benchmark/`, which is ignored by Git
 while the benchmark audit is still exploratory.

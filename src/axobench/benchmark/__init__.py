@@ -93,6 +93,35 @@ _EXPORTS: dict[str, tuple[str, str]] = {
         "PairedInterventionPredictions",
     ),
     "evaluate_model": ("axobench.benchmark.iteration_evaluator", "evaluate_model"),
+    "ModelEvaluationCache": (
+        "axobench.benchmark.iteration_evaluator",
+        "ModelEvaluationCache",
+    ),
+    "create_model_evaluation_cache": (
+        "axobench.benchmark.iteration_evaluator",
+        "create_model_evaluation_cache",
+    ),
+    "evaluate_model_against_cache": (
+        "axobench.benchmark.iteration_evaluator",
+        "evaluate_model_against_cache",
+    ),
+    "load_model_evaluation_cache": (
+        "axobench.benchmark.iteration_evaluator",
+        "load_model_evaluation_cache",
+    ),
+    "write_model_evaluation_cache": (
+        "axobench.benchmark.iteration_evaluator",
+        "write_model_evaluation_cache",
+    ),
+    "compare_predictions": ("axobench.benchmark.iteration_evaluator", "compare_predictions"),
+    "format_model_comparison": (
+        "axobench.benchmark.iteration_evaluator",
+        "format_model_comparison",
+    ),
+    "write_model_comparison": (
+        "axobench.benchmark.iteration_evaluator",
+        "write_model_comparison",
+    ),
     "default_iteration_sample_limits": (
         "axobench.benchmark.iteration_evaluator",
         "default_iteration_sample_limits",
