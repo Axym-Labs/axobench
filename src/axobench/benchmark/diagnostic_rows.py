@@ -223,6 +223,7 @@ def paired_intervention_diagnostic_rows(
         for metric in (
             "soma_delta_rmse_mv",
             "soma_delta_mae_mv",
+            "response_sera_mv2",
             "response_sera_mv",
             "response_rmse_mv",
             "response_sera_over_rmse",
@@ -394,6 +395,7 @@ def _trace_core_rows(report: dict[str, Any], context: DiagnosticContext) -> list
         "lag_tolerant_voltage_rmse_mv",
         "state_trace_shape_distance",
         "spike_train_distance",
+        "voltage_sera_mv2",
         "voltage_sera_mv",
         "voltage_sera_over_rmse",
         "voltage_relevance_mean",
@@ -492,7 +494,13 @@ def _spike_behavior_rows(
                 )
                 row["tolerance_steps"] = tolerance
                 rows.append(row)
-    for metric in ("spike_f1_area", "spike_f1_threshold", "spike_f1_t_min_steps", "spike_f1_t_max_steps"):
+    for metric in (
+        "spike_squared_f1_deficit_area",
+        "spike_f1_area",
+        "spike_f1_threshold",
+        "spike_f1_t_min_steps",
+        "spike_f1_t_max_steps",
+    ):
         rows.append(_row("spike_behavior", context, metric, report.get(metric), unit=_unit_for_metric(metric)))
     rows.append(_row("spike_behavior", context, "spike_f1_threshold_kind", report.get("spike_f1_threshold_kind"), unit="label"))
     return rows
@@ -723,6 +731,10 @@ def _unit_for_metric(metric: str) -> str:
         return "bits"
     if "dvdt" in metric:
         return "mV_per_step"
+    if "_mv2" in metric:
+        return "mV^2"
+    if "squared_f1_deficit" in metric:
+        return "fraction^2"
     if metric.endswith("_mv") or "_mv_" in metric or metric in {"soma_mean_mv", "soma_std_mv"}:
         return "mV"
     if "rate_per_1000" in metric:

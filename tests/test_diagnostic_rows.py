@@ -41,7 +41,13 @@ def test_model_diagnostics_emit_dataframe_rows_for_overlapping_suites():
     assert any(row["suite"] == "trace-core|paper-summary" for row in rows if row["diagnostic"] == "trace_core")
     assert any(row["trace_id"] == "trace-a" and row["metric"] == "soma_rmse_mv" for row in rows)
     assert any(row["diagnostic"] == "trace_core" and row["metric"] == "voltage_sera_mv" for row in rows)
+    assert any(row["diagnostic"] == "trace_core" and row["metric"] == "voltage_sera_mv2" for row in rows)
     assert any(row["diagnostic"] == "spike_behavior" and row["metric"] == "spike_f1_area" for row in rows)
+    assert any(
+        row["diagnostic"] == "spike_behavior"
+        and row["metric"] == "spike_squared_f1_deficit_area"
+        for row in rows
+    )
     assert any(row["state"] == "spiking" for row in rows if row["diagnostic"] == "state_dynamics")
     assert any(
         row["diagnostic"] == "spike_behavior"

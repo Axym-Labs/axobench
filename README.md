@@ -50,7 +50,14 @@ from axobench.benchmark import write_evaluation_report
 write_evaluation_report(report, "runs/candidate-17.csv")
 ```
 
-The terminal report is bounded to six metric rows and 24 diagnostic rows.
+The terminal report is bounded to ten metric rows and 24 diagnostic rows.
+The primary error metrics are support-normalized Voltage/Dynamics/Response
+SERA in squared units and Squared F1-Deficit Area (SFDA) over 0--5 ms. The
+report also includes Root-SERA, ordinary F1 area, exact F1, and 5 ms F1 for
+interpretability and compatibility. SFDA integrates `(1 - F1(tolerance))^2`;
+lower is better. Every report includes the full tolerance curve and calibrated
+threshold.
+
 `attention=YES` is an early watch, `NO` is clear at the stated trigger, and
 `NA` makes missing evidence explicit. Each diagnostic row also carries its
 mathematical or physiological `basis` in the returned report.

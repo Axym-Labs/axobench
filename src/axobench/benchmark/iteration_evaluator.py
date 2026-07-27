@@ -78,7 +78,7 @@ ATTENTION_BASES = {
     ),
     "default_threshold_count": "The interval 0.80-1.25 is a symmetric multiplicative 25% count-calibration envelope.",
     "refractory_violations": "Predicted inter-spike intervals below 2 ms violate a broad absolute refractory bound.",
-    "intervention_response_skill": "Skill below 0.80 leaves more than 20% of zero-response root-SERA error.",
+    "intervention_response_skill": "Skill below 0.80 leaves more than 20% of zero-response SERA error.",
     "intervention_direction": "Agreement below 0.95 reverses at least 5% of material teacher response samples.",
     "intervention_gain": "Response gain outside 0.80-1.20 distorts intervention magnitude by more than 20%.",
     "morphology_error_disparity": (
@@ -610,14 +610,35 @@ def evaluate_predictions(
     response_sera_value = _root_mean_square(
         [item["response_sera_mv"] for item in intervention_reports]
     )
+    response_sera_value2 = _finite_mean(
+        [item["response_sera_mv2"] for item in intervention_reports]
+    )
 
     metrics = [
+        _metric(
+            "voltage_sera_mv2",
+            voltage["voltage_sera_mv2"],
+            "mV^2",
+            "support-normalized squared teacher-relevance voltage error",
+        ),
         _metric("voltage_sera_mv", voltage["voltage_sera_mv"], "mV", "teacher-relevance voltage error"),
+        _metric(
+            "dynamics_sera_mv2_per_ms2",
+            dynamics["dynamics_sera_mv2_per_ms2"],
+            "mV^2/ms^2",
+            "support-normalized squared voltage-transition error",
+        ),
         _metric(
             "dynamics_sera_mv_per_ms",
             dynamics["dynamics_sera_mv_per_ms"],
             "mV/ms",
             "teacher-relevance voltage-transition error",
+        ),
+        _metric(
+            "spike_squared_f1_deficit_area_0_5ms",
+            f1["squared_f1_deficit_area"],
+            "fraction^2",
+            "mean squared F1 deficit over timing tolerance",
         ),
         _metric("spike_f1_area_0_5ms", f1["f1_area"], "fraction", "mean F1 over timing tolerance"),
         _metric(
@@ -631,6 +652,12 @@ def evaluate_predictions(
             f1_by_step[tolerant_step]["f1"],
             "fraction",
             f"F1 at {tolerant_step * cfg.timestep_ms:g} ms",
+        ),
+        _metric(
+            "response_sera_mv2",
+            response_sera_value2,
+            "mV^2",
+            "support-normalized squared paired intervention-response error",
         ),
         _metric("response_sera_mv", response_sera_value, "mV", "paired intervention response error"),
     ]
@@ -655,6 +682,7 @@ def evaluate_predictions(
         "calibration_samples": int(n_calibration),
         "scored_samples": int(pred_score.shape[0]),
         "spike_threshold": float(threshold),
+        "spike_f1_curve": f1["rows"],
         "metrics": metrics,
         "diagnostics": diagnostics,
         "interventions": intervention_reports,
@@ -1259,20 +1287,32 @@ def _paired_metric_bootstrap(
         config,
     )
     values = {
+        "voltage_sera_mv2": [],
         "voltage_sera_mv": [],
+        "dynamics_sera_mv2_per_ms2": [],
         "dynamics_sera_mv_per_ms": [],
+        "spike_squared_f1_deficit_area_0_5ms": [],
         "spike_f1_area_0_5ms": [],
         "spike_f1_exact": [],
         "spike_f1_5ms": [],
+        "response_sera_mv2": [],
         "response_sera_mv": [],
     }
     rng = np.random.default_rng(seed)
     exact_step, tolerant_step = config.selected_f1_steps
     for _ in range(replicates):
         indices = _draw_stratified_bootstrap(ordinary_groups, rng)
+        values["voltage_sera_mv2"].append(
+            _sera_from_trace_statistics(*candidate_voltage, indices)
+            - _sera_from_trace_statistics(*baseline_voltage, indices)
+        )
         values["voltage_sera_mv"].append(
             _root_sera_from_trace_statistics(*candidate_voltage, indices)
             - _root_sera_from_trace_statistics(*baseline_voltage, indices)
+        )
+        values["dynamics_sera_mv2_per_ms2"].append(
+            _sera_from_trace_statistics(*candidate_dynamics, indices)
+            - _sera_from_trace_statistics(*baseline_dynamics, indices)
         )
         values["dynamics_sera_mv_per_ms"].append(
             _root_sera_from_trace_statistics(*candidate_dynamics, indices)
@@ -1288,6 +1328,10 @@ def _paired_metric_bootstrap(
             indices,
             config.f1_tolerances_steps,
         )
+        values["spike_squared_f1_deficit_area_0_5ms"].append(
+            candidate_spike["squared_deficit_area"]
+            - baseline_spike["squared_deficit_area"]
+        )
         values["spike_f1_area_0_5ms"].append(candidate_spike["area"] - baseline_spike["area"])
         values["spike_f1_exact"].append(
             candidate_spike[exact_step] - baseline_spike[exact_step]
@@ -1295,7 +1339,9 @@ def _paired_metric_bootstrap(
         values["spike_f1_5ms"].append(
             candidate_spike[tolerant_step] - baseline_spike[tolerant_step]
         )
-        values["response_sera_mv"].append(_bootstrap_response_delta(response_stats, rng))
+        response_deltas = _bootstrap_response_deltas(response_stats, rng)
+        values["response_sera_mv2"].append(response_deltas["sera"])
+        values["response_sera_mv"].append(response_deltas["root_sera"])
     return values
 
 
@@ -1325,6 +1371,22 @@ def _root_sera_from_trace_statistics(
     counts: np.ndarray,
     indices: np.ndarray,
 ) -> float:
+    return float(
+        np.sqrt(
+            _sera_from_trace_statistics(
+                sums,
+                counts,
+                indices,
+            )
+        )
+    )
+
+
+def _sera_from_trace_statistics(
+    sums: np.ndarray,
+    counts: np.ndarray,
+    indices: np.ndarray,
+) -> float:
     aggregate_counts = np.sum(counts[indices], axis=0)
     aggregate_sums = np.sum(sums[indices], axis=0)
     finite = aggregate_counts > 0
@@ -1333,10 +1395,10 @@ def _root_sera_from_trace_statistics(
     mse = aggregate_sums[finite] / aggregate_counts[finite]
     thresholds = _BOOTSTRAP_SERA_THRESHOLDS[finite]
     if len(thresholds) == 1:
-        return float(np.sqrt(mse[0]))
+        return float(mse[0])
     integral = float(np.sum(0.5 * (mse[:-1] + mse[1:]) * np.diff(thresholds)))
     span = float(thresholds[-1] - thresholds[0])
-    return float(np.sqrt(max(0.0, integral / span if span > 0.0 else mse[0])))
+    return float(max(0.0, integral / span if span > 0.0 else mse[0]))
 
 
 def _f1_trace_statistics(
@@ -1378,12 +1440,27 @@ def _f1_metrics_from_trace_statistics(
         f1_values.append(f1)
     if len(tolerances) == 1:
         area = f1_values[0]
+        squared_deficit_area = (1.0 - f1_values[0]) ** 2
     else:
         widths = np.diff(np.asarray(tolerances, dtype=np.float64))
         integral = float(np.sum(0.5 * (np.asarray(f1_values[:-1]) + np.asarray(f1_values[1:])) * widths))
         span = float(tolerances[-1] - tolerances[0])
         area = integral / span if span > 0.0 else float(np.mean(f1_values))
+        squared_deficit = np.square(1.0 - np.asarray(f1_values))
+        squared_deficit_integral = float(
+            np.sum(
+                0.5
+                * (squared_deficit[:-1] + squared_deficit[1:])
+                * widths
+            )
+        )
+        squared_deficit_area = (
+            squared_deficit_integral / span
+            if span > 0.0
+            else float(np.mean(squared_deficit))
+        )
     result["area"] = float(area)
+    result["squared_deficit_area"] = float(squared_deficit_area)
     return result
 
 
@@ -1465,19 +1542,30 @@ def _response_trace_statistics(
     return _sera_trace_statistics(error, relevance), _bootstrap_groups(labels)
 
 
-def _bootstrap_response_delta(rows: list[dict[str, Any]], rng: np.random.Generator) -> float:
+def _bootstrap_response_deltas(
+    rows: list[dict[str, Any]],
+    rng: np.random.Generator,
+) -> dict[str, float]:
     if not rows:
-        return float("nan")
+        return {"sera": float("nan"), "root_sera": float("nan")}
     candidate_values = []
     baseline_values = []
     for row in rows:
         indices = _draw_stratified_bootstrap(row["groups"], rng)
-        candidate_values.append(_root_sera_from_trace_statistics(*row["candidate"], indices))
-        baseline_values.append(_root_sera_from_trace_statistics(*row["baseline"], indices))
-    return float(
-        np.sqrt(np.mean(np.square(candidate_values)))
-        - np.sqrt(np.mean(np.square(baseline_values)))
-    )
+        candidate_values.append(
+            _sera_from_trace_statistics(*row["candidate"], indices)
+        )
+        baseline_values.append(
+            _sera_from_trace_statistics(*row["baseline"], indices)
+        )
+    candidate_sera = float(np.mean(candidate_values))
+    baseline_sera = float(np.mean(baseline_values))
+    return {
+        "sera": candidate_sera - baseline_sera,
+        "root_sera": float(
+            np.sqrt(candidate_sera) - np.sqrt(baseline_sera)
+        ),
+    }
 
 
 def _delta_assessment(
@@ -1926,15 +2014,23 @@ def _evaluate_intervention(item: PairedInterventionPredictions, config: Evaluati
     model_int_mv = int_pred[..., 1] / config.soma_scale + config.soma_bias_mv
     teacher_delta = teacher_int_mv - teacher_base_mv
     model_delta = model_int_mv - model_base_mv
-    null_sera = float(zero_response["response_sera_mv"])
-    skill = 1.0 - float(measured["response_sera_mv"]) / null_sera if null_sera > 0.0 else float("nan")
+    null_sera = float(zero_response["response_sera_mv2"])
+    skill = (
+        1.0 - float(measured["response_sera_mv2"]) / null_sera
+        if null_sera > 0.0
+        else float("nan")
+    )
     direction = _response_direction_agreement(teacher_delta, model_delta)
     gain = _least_squares_gain(teacher_delta.reshape(-1), model_delta.reshape(-1))
     return {
         "name": item.name,
         "samples": int(base_pred.shape[0]),
+        "response_sera_mv2": float(measured["response_sera_mv2"]),
         "response_sera_mv": float(measured["response_sera_mv"]),
-        "zero_response_sera_mv": null_sera,
+        "zero_response_sera_mv2": null_sera,
+        "zero_response_sera_mv": float(
+            zero_response["response_sera_mv"]
+        ),
         "response_skill": skill,
         "direction_agreement": direction,
         "response_gain": gain,
@@ -2254,6 +2350,14 @@ def _fraction(mask: np.ndarray, valid: np.ndarray) -> float:
 def _root_mean_square(values: list[float]) -> float | None:
     finite = np.asarray([value for value in values if np.isfinite(value)], dtype=float)
     return float(np.sqrt(np.mean(np.square(finite)))) if finite.size else None
+
+
+def _finite_mean(values: list[float]) -> float | None:
+    finite = np.asarray(
+        [value for value in values if np.isfinite(value)],
+        dtype=float,
+    )
+    return float(np.mean(finite)) if finite.size else None
 
 
 def _numeric(value: Any) -> float:

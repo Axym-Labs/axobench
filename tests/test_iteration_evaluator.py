@@ -9,7 +9,7 @@ import numpy as np
 
 import axobench.benchmark as benchmark
 from axobench.benchmark import iteration_evaluator
-from axobench.metrics import root_sera
+from axobench.metrics import root_sera, sera
 
 from axobench.benchmark.iteration_evaluator import (
     DEFAULT_BATCH_SIZE,
@@ -120,9 +120,21 @@ def test_perfect_predictions_clear_available_attention_rows() -> None:
     assert metrics["spike_f1_exact"]["value"] == 1.0
     assert metrics["spike_f1_5ms"]["value"] == 1.0
     assert metrics["spike_f1_area_0_5ms"]["value"] == 1.0
+    assert metrics["spike_squared_f1_deficit_area_0_5ms"]["value"] == 0.0
+    assert metrics["voltage_sera_mv2"]["value"] == 0.0
     assert metrics["voltage_sera_mv"]["value"] == 0.0
+    assert metrics["dynamics_sera_mv2_per_ms2"]["value"] == 0.0
     assert metrics["dynamics_sera_mv_per_ms"]["value"] == 0.0
+    assert metrics["response_sera_mv2"]["value"] == 0.0
     assert metrics["response_sera_mv"]["value"] == 0.0
+    assert [row["tolerance_steps"] for row in report["spike_f1_curve"]] == [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+    ]
     assert "raw_voltage_rmse_mv" not in metrics
     assert "clipped_voltage_rmse_mv" not in metrics
     assert "spike_auc" not in metrics
@@ -174,11 +186,15 @@ def test_paired_comparison_identifies_consistent_candidate_improvement() -> None
 
     rows = {row["id"]: row for row in comparison["comparison"]}
     assert set(rows) == {
+        "voltage_sera_mv2",
         "voltage_sera_mv",
+        "dynamics_sera_mv2_per_ms2",
         "dynamics_sera_mv_per_ms",
+        "spike_squared_f1_deficit_area_0_5ms",
         "spike_f1_area_0_5ms",
         "spike_f1_exact",
         "spike_f1_5ms",
+        "response_sera_mv2",
         "response_sera_mv",
     }
     assert all(
@@ -208,7 +224,11 @@ def test_paired_comparison_marks_identical_models_uncertain() -> None:
         seed=19,
     )
 
-    assert all(row["delta"] == 0.0 for row in comparison["comparison"][:-1])
+    assert all(
+        row["delta"] == 0.0
+        for row in comparison["comparison"]
+        if row["delta"] is not None
+    )
     assert all(row["assessment"] == "uncertain" for row in comparison["comparison"])
 
 
@@ -229,7 +249,7 @@ def test_paired_comparison_writes_json_and_tidy_csv(tmp_path) -> None:
     assert json.loads(json_path.read_text(encoding="utf-8"))["bootstrap_replicates"] == 10
     with csv_path.open(newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
-    assert len(rows) == 6
+    assert len(rows) == 10
     assert {row["assessment"] for row in rows} == {"uncertain"}
 
 
@@ -248,6 +268,18 @@ def test_bootstrap_sera_statistics_match_metric_definition() -> None:
     )
 
     assert np.isclose(from_statistics, direct)
+    assert np.isclose(
+        iteration_evaluator._sera_from_trace_statistics(
+            sums,
+            counts,
+            indices,
+        ),
+        sera(
+            error,
+            relevance,
+            thresholds=iteration_evaluator._BOOTSTRAP_SERA_THRESHOLDS,
+        ),
+    )
 
 
 def test_invalid_outputs_raise_numerical_and_physiological_attention_without_crashing() -> None:
@@ -544,7 +576,7 @@ def test_machine_readable_report_writes_json_or_tidy_csv_only_when_called(tmp_pa
     with csv_path.open(newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
     assert {row["row_type"] for row in rows} == {"metric", "diagnostic", "intervention"}
-    assert len([row for row in rows if row["row_type"] == "metric"]) == 6
+    assert len([row for row in rows if row["row_type"] == "metric"]) == 10
     assert len([row for row in rows if row["row_type"] == "diagnostic"]) == 24
     exact = next(row for row in rows if row["id"] == "spike_f1_exact")
     assert exact["model_id"] == "candidate"

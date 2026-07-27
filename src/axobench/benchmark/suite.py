@@ -266,7 +266,11 @@ class BenchmarkSuite:
                 "state_trace_shape_distance": m1.get("state_trace_shape_distance"),
                 "spike_train_distance": m1.get("spike_train_distance"),
                 "spike_auc": m1.get("spike_auc"),
+                "voltage_sera_mv2": m1.get("voltage_sera_mv2"),
                 "voltage_sera_mv": m1.get("voltage_sera_mv"),
+                "spike_squared_f1_deficit_area": m1.get(
+                    "spike_squared_f1_deficit_area"
+                ),
                 "spike_f1_area": m1.get("spike_f1_area"),
                 "spike_brier": m1.get("spike_brier"),
                 "spike_count_mae_per_trace": m1.get("spike_count_mae_per_trace"),
@@ -498,11 +502,15 @@ def _compute_m1_trace_fidelity(
         "spike_auc": float(binary_auc(spike_scores, spike_labels)),
         "spike_brier": float(np.mean((spike_probs - spike_labels) ** 2)),
         "spike_log_loss": float(-np.mean(spike_labels * np.log(clipped) + (1.0 - spike_labels) * np.log(1.0 - clipped))),
+        "voltage_sera_mv2": core_metrics["voltage_sera_mv2"],
         "voltage_sera_mv": core_metrics["voltage_sera_mv"],
         "voltage_sera_over_rmse": core_metrics["voltage"]["voltage_sera_over_rmse"],
         "voltage_relevance_mean": core_metrics["voltage"]["relevance_mean"],
         "voltage_relevance_support_ge_0_5": core_metrics["voltage"]["relevance_support_ge_0_5"],
         "voltage_relevance_support_ge_0_9": core_metrics["voltage"]["relevance_support_ge_0_9"],
+        "spike_squared_f1_deficit_area": core_metrics[
+            "spike_squared_f1_deficit_area"
+        ],
         "spike_f1_area": core_metrics["spike_f1_area"],
         "spike_f1_t_min_steps": core_metrics["spike"]["t_min_steps"],
         "spike_f1_t_max_steps": core_metrics["spike"]["t_max_steps"],
