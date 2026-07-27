@@ -11,6 +11,22 @@ from typing import Any
 
 
 _EXPORTS: dict[str, tuple[str, str]] = {
+    "PopulationDynamicsConfig": (
+        "axobench.benchmark.population_dynamics",
+        "PopulationDynamicsConfig",
+    ),
+    "analyze_population_perturbation": (
+        "axobench.benchmark.population_dynamics",
+        "analyze_population_perturbation",
+    ),
+    "analyze_population_spikes": (
+        "axobench.benchmark.population_dynamics",
+        "analyze_population_spikes",
+    ),
+    "multistep_branching_ratio": (
+        "axobench.benchmark.population_dynamics",
+        "multistep_branching_ratio",
+    ),
     "compute_regime_stratified_metrics": ("axobench.benchmark.regime_stratified", "compute_regime_stratified_metrics"),
     "compute_state_conditioned_metrics": ("axobench.benchmark.state_metrics", "compute_state_conditioned_metrics"),
     "build_neuron_state_masks": ("axobench.benchmark.state_metrics", "build_neuron_state_masks"),
