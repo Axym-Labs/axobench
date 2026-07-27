@@ -352,6 +352,7 @@ def spike_f1_curve(
         "t_max_steps": int(tolerances[-1]),
         "f1_area": area,
         "squared_f1_deficit_area": squared_deficit_area,
+        "squared_deficit_f1_score": 1.0 - squared_deficit_area,
         "rows": rows,
     }
 
@@ -480,6 +481,9 @@ def compute_core_metric_set(
         "spike_f1_area": spike["f1_area"],
         "spike_squared_f1_deficit_area": (
             spike["squared_f1_deficit_area"]
+        ),
+        "spike_squared_deficit_f1_score": (
+            spike["squared_deficit_f1_score"]
         ),
         "spike_threshold": float(spike_threshold),
         "spike_threshold_kind": threshold_kind,

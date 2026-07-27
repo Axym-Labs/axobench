@@ -120,7 +120,7 @@ def test_perfect_predictions_clear_available_attention_rows() -> None:
     assert metrics["spike_f1_exact"]["value"] == 1.0
     assert metrics["spike_f1_5ms"]["value"] == 1.0
     assert metrics["spike_f1_area_0_5ms"]["value"] == 1.0
-    assert metrics["spike_squared_f1_deficit_area_0_5ms"]["value"] == 0.0
+    assert metrics["spike_squared_deficit_f1_score_0_5ms"]["value"] == 1.0
     assert metrics["voltage_sera_mv2"]["value"] == 0.0
     assert metrics["voltage_sera_mv"]["value"] == 0.0
     assert metrics["dynamics_sera_mv2_per_ms2"]["value"] == 0.0
@@ -190,7 +190,7 @@ def test_paired_comparison_identifies_consistent_candidate_improvement() -> None
         "voltage_sera_mv",
         "dynamics_sera_mv2_per_ms2",
         "dynamics_sera_mv_per_ms",
-        "spike_squared_f1_deficit_area_0_5ms",
+        "spike_squared_deficit_f1_score_0_5ms",
         "spike_f1_area_0_5ms",
         "spike_f1_exact",
         "spike_f1_5ms",

@@ -108,6 +108,7 @@ def test_spike_f1_curve_uses_one_to_one_event_matching():
     assert loose["rows"][1]["f1"] == 1.0
     assert loose["f1_area"] == 0.75
     assert loose["squared_f1_deficit_area"] == 0.125
+    assert loose["squared_deficit_f1_score"] == 0.875
     assert confusion == {"tp": 2, "fp": 0, "fn": 0}
 
 
@@ -137,6 +138,7 @@ def test_compute_core_metric_set_returns_promoted_metrics():
     assert result["dynamics_sera_mv2_per_ms2"] == 0.0
     assert result["spike_f1_area"] == 1.0
     assert result["spike_squared_f1_deficit_area"] == 0.0
+    assert result["spike_squared_deficit_f1_score"] == 1.0
     assert result["spike_threshold_kind"] == "prevalence_matched"
     assert "voltage_rmse_mv" not in result
 

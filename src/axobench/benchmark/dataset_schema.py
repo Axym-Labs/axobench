@@ -415,7 +415,7 @@ def default_diagnostic_specs() -> tuple[DiagnosticSpec, ...]:
                     name="spike_f1_tolerance_curve",
                     kind="atomic",
                     consumes=("spike_behavior",),
-                    description="Discrete spike-event F1 plus Squared F1-Deficit Area across the promoted timing-tolerance interval.",
+                    description="Discrete spike-event F1 plus the higher-is-better Squared-Deficit F1 Score across the promoted timing-tolerance interval.",
                 ),
             ),
             description="Spike calibration, count, event-F1 timing, and threshold behavior.",

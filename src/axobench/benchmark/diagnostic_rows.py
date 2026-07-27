@@ -496,6 +496,7 @@ def _spike_behavior_rows(
                 rows.append(row)
     for metric in (
         "spike_squared_f1_deficit_area",
+        "spike_squared_deficit_f1_score",
         "spike_f1_area",
         "spike_f1_threshold",
         "spike_f1_t_min_steps",
@@ -735,6 +736,8 @@ def _unit_for_metric(metric: str) -> str:
         return "mV^2"
     if "squared_f1_deficit" in metric:
         return "fraction^2"
+    if "squared_deficit_f1_score" in metric:
+        return "fraction"
     if metric.endswith("_mv") or "_mv_" in metric or metric in {"soma_mean_mv", "soma_std_mv"}:
         return "mV"
     if "rate_per_1000" in metric:

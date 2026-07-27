@@ -271,6 +271,9 @@ class BenchmarkSuite:
                 "spike_squared_f1_deficit_area": m1.get(
                     "spike_squared_f1_deficit_area"
                 ),
+                "spike_squared_deficit_f1_score": m1.get(
+                    "spike_squared_deficit_f1_score"
+                ),
                 "spike_f1_area": m1.get("spike_f1_area"),
                 "spike_brier": m1.get("spike_brier"),
                 "spike_count_mae_per_trace": m1.get("spike_count_mae_per_trace"),
@@ -510,6 +513,9 @@ def _compute_m1_trace_fidelity(
         "voltage_relevance_support_ge_0_9": core_metrics["voltage"]["relevance_support_ge_0_9"],
         "spike_squared_f1_deficit_area": core_metrics[
             "spike_squared_f1_deficit_area"
+        ],
+        "spike_squared_deficit_f1_score": core_metrics[
+            "spike_squared_deficit_f1_score"
         ],
         "spike_f1_area": core_metrics["spike_f1_area"],
         "spike_f1_t_min_steps": core_metrics["spike"]["t_min_steps"],
