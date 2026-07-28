@@ -52,12 +52,12 @@ write_evaluation_report(report, "runs/candidate-17.csv")
 
 The terminal report is bounded to ten metric rows and 24 diagnostic rows.
 The primary metrics are support-normalized Voltage/Dynamics/Response SERA in
-squared units and the Squared-Deficit F1 Score over 0--5 ms. The latter is
-`1 - mean((1 - F1(tolerance))^2)`, integrated over the fixed tolerance span,
-so higher is better and gains in poor-tolerance regions receive more weight.
-The report also includes Root-SERA, ordinary F1 area, exact F1, 5 ms F1, and
-the lower-is-better squared-deficit area for interpretation and compatibility.
-Every report includes the full tolerance curve and calibrated threshold.
+squared units and Mean F1 over the declared integer timing tolerances. The
+default spike score is the arithmetic mean of event F1 at
+`0, 1, 2, 3, 4, 5 ms`, so it is higher-is-better and each declared tolerance
+has equal weight. The report also includes Root-SERA, ordinary trapezoidal F1
+area, exact F1, and 5 ms F1. Every report includes the full tolerance curve and
+calibrated threshold.
 
 `attention=YES` is an early watch, `NO` is clear at the stated trigger, and
 `NA` makes missing evidence explicit. Each diagnostic row also carries its
