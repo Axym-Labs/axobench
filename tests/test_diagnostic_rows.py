@@ -45,7 +45,7 @@ def test_model_diagnostics_emit_dataframe_rows_for_overlapping_suites():
     assert any(row["diagnostic"] == "spike_behavior" and row["metric"] == "spike_f1_area" for row in rows)
     assert any(
         row["diagnostic"] == "spike_behavior"
-        and row["metric"] == "spike_squared_f1_deficit_area"
+        and row["metric"] == "spike_mean_f1"
         for row in rows
     )
     assert any(row["state"] == "spiking" for row in rows if row["diagnostic"] == "state_dynamics")

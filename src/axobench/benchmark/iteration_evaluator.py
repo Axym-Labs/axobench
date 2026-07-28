@@ -635,12 +635,17 @@ def evaluate_predictions(
             "teacher-relevance voltage-transition error",
         ),
         _metric(
-            "spike_squared_deficit_f1_score_0_5ms",
-            f1["squared_deficit_f1_score"],
+            "spike_mean_f1_0_5ms",
+            f1["mean_f1"],
             "fraction",
-            "one minus mean squared F1 deficit over timing tolerance",
+            "arithmetic mean of F1 at integer 0-5 ms tolerances",
         ),
-        _metric("spike_f1_area_0_5ms", f1["f1_area"], "fraction", "mean F1 over timing tolerance"),
+        _metric(
+            "spike_f1_area_0_5ms",
+            f1["f1_area"],
+            "fraction",
+            "trapezoidal average of F1 over the 0-5 ms tolerance interval",
+        ),
         _metric(
             "spike_f1_exact",
             f1_by_step[exact_step]["f1"],
@@ -764,9 +769,7 @@ def compare_predictions(
     rows = []
     for identifier, candidate_metric in candidate_metrics.items():
         baseline_metric = baseline_metrics[identifier]
-        higher_is_better = identifier.startswith(
-            ("spike_f1", "spike_squared_deficit_f1_score")
-        )
+        higher_is_better = identifier.startswith(("spike_f1", "spike_mean_f1"))
         candidate_value = candidate_metric["value"]
         baseline_value = baseline_metric["value"]
         delta = (
@@ -1293,7 +1296,7 @@ def _paired_metric_bootstrap(
         "voltage_sera_mv": [],
         "dynamics_sera_mv2_per_ms2": [],
         "dynamics_sera_mv_per_ms": [],
-        "spike_squared_deficit_f1_score_0_5ms": [],
+        "spike_mean_f1_0_5ms": [],
         "spike_f1_area_0_5ms": [],
         "spike_f1_exact": [],
         "spike_f1_5ms": [],
@@ -1330,9 +1333,8 @@ def _paired_metric_bootstrap(
             indices,
             config.f1_tolerances_steps,
         )
-        values["spike_squared_deficit_f1_score_0_5ms"].append(
-            candidate_spike["squared_deficit_score"]
-            - baseline_spike["squared_deficit_score"]
+        values["spike_mean_f1_0_5ms"].append(
+            candidate_spike["mean"] - baseline_spike["mean"]
         )
         values["spike_f1_area_0_5ms"].append(candidate_spike["area"] - baseline_spike["area"])
         values["spike_f1_exact"].append(
@@ -1440,30 +1442,16 @@ def _f1_metrics_from_trace_statistics(
         f1 = float(2 * tp / denominator) if denominator > 0 else 0.0
         result[int(tolerance)] = f1
         f1_values.append(f1)
+    mean_f1 = float(np.mean(f1_values))
     if len(tolerances) == 1:
         area = f1_values[0]
-        squared_deficit_area = (1.0 - f1_values[0]) ** 2
     else:
         widths = np.diff(np.asarray(tolerances, dtype=np.float64))
         integral = float(np.sum(0.5 * (np.asarray(f1_values[:-1]) + np.asarray(f1_values[1:])) * widths))
         span = float(tolerances[-1] - tolerances[0])
         area = integral / span if span > 0.0 else float(np.mean(f1_values))
-        squared_deficit = np.square(1.0 - np.asarray(f1_values))
-        squared_deficit_integral = float(
-            np.sum(
-                0.5
-                * (squared_deficit[:-1] + squared_deficit[1:])
-                * widths
-            )
-        )
-        squared_deficit_area = (
-            squared_deficit_integral / span
-            if span > 0.0
-            else float(np.mean(squared_deficit))
-        )
+    result["mean"] = mean_f1
     result["area"] = float(area)
-    result["squared_deficit_area"] = float(squared_deficit_area)
-    result["squared_deficit_score"] = float(1.0 - squared_deficit_area)
     return result
 
 

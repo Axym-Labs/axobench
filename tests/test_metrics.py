@@ -106,10 +106,24 @@ def test_spike_f1_curve_uses_one_to_one_event_matching():
 
     assert exact["rows"][0]["f1"] == 0.5
     assert loose["rows"][1]["f1"] == 1.0
+    assert loose["mean_f1"] == 0.75
     assert loose["f1_area"] == 0.75
-    assert loose["squared_f1_deficit_area"] == 0.125
-    assert loose["squared_deficit_f1_score"] == 0.875
     assert confusion == {"tp": 2, "fp": 0, "fn": 0}
+
+
+def test_spike_mean_f1_is_the_arithmetic_mean_over_declared_tolerances():
+    predicted = np.array([[0.0, 0.0, 0.0, 2.0]])
+    target = np.array([[0.0, 1.0, 0.0, 0.0]])
+
+    result = spike_f1_curve(
+        predicted,
+        target,
+        threshold=1.0,
+        tolerances_steps=(0, 1, 2),
+    )
+
+    assert result["mean_f1"] == pytest.approx(1.0 / 3.0)
+    assert result["f1_area"] == 0.25
 
 
 def test_spike_f1_curve_requires_strictly_increasing_tolerances():
@@ -136,9 +150,10 @@ def test_compute_core_metric_set_returns_promoted_metrics():
     assert result["voltage_sera_mv2"] == 0.0
     assert result["dynamics_sera_mv_per_ms"] == 0.0
     assert result["dynamics_sera_mv2_per_ms2"] == 0.0
+    assert result["spike_mean_f1"] == 1.0
     assert result["spike_f1_area"] == 1.0
-    assert result["spike_squared_f1_deficit_area"] == 0.0
-    assert result["spike_squared_deficit_f1_score"] == 1.0
+    assert "spike_squared_f1_deficit_area" not in result
+    assert "spike_squared_deficit_f1_score" not in result
     assert result["spike_threshold_kind"] == "prevalence_matched"
     assert "voltage_rmse_mv" not in result
 

@@ -334,25 +334,18 @@ def spike_f1_curve(
             }
         )
     f1_values = np.asarray([0.0 if row["f1"] is None else float(row["f1"]) for row in rows], dtype=np.float64)
+    mean_f1 = float(np.mean(f1_values))
     if len(tolerances) == 1:
         area = float(f1_values[0])
-        squared_deficit_area = float((1.0 - f1_values[0]) ** 2)
     else:
         span = float(tolerances[-1] - tolerances[0])
         area = float(_trapezoid(f1_values, tolerances) / span) if span > 0 else float(np.mean(f1_values))
-        squared_deficit = np.square(1.0 - f1_values)
-        squared_deficit_area = (
-            float(_trapezoid(squared_deficit, tolerances) / span)
-            if span > 0
-            else float(np.mean(squared_deficit))
-        )
     return {
         "threshold": float(threshold),
         "t_min_steps": int(tolerances[0]),
         "t_max_steps": int(tolerances[-1]),
+        "mean_f1": mean_f1,
         "f1_area": area,
-        "squared_f1_deficit_area": squared_deficit_area,
-        "squared_deficit_f1_score": 1.0 - squared_deficit_area,
         "rows": rows,
     }
 
@@ -478,13 +471,8 @@ def compute_core_metric_set(
         "voltage_sera_mv": voltage["voltage_sera_mv"],
         "dynamics_sera_mv2_per_ms2": dynamics["dynamics_sera_mv2_per_ms2"],
         "dynamics_sera_mv_per_ms": dynamics["dynamics_sera_mv_per_ms"],
+        "spike_mean_f1": spike["mean_f1"],
         "spike_f1_area": spike["f1_area"],
-        "spike_squared_f1_deficit_area": (
-            spike["squared_f1_deficit_area"]
-        ),
-        "spike_squared_deficit_f1_score": (
-            spike["squared_deficit_f1_score"]
-        ),
         "spike_threshold": float(spike_threshold),
         "spike_threshold_kind": threshold_kind,
     }

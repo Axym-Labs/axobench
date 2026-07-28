@@ -402,6 +402,7 @@ def _trace_core_rows(report: dict[str, Any], context: DiagnosticContext) -> list
         "voltage_relevance_support_ge_0_5",
         "voltage_relevance_support_ge_0_9",
         "spike_auc",
+        "spike_mean_f1",
         "spike_f1_area",
         "spike_f1_t_min_steps",
         "spike_f1_t_max_steps",
@@ -495,8 +496,7 @@ def _spike_behavior_rows(
                 row["tolerance_steps"] = tolerance
                 rows.append(row)
     for metric in (
-        "spike_squared_f1_deficit_area",
-        "spike_squared_deficit_f1_score",
+        "spike_mean_f1",
         "spike_f1_area",
         "spike_f1_threshold",
         "spike_f1_t_min_steps",
@@ -734,10 +734,6 @@ def _unit_for_metric(metric: str) -> str:
         return "mV_per_step"
     if "_mv2" in metric:
         return "mV^2"
-    if "squared_f1_deficit" in metric:
-        return "fraction^2"
-    if "squared_deficit_f1_score" in metric:
-        return "fraction"
     if metric.endswith("_mv") or "_mv_" in metric or metric in {"soma_mean_mv", "soma_std_mv"}:
         return "mV"
     if "rate_per_1000" in metric:
@@ -746,6 +742,7 @@ def _unit_for_metric(metric: str) -> str:
         "fraction" in metric
         or metric in {"spike_auc", "spike_brier"}
         or metric.startswith(("precision_", "recall_", "f1_"))
+        or metric.endswith("_mean_f1")
         or metric.endswith("_f1_area")
         or "relevance_mean" in metric
     ):

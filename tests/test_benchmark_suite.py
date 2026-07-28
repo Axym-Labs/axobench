@@ -50,18 +50,7 @@ def test_benchmark_suite_reports_mvp_schema_and_masked_m1(tmp_path):
     assert report["metadata"]["mask"]["evaluated_timesteps_per_trace"] == 3
     assert report["m1_trace_fidelity"]["soma_rmse_mv"] == 0.0
     assert report["m1_trace_fidelity"]["voltage_sera_mv2"] == 0.0
-    assert (
-        report["m1_trace_fidelity"][
-            "spike_squared_f1_deficit_area"
-        ]
-        == 0.0
-    )
-    assert (
-        report["m1_trace_fidelity"][
-            "spike_squared_deficit_f1_score"
-        ]
-        == 1.0
-    )
+    assert report["m1_trace_fidelity"]["spike_mean_f1"] == 1.0
     assert "state_weighted_trace_distance_mv" in report["m1_trace_fidelity"]
     assert "dynamic_distance" in report["m1_trace_fidelity"]
     assert "trace_shape_distance" in report["m1_trace_fidelity"]
