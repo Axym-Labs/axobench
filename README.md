@@ -2,7 +2,16 @@
 
 AxoBench is the extracted benchmark and dataset-generation workbench for
 single-neuron surrogate evaluation. It owns dataset generation, data/schema
-utilities, diagnostic suites, and benchmark reporting.
+utilities, diagnostic suites, and benchmark reporting. Its publication
+contract reports support-normalized squared SERA for voltage fidelity and the
+arithmetic Mean F1 at integer spike tolerances from 0 through 5 ms.
+
+## Install and verify
+
+```bash
+python -m pip install -e .[dev]
+python -m pytest -q
+```
 
 The package keeps simulator-backed generation code under
 `src/axobench/generation/`: Arbor, NEURON/Hay, CoreNEURON/Hay, SWC-template
@@ -69,5 +78,10 @@ each candidate. Paired metric deltas use morphology-stratified 95% bootstrap
 intervals without rerunning the baseline. The corresponding `improved`,
 `regressed`, and `uncertain` labels are evidence, not a model-promotion rule.
 
-The active exploration arc lives in `docs/benchmark/`, which is ignored by Git
-while the benchmark audit is still exploratory.
+## Scope
+
+AxoBench defines evaluation and generation contracts; it does not claim that
+one scalar metric captures every biologically relevant error. Squared SERA and
+Mean F1 should be reported with the tolerance grid, trace selection,
+calibration split, and uncertainty procedure. Ordinary trapezoidal F1 area and
+Root-SERA remain compatibility views rather than headline metrics.
