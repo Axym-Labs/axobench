@@ -51,14 +51,14 @@ def test_root_sera_matches_rmse_when_relevance_is_constant():
     assert np.isclose(root_sera(error, relevance), np.sqrt(np.mean(error ** 2)))
 
 
-def test_sera_matches_mse_and_is_root_sera_squared():
+def test_sera_matches_mse_and_root_sera_relation():
     error = np.array([1.0, -2.0, 2.0])
     relevance = np.ones_like(error)
 
-    squared = sera(error, relevance)
+    sera_value = sera(error, relevance)
 
-    assert np.isclose(squared, np.mean(error**2))
-    assert np.isclose(squared, root_sera(error, relevance) ** 2)
+    assert np.isclose(sera_value, np.mean(error**2))
+    assert np.isclose(sera_value, root_sera(error, relevance) ** 2)
 
 
 def test_voltage_sera_emphasizes_relevant_teacher_regions():

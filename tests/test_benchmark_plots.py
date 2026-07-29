@@ -1,6 +1,53 @@
 import numpy as np
 
-from axobench.benchmark.plots import plot_state_embedding_surface, plot_phase_plane_surface
+from axobench.benchmark.plots import (
+    plot_phase_plane_surface,
+    plot_state_embedding_surface,
+    write_core_metric_set_artifacts,
+)
+
+
+def test_core_metric_artifact_promotes_dynamics_sera(tmp_path):
+    summary = {
+        "models": [
+            {
+                "model_id": "branch_elm_m5",
+                "n_parameters": 10_000,
+                "voltage_sera_mv2": 16.0,
+                "dynamics_sera_mv2_per_ms2": 4.0,
+                "mean_response_sera_mv2": 9.0,
+                "spike_f1_area": 0.4,
+                "spike_f1_curve": [
+                    {"tolerance_steps": 0, "f1": 0.2},
+                    {"tolerance_steps": 1, "f1": 0.4},
+                ],
+            },
+            {
+                "model_id": "axosim",
+                "n_parameters": 20_000,
+                "voltage_sera_mv2": 9.0,
+                "dynamics_sera_mv2_per_ms2": 1.0,
+                "mean_response_sera_mv2": 4.0,
+                "spike_f1_area": 0.7,
+                "spike_f1_curve": [
+                    {"tolerance_steps": 0, "f1": 0.6},
+                    {"tolerance_steps": 1, "f1": 0.8},
+                ],
+            },
+        ]
+    }
+
+    artifacts = write_core_metric_set_artifacts(
+        summary=summary,
+        output_dir=tmp_path,
+        formats=("svg",),
+    )
+
+    table = (tmp_path / "table01_core_metric_set.md").read_text()
+    pareto = (tmp_path / "fig02_sera_model_size_pareto.svg").read_text()
+    assert "Dynamics SERA (mV²/ms²)" in table
+    assert "Dynamics SERA (mV²/ms²)" in pareto
+    assert len(artifacts["figures"]) == 3
 
 
 def test_phase_plane_surface_writes_model_and_teacher_plots(tmp_path):

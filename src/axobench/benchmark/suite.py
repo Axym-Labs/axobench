@@ -506,6 +506,12 @@ def _compute_m1_trace_fidelity(
         "voltage_relevance_mean": core_metrics["voltage"]["relevance_mean"],
         "voltage_relevance_support_ge_0_5": core_metrics["voltage"]["relevance_support_ge_0_5"],
         "voltage_relevance_support_ge_0_9": core_metrics["voltage"]["relevance_support_ge_0_9"],
+        "dynamics_sera_mv2_per_ms2": core_metrics[
+            "dynamics_sera_mv2_per_ms2"
+        ],
+        "dynamics_sera_mv_per_ms": core_metrics[
+            "dynamics_sera_mv_per_ms"
+        ],
         "spike_mean_f1": core_metrics["spike_mean_f1"],
         "spike_f1_area": core_metrics["spike_f1_area"],
         "spike_f1_t_min_steps": core_metrics["spike"]["t_min_steps"],

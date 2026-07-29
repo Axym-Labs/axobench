@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT=${AXOBENCH_ROOT:-/home/davwis/main/workspace/axobench}
-NRN_GPU=${NRN_GPU:-/home/davwis/.local/neuron-9.0.1-gpu-runtime}
-NVHPC=${NVHPC:-/home/davwis/.local/nvidia/Linux_x86_64/26.3}
-BUILD_TOOLS=${BUILD_TOOLS:-/home/davwis/.local/neuron-build-tools}
-AXOBENCH_PYTHON=${AXOBENCH_PYTHON:-/home/davwis/miniconda3/envs/bnn_sim/bin/python}
-AXOBENCH_ENV=${AXOBENCH_ENV:-/home/davwis/miniconda3/envs/bnn_sim}
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+ROOT=${AXOBENCH_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}
+NRN_GPU=${AXOBENCH_GPU_RUNTIME:-${NRN_GPU:-$ROOT/vendor/neuron-gpu-runtime}}
+NVHPC_ROOT=${AXOBENCH_NVHPC_ROOT:-${NVHPC:-$ROOT/vendor/nvhpc}}
+BUILD_TOOLS=${AXOBENCH_NEURON_BUILD_TOOLS:-${BUILD_TOOLS:-$ROOT/vendor/neuron-build-tools}}
+AXOBENCH_PYTHON=${AXOBENCH_PYTHON:-$(command -v python3)}
+AXOBENCH_ENV=${AXOBENCH_ENV:-$(dirname "$(dirname "$AXOBENCH_PYTHON")")}
 GEN_ARTIFACTS=${AXOBENCH_GENERATION_ARTIFACTS:-$ROOT/artifacts/generation}
 SWC_ROOT=${AXOBENCH_SWC_MECH_ROOT:-$GEN_ARTIFACTS/hay_swc_template_gpu_durable_20260606}
 DATA_ROOT=${AXOBENCH_V1_DATA_ROOT:-$ROOT/data/v1-axobench-gpu-ei-balanced-20260619}
@@ -16,9 +17,9 @@ export PYTHONUNBUFFERED=1
 export AXOBENCH_V1_DATA_ROOT="$DATA_ROOT"
 export AXOBENCH_GENERATION_ARTIFACTS="$GEN_ARTIFACTS"
 export AXOBENCH_SWC_MECH_ROOT="$SWC_ROOT"
-export PATH="$NRN_GPU/bin:$BUILD_TOOLS/bin:$NVHPC/compilers/bin:$NVHPC/cuda/bin:$PATH"
+export PATH="$NRN_GPU/bin:$BUILD_TOOLS/bin:$NVHPC_ROOT/compilers/bin:$NVHPC_ROOT/cuda/bin:$PATH"
 export PYTHONPATH="$NRN_GPU/lib/python:$ROOT/src:$GEN_ARTIFACTS:$GEN_ARTIFACTS/coreneuron_hay_port_probe_20260605:${PYTHONPATH:-}"
-export LD_LIBRARY_PATH="$SWC_ROOT/x86_64:$NRN_GPU/lib:$BUILD_TOOLS/lib:$AXOBENCH_ENV/lib:$NVHPC/compilers/lib:$NVHPC/cuda/lib64:${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="$SWC_ROOT/x86_64:$NRN_GPU/lib:$BUILD_TOOLS/lib:$AXOBENCH_ENV/lib:$NVHPC_ROOT/compilers/lib:$NVHPC_ROOT/cuda/lib64:${LD_LIBRARY_PATH:-}"
 export NEURONHOME="$NRN_GPU"
 export NRNHOME="$NRN_GPU"
 export NRNHOME_EXEC="$NRN_GPU"
@@ -59,7 +60,7 @@ from pathlib import Path
 import json
 import os
 
-root = Path(os.environ["AXOBENCH_V1_DATA_ROOT"] if "AXOBENCH_V1_DATA_ROOT" in os.environ else "/home/davwis/main/workspace/axobench/data/v1-neuronio-like-gpu-20260611")
+root = Path(os.environ["AXOBENCH_V1_DATA_ROOT"])
 summary = {
     "data_root": str(root),
     "ordinary": {},

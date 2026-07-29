@@ -18,7 +18,12 @@ from matplotlib.patches import FancyArrowPatch, Rectangle
 
 
 PLOT_FORMATS = ("svg", "pdf", "png")
-PAPER_STYLE = Path("/home/davwis/.codex/local-plugins/plugins/local-reusability-assets/plotting/paper.mplstyle")
+_PAPER_STYLE_ENV = os.environ.get("AXOBENCH_PAPER_STYLE")
+PAPER_STYLE = (
+    Path(_PAPER_STYLE_ENV).expanduser()
+    if _PAPER_STYLE_ENV
+    else None
+)
 OKABE_ITO = {
     "blue": "#0072B2",
     "orange": "#E69F00",
@@ -35,7 +40,7 @@ OKABE_ITO = {
 
 def apply_paper_plot_style() -> None:
     """Use the compact serif style used by the IEWC paper figures."""
-    if PAPER_STYLE.exists():
+    if PAPER_STYLE is not None and PAPER_STYLE.exists():
         plt.style.use(str(PAPER_STYLE))
     mpl.rcParams.update(
         {
@@ -801,7 +806,7 @@ def write_core_metric_set_artifacts(
     output_dir: str | Path,
     formats: tuple[str, ...] = PLOT_FORMATS,
 ) -> dict[str, Any]:
-    """Write plots/tables for the promoted Voltage SERA/Spike F1/Response SERA set."""
+    """Write plots and tables for the promoted AxoBench core metric set."""
     apply_paper_plot_style()
     payload = _load_json(summary) if isinstance(summary, (str, Path)) else summary
     models = list(payload.get("models", []))
@@ -868,11 +873,16 @@ def _plot_core_spike_f1_curves(models: list[dict[str, Any]], output: Path, forma
 def _plot_core_sera_pareto(models: list[dict[str, Any]], output: Path, formats: tuple[str, ...], *, x_axis: str = "parameters") -> str:
     if x_axis not in {"parameters", "branch_memory"}:
         raise ValueError("x_axis must be 'parameters' or 'branch_memory'")
-    fig, axes = plt.subplots(1, 2, figsize=(7.2, 3.05), sharex=True)
+    fig, axes = plt.subplots(1, 3, figsize=(10.4, 3.05), sharex=True)
     legend_handles: dict[str, Any] = {}
     panels = (
-        (axes[0], "voltage_sera_mv", "Voltage SERA (mV)"),
-        (axes[1], "mean_response_sera_mv", "Response SERA (mV)"),
+        (axes[0], "voltage_sera_mv2", "Voltage SERA (mV²)"),
+        (
+            axes[1],
+            "dynamics_sera_mv2_per_ms2",
+            "Dynamics SERA (mV²/ms²)",
+        ),
+        (axes[2], "mean_response_sera_mv2", "Response SERA (mV²)"),
     )
     for ax, metric, label in panels:
         points = _core_metric_points(models, metric)
@@ -1036,13 +1046,12 @@ def _write_core_metric_table(models: list[dict[str, Any]], output: Path) -> str:
     headers = (
         "model",
         "params",
-        "voltage SERA mV",
-        "voltage RMSE mV",
-        "spike F1 area",
-        "F1 area 0-5 ms",
-        "F1 t_max ms",
-        "mean response SERA mV",
-        "mean response RMSE mV",
+        "Voltage SERA (mV²)",
+        "Dynamics SERA (mV²/ms²)",
+        "Response SERA (mV²)",
+        "Mean F1 (0-5 ms)",
+        "Root-SERA (mV)",
+        "trapezoidal F1 area",
     )
     rows = []
     for model in models:
@@ -1050,13 +1059,12 @@ def _write_core_metric_table(models: list[dict[str, Any]], output: Path) -> str:
             (
                 model.get("model_id"),
                 model.get("n_parameters"),
+                _fmt_table(model.get("voltage_sera_mv2")),
+                _fmt_table(model.get("dynamics_sera_mv2_per_ms2")),
+                _fmt_table(model.get("mean_response_sera_mv2")),
+                _fmt_table(model.get("spike_mean_f1")),
                 _fmt_table(model.get("voltage_sera_mv")),
-                _fmt_table(model.get("voltage_rmse_mv")),
                 _fmt_table(model.get("spike_f1_area")),
-                _fmt_table(model.get("spike_f1_area_0_5ms")),
-                model.get("spike_f1_t_max_steps"),
-                _fmt_table(model.get("mean_response_sera_mv")),
-                _fmt_table(model.get("mean_response_rmse_mv")),
             )
         )
     _write_markdown_table(output, headers, rows)
