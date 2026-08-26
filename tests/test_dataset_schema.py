@@ -90,3 +90,20 @@ def test_diagnostic_suite_catalog_is_overlapping_not_partitioned():
     assert "mechanistic_response" in catalog["suites"]["paper-summary"]
     assert "morphology_routing_qc" in catalog["suites"]["teacher-qc"]
     assert "morphology_routing_qc" in catalog["suites"]["paper-summary"]
+
+
+def test_spike_tolerance_plotter_describes_mean_f1_without_squared_deficit():
+    spike_behavior = next(
+        diagnostic
+        for diagnostic in default_diagnostic_specs()
+        if diagnostic.name == "spike_behavior"
+    )
+    tolerance_curve = next(
+        plotter
+        for plotter in spike_behavior.plotters
+        if plotter.name == "spike_f1_tolerance_curve"
+    )
+
+    assert "Mean F1" in tolerance_curve.description
+    assert "0--5 ms" in tolerance_curve.description
+    assert "Squared-Deficit" not in tolerance_curve.description

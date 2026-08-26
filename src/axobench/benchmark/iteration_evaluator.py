@@ -10,7 +10,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 import csv
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -20,10 +21,13 @@ from typing import Any, Iterable
 import numpy as np
 
 from axobench.metrics import (
+    _tail_relevance,
     dynamics_sera,
     prevalence_matched_threshold,
     response_sera,
+    spike_event_confusion,
     spike_f1_curve,
+    voltage_relevance,
     voltage_sera,
 )
 from axobench.data import ShardedNeuronIODataset
@@ -74,7 +78,7 @@ ATTENTION_BASES = {
     ),
     "default_threshold_count": "The interval 0.80-1.25 is a symmetric multiplicative 25% count-calibration envelope.",
     "refractory_violations": "Predicted inter-spike intervals below 2 ms violate a broad absolute refractory bound.",
-    "intervention_response_skill": "Skill below 0.80 leaves more than 20% of zero-response root-SERA error.",
+    "intervention_response_skill": "Skill below 0.80 leaves more than 20% of zero-response SERA error.",
     "intervention_direction": "Agreement below 0.95 reverses at least 5% of material teacher response samples.",
     "intervention_gain": "Response gain outside 0.80-1.20 distorts intervention magnitude by more than 20%.",
     "morphology_error_disparity": (
@@ -128,6 +132,21 @@ class PairedInterventionPredictions:
     intervention_target: np.ndarray
     baseline_raw_soma_mv: np.ndarray | None = None
     intervention_raw_soma_mv: np.ndarray | None = None
+    morphology_ids: list[str] | np.ndarray | None = None
+
+
+@dataclass(frozen=True)
+class ModelEvaluationCache:
+    """Frozen baseline outputs and diagnostics for repeatable comparisons."""
+
+    model_id: str
+    report: dict[str, Any]
+    prediction: np.ndarray
+    trace_ids: tuple[str, ...]
+    target_sha256: str
+    interventions: tuple[PairedInterventionPredictions, ...]
+    protocol: dict[str, Any]
+    source_path: Path | None = None
 
 
 def evaluate_model(
@@ -188,7 +207,9 @@ def evaluate_model(
     for start in range(0, sample_count, batch_size):
         indices = selected_indices[start : start + batch_size]
         inputs, batch_targets = validation.get_batch(indices)
-        batch_prediction = np.asarray(model_fn(inputs))
+        batch_trace_ids = validation.get_sample_ids(indices)
+        batch_morphologies = [_morphology_id(trace_id) for trace_id in batch_trace_ids]
+        batch_prediction = _call_model(model_fn, inputs, batch_morphologies)
         if batch_prediction.shape != batch_targets.shape:
             raise ValueError(
                 f"model prediction must match target shape, got {batch_prediction.shape} and {batch_targets.shape}"
@@ -206,7 +227,7 @@ def evaluate_model(
             raw_soma_available = False
         elif raw_soma_available:
             raw_soma_chunks.append(np.asarray(raw, dtype=np.float32))
-        trace_ids.extend(validation.get_sample_ids(indices))
+        trace_ids.extend(batch_trace_ids)
 
     interventions = _run_dataset_interventions(
         model_fn,
@@ -241,6 +262,260 @@ def evaluate_model(
     report["intervention_sample_limit_per_condition"] = max_intervention_samples
     report["sample_profile"] = "iteration"
     return report
+
+
+def create_model_evaluation_cache(
+    model_fn: Callable[[np.ndarray], np.ndarray],
+    *,
+    dataset_root: str | Path,
+    model_id: str = "baseline",
+    max_samples: int | None = None,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    max_intervention_samples: int | None = None,
+    max_interventions: int = 8,
+    intervention_workers: int = DEFAULT_INTERVENTION_WORKERS,
+    intervention_names: Iterable[str] | None = None,
+    multiple_morphologies: bool = False,
+    morphology_id: str | None = None,
+    cache_shards: int = 1,
+    config: EvaluationConfig | None = None,
+) -> ModelEvaluationCache:
+    """Evaluate a baseline once and retain everything needed for paired reuse."""
+    started_at = time.perf_counter()
+    cfg = config or EvaluationConfig()
+    max_samples, max_intervention_samples = _resolved_iteration_limits(
+        max_samples,
+        max_intervention_samples,
+        multiple_morphologies=multiple_morphologies,
+    )
+    names = tuple(intervention_names) if intervention_names is not None else None
+    collected = _collect_model_outputs(
+        model_fn,
+        dataset_root=dataset_root,
+        max_samples=max_samples,
+        batch_size=batch_size,
+        max_intervention_samples=max_intervention_samples,
+        max_interventions=max_interventions,
+        intervention_workers=intervention_workers,
+        intervention_names=names,
+        multiple_morphologies=multiple_morphologies,
+        morphology_id=morphology_id,
+        cache_shards=cache_shards,
+    )
+    report = evaluate_predictions(
+        collected["prediction"],
+        collected["target"],
+        inputs=collected["inputs"],
+        raw_soma_mv=collected["raw_soma_mv"],
+        trace_ids=collected["trace_ids"],
+        interventions=collected["interventions"],
+        config=cfg,
+        model_id=model_id,
+    )
+    _annotate_iteration_report(
+        report,
+        elapsed=float(time.perf_counter() - started_at),
+        selected_morphologies=collected["selected_morphologies"],
+        multiple_morphologies=multiple_morphologies,
+        max_samples=max_samples,
+        max_intervention_samples=max_intervention_samples,
+    )
+    protocol = _evaluation_cache_protocol(
+        max_samples=max_samples,
+        max_intervention_samples=max_intervention_samples,
+        max_interventions=max_interventions,
+        intervention_names=names,
+        multiple_morphologies=multiple_morphologies,
+        morphology_id=morphology_id,
+        config=cfg,
+    )
+    return ModelEvaluationCache(
+        model_id=model_id,
+        report=report,
+        prediction=collected["prediction"],
+        trace_ids=tuple(collected["trace_ids"]),
+        target_sha256=_array_sha256(collected["target"]),
+        interventions=tuple(collected["interventions"]),
+        protocol=protocol,
+    )
+
+
+def evaluate_model_against_cache(
+    candidate_model_fn: Callable[[np.ndarray], np.ndarray],
+    *,
+    baseline_cache: ModelEvaluationCache | str | Path,
+    dataset_root: str | Path,
+    candidate_id: str = "candidate",
+    max_samples: int | None = None,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    max_intervention_samples: int | None = None,
+    max_interventions: int = 8,
+    intervention_workers: int = DEFAULT_INTERVENTION_WORKERS,
+    intervention_names: Iterable[str] | None = None,
+    multiple_morphologies: bool = False,
+    morphology_id: str | None = None,
+    cache_shards: int = 1,
+    config: EvaluationConfig | None = None,
+    bootstrap_replicates: int = 250,
+    bootstrap_seed: int = 20260711,
+) -> dict[str, Any]:
+    """Evaluate one candidate while reusing a frozen baseline cache."""
+    started_at = time.perf_counter()
+    cache = (
+        load_model_evaluation_cache(baseline_cache)
+        if isinstance(baseline_cache, (str, Path))
+        else baseline_cache
+    )
+    cfg = config or EvaluationConfig()
+    max_samples, max_intervention_samples = _resolved_iteration_limits(
+        max_samples,
+        max_intervention_samples,
+        multiple_morphologies=multiple_morphologies,
+    )
+    names = tuple(intervention_names) if intervention_names is not None else None
+    protocol = _evaluation_cache_protocol(
+        max_samples=max_samples,
+        max_intervention_samples=max_intervention_samples,
+        max_interventions=max_interventions,
+        intervention_names=names,
+        multiple_morphologies=multiple_morphologies,
+        morphology_id=morphology_id,
+        config=cfg,
+    )
+    if protocol != cache.protocol:
+        raise ValueError("baseline cache protocol does not match candidate evaluation")
+    collected = _collect_model_outputs(
+        candidate_model_fn,
+        dataset_root=dataset_root,
+        max_samples=max_samples,
+        batch_size=batch_size,
+        max_intervention_samples=max_intervention_samples,
+        max_interventions=max_interventions,
+        intervention_workers=intervention_workers,
+        intervention_names=names,
+        multiple_morphologies=multiple_morphologies,
+        morphology_id=morphology_id,
+        cache_shards=cache_shards,
+    )
+    if tuple(collected["trace_ids"]) != cache.trace_ids:
+        raise ValueError("baseline cache trace selection does not match candidate evaluation")
+    if _array_sha256(collected["target"]) != cache.target_sha256:
+        raise ValueError("baseline cache targets do not match candidate evaluation")
+    comparison = compare_predictions(
+        collected["prediction"],
+        cache.prediction,
+        collected["target"],
+        inputs=collected["inputs"],
+        raw_soma_mv=collected["raw_soma_mv"],
+        trace_ids=collected["trace_ids"],
+        candidate_interventions=collected["interventions"],
+        baseline_interventions=cache.interventions,
+        config=cfg,
+        candidate_id=candidate_id,
+        baseline_id=cache.model_id,
+        baseline_report=cache.report,
+        bootstrap_replicates=bootstrap_replicates,
+        seed=bootstrap_seed,
+    )
+    elapsed = float(time.perf_counter() - started_at)
+    _annotate_iteration_report(
+        comparison["candidate"],
+        elapsed=elapsed,
+        selected_morphologies=collected["selected_morphologies"],
+        multiple_morphologies=multiple_morphologies,
+        max_samples=max_samples,
+        max_intervention_samples=max_intervention_samples,
+    )
+    comparison["evaluation_seconds"] = elapsed
+    comparison["baseline_cache"] = (
+        str(cache.source_path.resolve()) if cache.source_path is not None else None
+    )
+    return comparison
+
+
+def write_model_evaluation_cache(cache: ModelEvaluationCache, path: str | Path) -> Path:
+    """Write a compressed, pickle-free baseline cache."""
+    output = Path(path)
+    if output.suffix.lower() != ".npz":
+        raise ValueError("model evaluation cache path must end in .npz")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    metadata = {
+        "version": 1,
+        "model_id": cache.model_id,
+        "report": cache.report,
+        "trace_ids": list(cache.trace_ids),
+        "target_sha256": cache.target_sha256,
+        "protocol": cache.protocol,
+        "intervention_count": len(cache.interventions),
+    }
+    arrays: dict[str, np.ndarray] = {
+        "metadata_json": np.asarray(
+            json.dumps(_json_safe(metadata), sort_keys=True, allow_nan=False)
+        ),
+        "prediction": np.asarray(cache.prediction, dtype=np.float32),
+    }
+    for index, item in enumerate(cache.interventions):
+        prefix = f"intervention_{index}_"
+        arrays[prefix + "name"] = np.asarray(item.name)
+        arrays[prefix + "baseline_prediction"] = np.asarray(item.baseline_prediction, dtype=np.float32)
+        arrays[prefix + "intervention_prediction"] = np.asarray(item.intervention_prediction, dtype=np.float32)
+        arrays[prefix + "baseline_target"] = np.asarray(item.baseline_target, dtype=np.float32)
+        arrays[prefix + "intervention_target"] = np.asarray(item.intervention_target, dtype=np.float32)
+        if item.baseline_raw_soma_mv is not None:
+            arrays[prefix + "baseline_raw_soma_mv"] = np.asarray(item.baseline_raw_soma_mv, dtype=np.float32)
+        if item.intervention_raw_soma_mv is not None:
+            arrays[prefix + "intervention_raw_soma_mv"] = np.asarray(item.intervention_raw_soma_mv, dtype=np.float32)
+        if item.morphology_ids is not None:
+            arrays[prefix + "morphology_ids"] = np.asarray(item.morphology_ids, dtype=str)
+    np.savez_compressed(output, **arrays)
+    return output
+
+
+def load_model_evaluation_cache(path: str | Path) -> ModelEvaluationCache:
+    """Load and validate a baseline cache written by AxoBench."""
+    source = Path(path)
+    with np.load(source, allow_pickle=False) as payload:
+        metadata = json.loads(str(payload["metadata_json"].item()))
+        if metadata.get("version") != 1:
+            raise ValueError("unsupported model evaluation cache version")
+        interventions = []
+        for index in range(int(metadata["intervention_count"])):
+            prefix = f"intervention_{index}_"
+            interventions.append(
+                PairedInterventionPredictions(
+                    name=str(payload[prefix + "name"].item()),
+                    baseline_prediction=np.array(payload[prefix + "baseline_prediction"], copy=True),
+                    intervention_prediction=np.array(payload[prefix + "intervention_prediction"], copy=True),
+                    baseline_target=np.array(payload[prefix + "baseline_target"], copy=True),
+                    intervention_target=np.array(payload[prefix + "intervention_target"], copy=True),
+                    baseline_raw_soma_mv=(
+                        np.array(payload[prefix + "baseline_raw_soma_mv"], copy=True)
+                        if prefix + "baseline_raw_soma_mv" in payload.files
+                        else None
+                    ),
+                    intervention_raw_soma_mv=(
+                        np.array(payload[prefix + "intervention_raw_soma_mv"], copy=True)
+                        if prefix + "intervention_raw_soma_mv" in payload.files
+                        else None
+                    ),
+                    morphology_ids=(
+                        np.array(payload[prefix + "morphology_ids"], copy=True)
+                        if prefix + "morphology_ids" in payload.files
+                        else None
+                    ),
+                )
+            )
+        prediction = np.array(payload["prediction"], copy=True)
+    return ModelEvaluationCache(
+        model_id=str(metadata["model_id"]),
+        report=metadata["report"],
+        prediction=prediction,
+        trace_ids=tuple(str(value) for value in metadata["trace_ids"]),
+        target_sha256=str(metadata["target_sha256"]),
+        interventions=tuple(interventions),
+        protocol=metadata["protocol"],
+        source_path=source,
+    )
 
 
 def default_iteration_sample_limits(*, multiple_morphologies: bool = False) -> tuple[int, int]:
@@ -335,16 +610,42 @@ def evaluate_predictions(
     response_sera_value = _root_mean_square(
         [item["response_sera_mv"] for item in intervention_reports]
     )
+    response_sera_value2 = _finite_mean(
+        [item["response_sera_mv2"] for item in intervention_reports]
+    )
 
     metrics = [
+        _metric(
+            "voltage_sera_mv2",
+            voltage["voltage_sera_mv2"],
+            "mV^2",
+            "support-normalized squared teacher-relevance voltage error",
+        ),
         _metric("voltage_sera_mv", voltage["voltage_sera_mv"], "mV", "teacher-relevance voltage error"),
+        _metric(
+            "dynamics_sera_mv2_per_ms2",
+            dynamics["dynamics_sera_mv2_per_ms2"],
+            "mV^2/ms^2",
+            "support-normalized squared voltage-transition error",
+        ),
         _metric(
             "dynamics_sera_mv_per_ms",
             dynamics["dynamics_sera_mv_per_ms"],
             "mV/ms",
             "teacher-relevance voltage-transition error",
         ),
-        _metric("spike_f1_area_0_5ms", f1["f1_area"], "fraction", "mean F1 over timing tolerance"),
+        _metric(
+            "spike_mean_f1_0_5ms",
+            f1["mean_f1"],
+            "fraction",
+            "arithmetic mean of F1 at integer 0-5 ms tolerances",
+        ),
+        _metric(
+            "spike_f1_area_0_5ms",
+            f1["f1_area"],
+            "fraction",
+            "trapezoidal average of F1 over the 0-5 ms tolerance interval",
+        ),
         _metric(
             "spike_f1_exact",
             f1_by_step[exact_step]["f1"],
@@ -356,6 +657,12 @@ def evaluate_predictions(
             f1_by_step[tolerant_step]["f1"],
             "fraction",
             f"F1 at {tolerant_step * cfg.timestep_ms:g} ms",
+        ),
+        _metric(
+            "response_sera_mv2",
+            response_sera_value2,
+            "mV^2",
+            "support-normalized squared paired intervention-response error",
         ),
         _metric("response_sera_mv", response_sera_value, "mV", "paired intervention response error"),
     ]
@@ -380,10 +687,359 @@ def evaluate_predictions(
         "calibration_samples": int(n_calibration),
         "scored_samples": int(pred_score.shape[0]),
         "spike_threshold": float(threshold),
+        "spike_f1_curve": f1["rows"],
         "metrics": metrics,
         "diagnostics": diagnostics,
         "interventions": intervention_reports,
     }
+
+
+def compare_predictions(
+    candidate_prediction: np.ndarray,
+    baseline_prediction: np.ndarray,
+    target: np.ndarray,
+    *,
+    inputs: np.ndarray | None = None,
+    raw_soma_mv: np.ndarray | None = None,
+    trace_ids: list[str] | None = None,
+    candidate_interventions: Iterable[PairedInterventionPredictions] = (),
+    baseline_interventions: Iterable[PairedInterventionPredictions] = (),
+    config: EvaluationConfig | None = None,
+    candidate_id: str = "candidate",
+    baseline_id: str = "baseline",
+    baseline_report: dict[str, Any] | None = None,
+    bootstrap_replicates: int = 250,
+    seed: int = 20260711,
+) -> dict[str, Any]:
+    """Compare two models on paired traces with bootstrap delta intervals."""
+    if bootstrap_replicates <= 0:
+        raise ValueError("bootstrap_replicates must be positive")
+    cfg = config or EvaluationConfig()
+    candidate = _as_traces(candidate_prediction, "candidate_prediction")
+    baseline = _as_traces(baseline_prediction, "baseline_prediction")
+    tgt = _as_traces(target, "target")
+    if not (candidate.shape == baseline.shape == tgt.shape):
+        raise ValueError("candidate, baseline, and target arrays must have matching shapes")
+    ids = trace_ids or [str(index) for index in range(candidate.shape[0])]
+    candidate_interventions = list(candidate_interventions)
+    baseline_interventions = list(baseline_interventions)
+    candidate_report = evaluate_predictions(
+        candidate,
+        tgt,
+        inputs=inputs,
+        raw_soma_mv=raw_soma_mv,
+        trace_ids=ids,
+        interventions=candidate_interventions,
+        config=cfg,
+        model_id=candidate_id,
+    )
+    if baseline_report is None:
+        baseline_report = evaluate_predictions(
+            baseline,
+            tgt,
+            inputs=inputs,
+            raw_soma_mv=raw_soma_mv,
+            trace_ids=ids,
+            interventions=baseline_interventions,
+            config=cfg,
+            model_id=baseline_id,
+        )
+    elif baseline_report.get("model_id") != baseline_id:
+        raise ValueError("cached baseline report model_id does not match baseline_id")
+    bootstrap_values = _paired_metric_bootstrap(
+        candidate,
+        baseline,
+        tgt,
+        raw_soma_mv=raw_soma_mv,
+        trace_ids=ids,
+        candidate_threshold=float(candidate_report["spike_threshold"]),
+        baseline_threshold=(
+            float("nan")
+            if baseline_report["spike_threshold"] is None
+            else float(baseline_report["spike_threshold"])
+        ),
+        candidate_interventions=candidate_interventions,
+        baseline_interventions=baseline_interventions,
+        config=cfg,
+        replicates=bootstrap_replicates,
+        seed=seed,
+    )
+    candidate_metrics = {row["id"]: row for row in candidate_report["metrics"]}
+    baseline_metrics = {row["id"]: row for row in baseline_report["metrics"]}
+    rows = []
+    for identifier, candidate_metric in candidate_metrics.items():
+        baseline_metric = baseline_metrics[identifier]
+        higher_is_better = identifier.startswith(("spike_f1", "spike_mean_f1"))
+        candidate_value = candidate_metric["value"]
+        baseline_value = baseline_metric["value"]
+        delta = (
+            float(candidate_value - baseline_value)
+            if candidate_value is not None and baseline_value is not None
+            else None
+        )
+        samples = np.asarray(bootstrap_values.get(identifier, []), dtype=np.float64)
+        samples = samples[np.isfinite(samples)]
+        if samples.size:
+            low, high = np.quantile(samples, [0.025, 0.975])
+            ci_low, ci_high = float(low), float(high)
+        else:
+            ci_low = ci_high = None
+        assessment = _delta_assessment(ci_low, ci_high, higher_is_better=higher_is_better)
+        rows.append(
+            {
+                "id": identifier,
+                "candidate": candidate_value,
+                "baseline": baseline_value,
+                "delta": delta,
+                "ci95_low": ci_low,
+                "ci95_high": ci_high,
+                "unit": candidate_metric["unit"],
+                "preferred_direction": "higher" if higher_is_better else "lower",
+                "assessment": assessment,
+            }
+        )
+    return {
+        "candidate": candidate_report,
+        "baseline": baseline_report,
+        "comparison": rows,
+        "bootstrap_replicates": int(bootstrap_replicates),
+        "bootstrap_seed": int(seed),
+        "confidence_level": 0.95,
+    }
+
+
+def _resolved_iteration_limits(
+    max_samples: int | None,
+    max_intervention_samples: int | None,
+    *,
+    multiple_morphologies: bool,
+) -> tuple[int, int]:
+    default_standard, default_intervention = default_iteration_sample_limits(
+        multiple_morphologies=multiple_morphologies
+    )
+    resolved_samples = default_standard if max_samples is None else int(max_samples)
+    resolved_interventions = (
+        default_intervention
+        if max_intervention_samples is None
+        else int(max_intervention_samples)
+    )
+    if resolved_samples < 2:
+        raise ValueError("max_samples must be at least two")
+    if resolved_interventions <= 0:
+        raise ValueError("max_intervention_samples must be positive")
+    return resolved_samples, resolved_interventions
+
+
+def _evaluation_cache_protocol(
+    *,
+    max_samples: int,
+    max_intervention_samples: int,
+    max_interventions: int,
+    intervention_names: tuple[str, ...] | None,
+    multiple_morphologies: bool,
+    morphology_id: str | None,
+    config: EvaluationConfig,
+) -> dict[str, Any]:
+    return _json_safe(
+        {
+            "max_samples": int(max_samples),
+            "max_intervention_samples": int(max_intervention_samples),
+            "max_interventions": int(max_interventions),
+            "intervention_names": list(intervention_names) if intervention_names is not None else None,
+            "multiple_morphologies": bool(multiple_morphologies),
+            "morphology_id": morphology_id,
+            "config": asdict(config),
+        }
+    )
+
+
+def _collect_model_outputs(
+    model_fn: Callable[[np.ndarray], np.ndarray],
+    *,
+    dataset_root: str | Path,
+    max_samples: int,
+    batch_size: int,
+    max_intervention_samples: int,
+    max_interventions: int,
+    intervention_workers: int,
+    intervention_names: tuple[str, ...] | None,
+    multiple_morphologies: bool,
+    morphology_id: str | None,
+    cache_shards: int,
+) -> dict[str, Any]:
+    if batch_size <= 0 or max_interventions < 0:
+        raise ValueError("batch size must be positive and max_interventions non-negative")
+    if intervention_workers <= 0:
+        raise ValueError("intervention_workers must be positive")
+    if multiple_morphologies and morphology_id is not None:
+        raise ValueError("morphology_id cannot be combined with multiple_morphologies=True")
+    root = Path(dataset_root)
+    validation = ShardedNeuronIODataset(root / "val", cache_shards=cache_shards)
+    selected_indices, selected_morphologies = _validation_indices(
+        validation,
+        min(max_samples, len(validation)),
+        multiple_morphologies=multiple_morphologies,
+        morphology_id=morphology_id,
+    )
+    predictions: list[np.ndarray] = []
+    targets: list[np.ndarray] = []
+    event_indicators: list[np.ndarray] = []
+    raw_soma_chunks: list[np.ndarray] = []
+    raw_soma_available = True
+    trace_ids: list[str] = []
+    for start in range(0, len(selected_indices), batch_size):
+        indices = selected_indices[start : start + batch_size]
+        inputs, batch_targets = validation.get_batch(indices)
+        batch_trace_ids = validation.get_sample_ids(indices)
+        batch_morphologies = [_morphology_id(trace_id) for trace_id in batch_trace_ids]
+        prediction = _call_model(model_fn, inputs, batch_morphologies)
+        if prediction.shape != batch_targets.shape:
+            raise ValueError(
+                f"model prediction must match target shape, got {prediction.shape} and {batch_targets.shape}"
+            )
+        predictions.append(prediction.astype(np.float32, copy=False))
+        targets.append(np.asarray(batch_targets, dtype=np.float32))
+        event_indicators.append(
+            np.stack(
+                [np.count_nonzero(inputs > 0, axis=-1), np.count_nonzero(inputs < 0, axis=-1)],
+                axis=-1,
+            ).astype(np.int16, copy=False)
+        )
+        raw = validation.get_optional_array_batch("soma_mv", indices)
+        if raw is None:
+            raw_soma_available = False
+        elif raw_soma_available:
+            raw_soma_chunks.append(np.asarray(raw, dtype=np.float32))
+        trace_ids.extend(batch_trace_ids)
+    interventions = _run_dataset_interventions(
+        model_fn,
+        root=root,
+        batch_size=batch_size,
+        max_samples=max_intervention_samples,
+        max_interventions=max_interventions,
+        workers=intervention_workers,
+        intervention_names=intervention_names,
+        multiple_morphologies=multiple_morphologies,
+        morphology_id=None if multiple_morphologies else selected_morphologies[0],
+    )
+    prediction_array = np.concatenate(predictions, axis=0)
+    target_array = np.concatenate(targets, axis=0)
+    event_array = np.concatenate(event_indicators, axis=0)
+    raw_array = np.concatenate(raw_soma_chunks, axis=0) if raw_soma_available and raw_soma_chunks else None
+    report_order = _round_robin_group_order(trace_ids)
+    return {
+        "prediction": prediction_array[report_order],
+        "target": target_array[report_order],
+        "inputs": event_array[report_order],
+        "raw_soma_mv": raw_array[report_order] if raw_array is not None else None,
+        "trace_ids": [trace_ids[index] for index in report_order],
+        "interventions": interventions,
+        "selected_morphologies": selected_morphologies,
+    }
+
+
+def _annotate_iteration_report(
+    report: dict[str, Any],
+    *,
+    elapsed: float,
+    selected_morphologies: list[str],
+    multiple_morphologies: bool,
+    max_samples: int,
+    max_intervention_samples: int,
+) -> None:
+    report["evaluation_seconds"] = elapsed
+    report["morphology_mode"] = "multiple" if multiple_morphologies else "single"
+    report["morphology_ids"] = selected_morphologies
+    report["standard_sample_limit"] = max_samples
+    report["intervention_sample_limit_per_condition"] = max_intervention_samples
+    report["sample_profile"] = "iteration"
+
+
+def _array_sha256(array: np.ndarray) -> str:
+    contiguous = np.ascontiguousarray(array)
+    digest = hashlib.sha256()
+    digest.update(str(contiguous.dtype).encode("ascii"))
+    digest.update(np.asarray(contiguous.shape, dtype=np.int64).tobytes())
+    digest.update(contiguous.view(np.uint8))
+    return digest.hexdigest()
+
+
+def format_model_comparison(comparison: dict[str, Any]) -> str:
+    """Render the bounded paired metric comparison table."""
+    rows = []
+    for row in comparison["comparison"]:
+        unit = row["unit"]
+        interval = (
+            "NA"
+            if row["ci95_low"] is None or row["ci95_high"] is None
+            else f"[{_format_number(row['ci95_low'])}, {_format_number(row['ci95_high'])}]"
+        )
+        rows.append(
+            [
+                row["id"],
+                _format_value(row["candidate"], unit),
+                _format_value(row["baseline"], unit),
+                _format_value(row["delta"], unit),
+                interval,
+                row["assessment"],
+            ]
+        )
+    lines = [
+        "PAIRED COMPARISON",
+        f"candidate={comparison['candidate']['model_id']}  baseline={comparison['baseline']['model_id']}  "
+        f"bootstrap={comparison['bootstrap_replicates']}  95% CI",
+    ]
+    lines.extend(
+        _ascii_table(
+            ["metric", "candidate", "baseline", "delta", "95% CI", "evidence"],
+            rows,
+            widths=(27, 14, 14, 14, 23, 10),
+        )
+    )
+    return "\n".join(lines)
+
+
+def write_model_comparison(comparison: dict[str, Any], path: str | Path) -> Path:
+    """Write a complete JSON comparison or tidy paired-delta CSV."""
+    output = Path(path)
+    suffix = output.suffix.lower()
+    if suffix not in {".json", ".csv"}:
+        raise ValueError("model comparison path must end in .json or .csv")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    if suffix == ".json":
+        output.write_text(
+            json.dumps(_json_safe(comparison), indent=2, sort_keys=True, allow_nan=False) + "\n",
+            encoding="utf-8",
+        )
+        return output
+    fieldnames = (
+        "candidate_id",
+        "baseline_id",
+        "bootstrap_replicates",
+        "bootstrap_seed",
+        "confidence_level",
+        "id",
+        "candidate",
+        "baseline",
+        "delta",
+        "ci95_low",
+        "ci95_high",
+        "unit",
+        "preferred_direction",
+        "assessment",
+    )
+    common = {
+        "candidate_id": comparison["candidate"]["model_id"],
+        "baseline_id": comparison["baseline"]["model_id"],
+        "bootstrap_replicates": comparison["bootstrap_replicates"],
+        "bootstrap_seed": comparison["bootstrap_seed"],
+        "confidence_level": comparison["confidence_level"],
+    }
+    with output.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows({**common, **row} for row in comparison["comparison"])
+    return output
 
 
 def format_evaluation_report(report: dict[str, Any]) -> str:
@@ -564,6 +1220,366 @@ def _diagnostic_condition(primary: Any) -> str:
     return text.rsplit("[", 1)[1][:-1]
 
 
+_BOOTSTRAP_SERA_THRESHOLDS = np.linspace(0.0, 1.0, 101, dtype=np.float64)
+
+
+def _paired_metric_bootstrap(
+    candidate: np.ndarray,
+    baseline: np.ndarray,
+    target: np.ndarray,
+    *,
+    raw_soma_mv: np.ndarray | None,
+    trace_ids: list[str],
+    candidate_threshold: float,
+    baseline_threshold: float,
+    candidate_interventions: list[PairedInterventionPredictions],
+    baseline_interventions: list[PairedInterventionPredictions],
+    config: EvaluationConfig,
+    replicates: int,
+    seed: int,
+) -> dict[str, list[float]]:
+    calibration_count = max(
+        1,
+        min(candidate.shape[0] - 1, int(round(candidate.shape[0] * config.calibration_fraction))),
+    )
+    candidate_score = candidate[calibration_count:, config.ignore_start :, :]
+    baseline_score = baseline[calibration_count:, config.ignore_start :, :]
+    target_score = target[calibration_count:, config.ignore_start :, :]
+    raw_score = _slice_optional_2d(
+        raw_soma_mv,
+        slice(calibration_count, None),
+        config.ignore_start,
+        candidate.shape[:2],
+        "raw_soma_mv",
+    )
+    target_mv = (
+        raw_score
+        if raw_score is not None
+        else target_score[..., 1] / config.soma_scale + config.soma_bias_mv
+    )
+    candidate_mv = candidate_score[..., 1] / config.soma_scale + config.soma_bias_mv
+    baseline_mv = baseline_score[..., 1] / config.soma_scale + config.soma_bias_mv
+    relevance = voltage_relevance(target_mv, target_score[..., 0] > 0.5)
+    candidate_voltage = _sera_trace_statistics(candidate_mv - target_mv, relevance)
+    baseline_voltage = _sera_trace_statistics(baseline_mv - target_mv, relevance)
+    transition_relevance = np.maximum(relevance[:, :-1], relevance[:, 1:])
+    target_rate = np.diff(target_mv, axis=1) / config.timestep_ms
+    candidate_dynamics = _sera_trace_statistics(
+        np.diff(candidate_mv, axis=1) / config.timestep_ms - target_rate,
+        transition_relevance,
+    )
+    baseline_dynamics = _sera_trace_statistics(
+        np.diff(baseline_mv, axis=1) / config.timestep_ms - target_rate,
+        transition_relevance,
+    )
+    candidate_f1 = _f1_trace_statistics(
+        candidate_score[..., 0],
+        target_score[..., 0] > 0.5,
+        threshold=candidate_threshold,
+        tolerances=config.f1_tolerances_steps,
+    )
+    baseline_f1 = _f1_trace_statistics(
+        baseline_score[..., 0],
+        target_score[..., 0] > 0.5,
+        threshold=baseline_threshold,
+        tolerances=config.f1_tolerances_steps,
+    )
+    score_ids = trace_ids[calibration_count:]
+    ordinary_groups = _bootstrap_groups(score_ids)
+    response_stats = _paired_response_statistics(
+        candidate_interventions,
+        baseline_interventions,
+        config,
+    )
+    values = {
+        "voltage_sera_mv2": [],
+        "voltage_sera_mv": [],
+        "dynamics_sera_mv2_per_ms2": [],
+        "dynamics_sera_mv_per_ms": [],
+        "spike_mean_f1_0_5ms": [],
+        "spike_f1_area_0_5ms": [],
+        "spike_f1_exact": [],
+        "spike_f1_5ms": [],
+        "response_sera_mv2": [],
+        "response_sera_mv": [],
+    }
+    rng = np.random.default_rng(seed)
+    exact_step, tolerant_step = config.selected_f1_steps
+    for _ in range(replicates):
+        indices = _draw_stratified_bootstrap(ordinary_groups, rng)
+        values["voltage_sera_mv2"].append(
+            _sera_from_trace_statistics(*candidate_voltage, indices)
+            - _sera_from_trace_statistics(*baseline_voltage, indices)
+        )
+        values["voltage_sera_mv"].append(
+            _root_sera_from_trace_statistics(*candidate_voltage, indices)
+            - _root_sera_from_trace_statistics(*baseline_voltage, indices)
+        )
+        values["dynamics_sera_mv2_per_ms2"].append(
+            _sera_from_trace_statistics(*candidate_dynamics, indices)
+            - _sera_from_trace_statistics(*baseline_dynamics, indices)
+        )
+        values["dynamics_sera_mv_per_ms"].append(
+            _root_sera_from_trace_statistics(*candidate_dynamics, indices)
+            - _root_sera_from_trace_statistics(*baseline_dynamics, indices)
+        )
+        candidate_spike = _f1_metrics_from_trace_statistics(
+            candidate_f1,
+            indices,
+            config.f1_tolerances_steps,
+        )
+        baseline_spike = _f1_metrics_from_trace_statistics(
+            baseline_f1,
+            indices,
+            config.f1_tolerances_steps,
+        )
+        values["spike_mean_f1_0_5ms"].append(
+            candidate_spike["mean"] - baseline_spike["mean"]
+        )
+        values["spike_f1_area_0_5ms"].append(candidate_spike["area"] - baseline_spike["area"])
+        values["spike_f1_exact"].append(
+            candidate_spike[exact_step] - baseline_spike[exact_step]
+        )
+        values["spike_f1_5ms"].append(
+            candidate_spike[tolerant_step] - baseline_spike[tolerant_step]
+        )
+        response_deltas = _bootstrap_response_deltas(response_stats, rng)
+        values["response_sera_mv2"].append(response_deltas["sera"])
+        values["response_sera_mv"].append(response_deltas["root_sera"])
+    return values
+
+
+def _sera_trace_statistics(error: np.ndarray, relevance: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    squared_error = np.square(np.asarray(error, dtype=np.float64))
+    rel = np.asarray(relevance, dtype=np.float64)
+    if squared_error.shape != rel.shape:
+        raise ValueError("error and relevance arrays must have matching shapes")
+    bin_count = len(_BOOTSTRAP_SERA_THRESHOLDS)
+    bins = np.floor(np.clip(rel, 0.0, 1.0) * (bin_count - 1) + 1e-10).astype(np.int64)
+    sums = np.empty((squared_error.shape[0], bin_count), dtype=np.float64)
+    counts = np.empty((squared_error.shape[0], bin_count), dtype=np.int64)
+    for trace_index in range(squared_error.shape[0]):
+        count_histogram = np.bincount(bins[trace_index], minlength=bin_count)
+        error_histogram = np.bincount(
+            bins[trace_index],
+            weights=squared_error[trace_index],
+            minlength=bin_count,
+        )
+        counts[trace_index] = np.cumsum(count_histogram[::-1])[::-1]
+        sums[trace_index] = np.cumsum(error_histogram[::-1])[::-1]
+    return sums, counts
+
+
+def _root_sera_from_trace_statistics(
+    sums: np.ndarray,
+    counts: np.ndarray,
+    indices: np.ndarray,
+) -> float:
+    return float(
+        np.sqrt(
+            _sera_from_trace_statistics(
+                sums,
+                counts,
+                indices,
+            )
+        )
+    )
+
+
+def _sera_from_trace_statistics(
+    sums: np.ndarray,
+    counts: np.ndarray,
+    indices: np.ndarray,
+) -> float:
+    aggregate_counts = np.sum(counts[indices], axis=0)
+    aggregate_sums = np.sum(sums[indices], axis=0)
+    finite = aggregate_counts > 0
+    if not finite.any():
+        return float("nan")
+    mse = aggregate_sums[finite] / aggregate_counts[finite]
+    thresholds = _BOOTSTRAP_SERA_THRESHOLDS[finite]
+    if len(thresholds) == 1:
+        return float(mse[0])
+    integral = float(np.sum(0.5 * (mse[:-1] + mse[1:]) * np.diff(thresholds)))
+    span = float(thresholds[-1] - thresholds[0])
+    return float(max(0.0, integral / span if span > 0.0 else mse[0]))
+
+
+def _f1_trace_statistics(
+    scores: np.ndarray,
+    labels: np.ndarray,
+    *,
+    threshold: float,
+    tolerances: tuple[int, ...],
+) -> np.ndarray:
+    predicted = np.where(np.isfinite(scores), scores, -np.inf) >= threshold
+    stats = np.empty((scores.shape[0], len(tolerances), 3), dtype=np.int64)
+    for trace_index in range(scores.shape[0]):
+        for tolerance_index, tolerance in enumerate(tolerances):
+            confusion = spike_event_confusion(
+                predicted[trace_index : trace_index + 1],
+                labels[trace_index : trace_index + 1],
+                tolerance_steps=tolerance,
+            )
+            stats[trace_index, tolerance_index] = (
+                confusion["tp"],
+                confusion["fp"],
+                confusion["fn"],
+            )
+    return stats
+
+
+def _f1_metrics_from_trace_statistics(
+    statistics: np.ndarray,
+    indices: np.ndarray,
+    tolerances: tuple[int, ...],
+) -> dict[int | str, float]:
+    aggregate = np.sum(statistics[indices], axis=0)
+    f1_values = []
+    result: dict[int | str, float] = {}
+    for tolerance, (tp, fp, fn) in zip(tolerances, aggregate, strict=True):
+        denominator = 2 * tp + fp + fn
+        f1 = float(2 * tp / denominator) if denominator > 0 else 0.0
+        result[int(tolerance)] = f1
+        f1_values.append(f1)
+    mean_f1 = float(np.mean(f1_values))
+    if len(tolerances) == 1:
+        area = f1_values[0]
+    else:
+        widths = np.diff(np.asarray(tolerances, dtype=np.float64))
+        integral = float(np.sum(0.5 * (np.asarray(f1_values[:-1]) + np.asarray(f1_values[1:])) * widths))
+        span = float(tolerances[-1] - tolerances[0])
+        area = integral / span if span > 0.0 else float(np.mean(f1_values))
+    result["mean"] = mean_f1
+    result["area"] = float(area)
+    return result
+
+
+def _bootstrap_groups(trace_ids: Iterable[str]) -> list[np.ndarray]:
+    groups: dict[str, list[int]] = {}
+    for index, trace_id in enumerate(trace_ids):
+        groups.setdefault(_morphology_id(str(trace_id)), []).append(index)
+    return [np.asarray(groups[name], dtype=int) for name in sorted(groups)]
+
+
+def _draw_stratified_bootstrap(groups: list[np.ndarray], rng: np.random.Generator) -> np.ndarray:
+    return np.concatenate([rng.choice(group, size=len(group), replace=True) for group in groups])
+
+
+def _paired_response_statistics(
+    candidate_interventions: list[PairedInterventionPredictions],
+    baseline_interventions: list[PairedInterventionPredictions],
+    config: EvaluationConfig,
+) -> list[dict[str, Any]]:
+    if len(candidate_interventions) != len(baseline_interventions):
+        raise ValueError("candidate and baseline intervention lists must have matching lengths")
+    rows = []
+    for candidate, baseline in zip(candidate_interventions, baseline_interventions, strict=True):
+        if candidate.name != baseline.name:
+            raise ValueError("candidate and baseline interventions must have matching names and order")
+        if not (
+            np.array_equal(candidate.baseline_target, baseline.baseline_target)
+            and np.array_equal(candidate.intervention_target, baseline.intervention_target)
+        ):
+            raise ValueError(
+                f"intervention {candidate.name!r} candidate and baseline must share teacher targets"
+            )
+        candidate_stats, candidate_groups = _response_trace_statistics(candidate, config)
+        baseline_stats, baseline_groups = _response_trace_statistics(baseline, config)
+        if [len(group) for group in candidate_groups] != [len(group) for group in baseline_groups]:
+            raise ValueError(f"intervention {candidate.name!r} morphology groups do not match")
+        rows.append(
+            {
+                "candidate": candidate_stats,
+                "baseline": baseline_stats,
+                "groups": candidate_groups,
+            }
+        )
+    return rows
+
+
+def _response_trace_statistics(
+    item: PairedInterventionPredictions,
+    config: EvaluationConfig,
+) -> tuple[tuple[np.ndarray, np.ndarray], list[np.ndarray]]:
+    base_pred = _as_traces(item.baseline_prediction, "baseline_prediction")[:, config.ignore_start :, :]
+    int_pred = _as_traces(item.intervention_prediction, "intervention_prediction")[:, config.ignore_start :, :]
+    base_tgt = _as_traces(item.baseline_target, "baseline_target")[:, config.ignore_start :, :]
+    int_tgt = _as_traces(item.intervention_target, "intervention_target")[:, config.ignore_start :, :]
+    if not (base_pred.shape == int_pred.shape == base_tgt.shape == int_tgt.shape):
+        raise ValueError(f"intervention {item.name!r} arrays must have matching shapes")
+    base_raw = _crop_intervention_raw(item.baseline_raw_soma_mv, config.ignore_start, base_pred.shape[:2])
+    int_raw = _crop_intervention_raw(item.intervention_raw_soma_mv, config.ignore_start, base_pred.shape[:2])
+    teacher_base = base_raw if base_raw is not None else base_tgt[..., 1] / config.soma_scale + config.soma_bias_mv
+    teacher_int = int_raw if int_raw is not None else int_tgt[..., 1] / config.soma_scale + config.soma_bias_mv
+    model_base = base_pred[..., 1] / config.soma_scale + config.soma_bias_mv
+    model_int = int_pred[..., 1] / config.soma_scale + config.soma_bias_mv
+    teacher_delta = teacher_int - teacher_base
+    error = (model_int - model_base) - teacher_delta
+    relevance = np.maximum.reduce(
+        [
+            voltage_relevance(teacher_base, base_tgt[..., 0] > 0.5),
+            voltage_relevance(teacher_int, int_tgt[..., 0] > 0.5),
+            _tail_relevance(np.abs(teacher_delta), start_quantile=0.80, stop_quantile=0.995),
+        ]
+    )
+    labels = (
+        [str(value) for value in item.morphology_ids]
+        if item.morphology_ids is not None
+        else ["single"] * base_pred.shape[0]
+    )
+    if len(labels) != base_pred.shape[0]:
+        raise ValueError(f"intervention {item.name!r} morphology_ids length does not match traces")
+    return _sera_trace_statistics(error, relevance), _bootstrap_groups(labels)
+
+
+def _bootstrap_response_deltas(
+    rows: list[dict[str, Any]],
+    rng: np.random.Generator,
+) -> dict[str, float]:
+    if not rows:
+        return {"sera": float("nan"), "root_sera": float("nan")}
+    candidate_values = []
+    baseline_values = []
+    for row in rows:
+        indices = _draw_stratified_bootstrap(row["groups"], rng)
+        candidate_values.append(
+            _sera_from_trace_statistics(*row["candidate"], indices)
+        )
+        baseline_values.append(
+            _sera_from_trace_statistics(*row["baseline"], indices)
+        )
+    candidate_sera = float(np.mean(candidate_values))
+    baseline_sera = float(np.mean(baseline_values))
+    return {
+        "sera": candidate_sera - baseline_sera,
+        "root_sera": float(
+            np.sqrt(candidate_sera) - np.sqrt(baseline_sera)
+        ),
+    }
+
+
+def _delta_assessment(
+    low: float | None,
+    high: float | None,
+    *,
+    higher_is_better: bool,
+) -> str:
+    if low is None or high is None:
+        return "uncertain"
+    if higher_is_better:
+        if low > 0.0:
+            return "improved"
+        if high < 0.0:
+            return "regressed"
+    else:
+        if high < 0.0:
+            return "improved"
+        if low > 0.0:
+            return "regressed"
+    return "uncertain"
+
+
 def _run_dataset_interventions(
     model_fn: Callable[[np.ndarray], np.ndarray],
     *,
@@ -614,11 +1630,17 @@ def _run_dataset_interventions(
         )
     try:
         for directory, pair in zip(directories, loaded_pairs, strict=True):
-            base_prediction = _predict_in_batches(model_fn, pair["baseline_inputs"], batch_size=batch_size)
+            base_prediction = _predict_in_batches(
+                model_fn,
+                pair["baseline_inputs"],
+                batch_size=batch_size,
+                morphology_ids=pair.get("morphology_ids"),
+            )
             intervention_prediction = _predict_in_batches(
                 model_fn,
                 pair["intervention_inputs"],
                 batch_size=batch_size,
+                morphology_ids=pair.get("morphology_ids"),
             )
             results.append(
                 PairedInterventionPredictions(
@@ -629,6 +1651,7 @@ def _run_dataset_interventions(
                     intervention_target=pair["intervention_targets"],
                     baseline_raw_soma_mv=pair.get("baseline_soma_mv"),
                     intervention_raw_soma_mv=pair.get("intervention_soma_mv"),
+                    morphology_ids=pair.get("morphology_ids"),
                 )
             )
     finally:
@@ -786,11 +1809,15 @@ def _predict_in_batches(
     inputs: np.ndarray,
     *,
     batch_size: int,
+    morphology_ids: list[str] | np.ndarray | None = None,
 ) -> np.ndarray:
     predictions = []
     for start in range(0, inputs.shape[0], batch_size):
         batch = inputs[start : start + batch_size]
-        prediction = np.asarray(model_fn(batch))
+        batch_morphologies = (
+            morphology_ids[start : start + batch_size] if morphology_ids is not None else None
+        )
+        prediction = _call_model(model_fn, batch, batch_morphologies)
         if prediction.shape[:2] != batch.shape[:2] or prediction.shape[-1] != 2:
             raise ValueError(
                 "model prediction must have shape (batch, time, 2), "
@@ -798,6 +1825,18 @@ def _predict_in_batches(
             )
         predictions.append(prediction.astype(np.float32, copy=False))
     return np.concatenate(predictions, axis=0)
+
+
+def _call_model(
+    model_fn: Callable[[np.ndarray], np.ndarray],
+    inputs: np.ndarray,
+    morphology_ids: list[str] | np.ndarray | None,
+) -> np.ndarray:
+    if getattr(model_fn, "supports_morphology_ids", False):
+        if morphology_ids is None:
+            raise ValueError("context-aware model requires morphology IDs")
+        return np.asarray(model_fn(inputs, morphology_ids=morphology_ids))
+    return np.asarray(model_fn(inputs))
 
 
 def _ordinary_attention_rows(
@@ -966,15 +2005,23 @@ def _evaluate_intervention(item: PairedInterventionPredictions, config: Evaluati
     model_int_mv = int_pred[..., 1] / config.soma_scale + config.soma_bias_mv
     teacher_delta = teacher_int_mv - teacher_base_mv
     model_delta = model_int_mv - model_base_mv
-    null_sera = float(zero_response["response_sera_mv"])
-    skill = 1.0 - float(measured["response_sera_mv"]) / null_sera if null_sera > 0.0 else float("nan")
+    null_sera = float(zero_response["response_sera_mv2"])
+    skill = (
+        1.0 - float(measured["response_sera_mv2"]) / null_sera
+        if null_sera > 0.0
+        else float("nan")
+    )
     direction = _response_direction_agreement(teacher_delta, model_delta)
     gain = _least_squares_gain(teacher_delta.reshape(-1), model_delta.reshape(-1))
     return {
         "name": item.name,
         "samples": int(base_pred.shape[0]),
+        "response_sera_mv2": float(measured["response_sera_mv2"]),
         "response_sera_mv": float(measured["response_sera_mv"]),
-        "zero_response_sera_mv": null_sera,
+        "zero_response_sera_mv2": null_sera,
+        "zero_response_sera_mv": float(
+            zero_response["response_sera_mv"]
+        ),
         "response_skill": skill,
         "direction_agreement": direction,
         "response_gain": gain,
@@ -1294,6 +2341,14 @@ def _fraction(mask: np.ndarray, valid: np.ndarray) -> float:
 def _root_mean_square(values: list[float]) -> float | None:
     finite = np.asarray([value for value in values if np.isfinite(value)], dtype=float)
     return float(np.sqrt(np.mean(np.square(finite)))) if finite.size else None
+
+
+def _finite_mean(values: list[float]) -> float | None:
+    finite = np.asarray(
+        [value for value in values if np.isfinite(value)],
+        dtype=float,
+    )
+    return float(np.mean(finite)) if finite.size else None
 
 
 def _numeric(value: Any) -> float:

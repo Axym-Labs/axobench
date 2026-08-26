@@ -19,11 +19,26 @@ ARTIFACTS = Path(os.environ.get("AXOBENCH_GENERATION_ARTIFACTS", ROOT / "artifac
 CPU_MECH_ROOT = ARTIFACTS / "coreneuron_hay_port_probe_20260605"
 GPU_MECH_ROOT = ARTIFACTS / "coreneuron_hay_gpu_probe_9_durable_20260606"
 SOURCE_ROOT = ARTIFACTS / "source_models" / "neuron_as_deep_net" / "L5PC_NEURON_simulation"
-DEFAULT_PYTHON = Path(os.environ.get("AXOBENCH_PYTHON", "/home/davwis/miniconda3/envs/bnn_sim/bin/python"))
-GPU_RUNTIME = Path("/home/davwis/.local/neuron-9.0.1-gpu-runtime")
-NVHPC = Path("/home/davwis/.local/nvidia/Linux_x86_64/26.3")
-BUILD_TOOLS = Path("/home/davwis/.local/neuron-build-tools")
-AXOBENCH_ENV = Path(os.environ.get("AXOBENCH_ENV", "/home/davwis/miniconda3/envs/bnn_sim"))
+DEFAULT_PYTHON = Path(os.environ.get("AXOBENCH_PYTHON", sys.executable))
+GPU_RUNTIME = Path(
+    os.environ.get(
+        "AXOBENCH_GPU_RUNTIME",
+        ROOT / "vendor" / "neuron-gpu-runtime",
+    )
+)
+NVHPC = Path(
+    os.environ.get(
+        "AXOBENCH_NVHPC_ROOT",
+        ROOT / "vendor" / "nvhpc",
+    )
+)
+BUILD_TOOLS = Path(
+    os.environ.get(
+        "AXOBENCH_NEURON_BUILD_TOOLS",
+        ROOT / "vendor" / "neuron-build-tools",
+    )
+)
+AXOBENCH_ENV = Path(os.environ.get("AXOBENCH_ENV", sys.prefix))
 REPORT_PATH = ARTIFACTS / "generation_throughput_gate_20260606.md"
 JSON_PATH = ARTIFACTS / "generation_throughput_gate_20260606.json"
 

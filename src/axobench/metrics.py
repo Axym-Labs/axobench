@@ -97,19 +97,19 @@ def voltage_relevance(
     return np.clip(relevance / max_relevance, 0.0, 1.0)
 
 
-def root_sera(
+def sera(
     error: np.ndarray,
     relevance: np.ndarray,
     *,
     thresholds: np.ndarray | None = None,
     return_curve: bool = False,
 ) -> float | dict[str, Any]:
-    """Root squared-error relevance area.
+    """Support-normalized squared-error relevance area.
 
-    This is the square-root version of SERA-style imbalanced-regression error:
-    for each relevance threshold, compute MSE on timesteps at or above that
-    threshold, integrate those MSE values over the threshold interval, and take
-    the square root.  If relevance is constant one, the result equals RMSE.
+    For each relevance threshold, compute MSE on timesteps at or above that
+    threshold and integrate those values over the threshold interval. Support
+    normalization makes the value independent of dataset length. If relevance
+    is constant one, the result equals MSE.
     """
     err = np.asarray(error, dtype=np.float64)
     rel = np.asarray(relevance, dtype=np.float64)
@@ -138,13 +138,13 @@ def root_sera(
     if not finite.any():
         value = float("nan")
     elif finite.sum() == 1:
-        value = float(np.sqrt(mse[finite][0]))
+        value = float(mse[finite][0])
     else:
         integral = float(_trapezoid(mse[finite], thresholds[finite]))
         span = float(thresholds[finite][-1] - thresholds[finite][0])
         if span > 0.0:
             integral /= span
-        value = float(np.sqrt(max(0.0, integral)))
+        value = float(max(0.0, integral))
     if not return_curve:
         return value
     return {
@@ -153,6 +153,29 @@ def root_sera(
         "mse": [float(x) if np.isfinite(x) else None for x in mse],
         "support": support,
     }
+
+
+def root_sera(
+    error: np.ndarray,
+    relevance: np.ndarray,
+    *,
+    thresholds: np.ndarray | None = None,
+    return_curve: bool = False,
+) -> float | dict[str, Any]:
+    """Square root of support-normalized SERA for legacy mV reporting."""
+
+    result = sera(
+        error,
+        relevance,
+        thresholds=thresholds,
+        return_curve=return_curve,
+    )
+    if not return_curve:
+        return float(np.sqrt(result))
+    curve = dict(result)
+    curve["sera_value"] = float(curve["value"])
+    curve["value"] = float(np.sqrt(curve["value"]))
+    return curve
 
 
 def voltage_sera(
@@ -174,12 +197,15 @@ def voltage_sera(
         raise ValueError(f"prediction and target soma shapes must match, got {pred_soma_mv.shape} and {target_soma_mv.shape}")
     relevance = voltage_relevance(target_soma_mv, target_spikes, **(relevance_kwargs or {}))
     error = pred_soma_mv - target_soma_mv
-    sera_curve = root_sera(error, relevance, return_curve=True)
+    sera_curve = sera(error, relevance, return_curve=True)
+    root_sera_mv = float(np.sqrt(sera_curve["value"]))
     rmse = float(np.sqrt(np.mean(error ** 2)))
     return {
-        "voltage_sera_mv": float(sera_curve["value"]),
+        "voltage_sera_mv2": float(sera_curve["value"]),
+        "voltage_root_sera_mv": root_sera_mv,
+        "voltage_sera_mv": root_sera_mv,
         "voltage_rmse_mv": rmse,
-        "voltage_sera_over_rmse": float(sera_curve["value"] / rmse) if rmse > 0.0 else None,
+        "voltage_sera_over_rmse": float(root_sera_mv / rmse) if rmse > 0.0 else None,
         "relevance_mean": float(np.mean(relevance)),
         "relevance_support_ge_0_5": int((relevance >= 0.5).sum()),
         "relevance_support_ge_0_9": int((relevance >= 0.9).sum()),
@@ -217,9 +243,12 @@ def dynamics_sera(
     pred_rate = np.diff(pred_soma_mv, axis=1) / timestep_ms
     target_rate = np.diff(target_soma_mv, axis=1) / timestep_ms
     error = pred_rate - target_rate
-    sera_curve = root_sera(error, transition_relevance, return_curve=True)
+    sera_curve = sera(error, transition_relevance, return_curve=True)
+    root_sera_rate = float(np.sqrt(sera_curve["value"]))
     return {
-        "dynamics_sera_mv_per_ms": float(sera_curve["value"]),
+        "dynamics_sera_mv2_per_ms2": float(sera_curve["value"]),
+        "dynamics_root_sera_mv_per_ms": root_sera_rate,
+        "dynamics_sera_mv_per_ms": root_sera_rate,
         "relevance_mean": float(np.mean(transition_relevance)),
         "relevance_support_ge_0_5": int((transition_relevance >= 0.5).sum()),
         "relevance_support_ge_0_9": int((transition_relevance >= 0.9).sum()),
@@ -273,6 +302,11 @@ def spike_f1_curve(
     tolerances = tuple(int(tolerance) for tolerance in tolerances_steps)
     if any(tolerance < 0 for tolerance in tolerances):
         raise ValueError("tolerances_steps must be non-negative")
+    if any(
+        right <= left
+        for left, right in zip(tolerances, tolerances[1:])
+    ):
+        raise ValueError("tolerances_steps must be strictly increasing")
     scores = _as_2d(spike_scores)
     target = _as_2d(target_spikes) > 0.5
     if scores.shape != target.shape:
@@ -300,6 +334,7 @@ def spike_f1_curve(
             }
         )
     f1_values = np.asarray([0.0 if row["f1"] is None else float(row["f1"]) for row in rows], dtype=np.float64)
+    mean_f1 = float(np.mean(f1_values))
     if len(tolerances) == 1:
         area = float(f1_values[0])
     else:
@@ -309,6 +344,7 @@ def spike_f1_curve(
         "threshold": float(threshold),
         "t_min_steps": int(tolerances[0]),
         "t_max_steps": int(tolerances[-1]),
+        "mean_f1": mean_f1,
         "f1_area": area,
         "rows": rows,
     }
@@ -355,12 +391,15 @@ def response_sera(
     relevance = np.maximum.reduce([base_rel, int_rel, delta_rel])
     if float(np.max(relevance)) <= 0.0:
         relevance = np.ones_like(relevance, dtype=np.float64)
-    sera_curve = root_sera(error, relevance, return_curve=True)
+    sera_curve = sera(error, relevance, return_curve=True)
+    root_sera_mv = float(np.sqrt(sera_curve["value"]))
     rmse = float(np.sqrt(np.mean(error ** 2)))
     return {
-        "response_sera_mv": float(sera_curve["value"]),
+        "response_sera_mv2": float(sera_curve["value"]),
+        "response_root_sera_mv": root_sera_mv,
+        "response_sera_mv": root_sera_mv,
         "response_rmse_mv": rmse,
-        "response_sera_over_rmse": float(sera_curve["value"] / rmse) if rmse > 0.0 else None,
+        "response_sera_over_rmse": float(root_sera_mv / rmse) if rmse > 0.0 else None,
         "teacher_response_abs_mean_mv": float(np.mean(np.abs(teacher_delta))),
         "relevance_mean": float(np.mean(relevance)),
         "relevance_support_ge_0_5": int((relevance >= 0.5).sum()),
@@ -428,8 +467,11 @@ def compute_core_metric_set(
         "voltage": voltage,
         "dynamics": dynamics,
         "spike": spike,
+        "voltage_sera_mv2": voltage["voltage_sera_mv2"],
         "voltage_sera_mv": voltage["voltage_sera_mv"],
+        "dynamics_sera_mv2_per_ms2": dynamics["dynamics_sera_mv2_per_ms2"],
         "dynamics_sera_mv_per_ms": dynamics["dynamics_sera_mv_per_ms"],
+        "spike_mean_f1": spike["mean_f1"],
         "spike_f1_area": spike["f1_area"],
         "spike_threshold": float(spike_threshold),
         "spike_threshold_kind": threshold_kind,
@@ -450,6 +492,7 @@ def compute_core_metric_set(
             relevance_kwargs=relevance_kwargs,
         )
         result["response"] = response
+        result["response_sera_mv2"] = response["response_sera_mv2"]
         result["response_sera_mv"] = response["response_sera_mv"]
     return result
 

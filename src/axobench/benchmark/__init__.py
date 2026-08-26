@@ -11,6 +11,22 @@ from typing import Any
 
 
 _EXPORTS: dict[str, tuple[str, str]] = {
+    "PopulationDynamicsConfig": (
+        "axobench.benchmark.population_dynamics",
+        "PopulationDynamicsConfig",
+    ),
+    "analyze_population_perturbation": (
+        "axobench.benchmark.population_dynamics",
+        "analyze_population_perturbation",
+    ),
+    "analyze_population_spikes": (
+        "axobench.benchmark.population_dynamics",
+        "analyze_population_spikes",
+    ),
+    "multistep_branching_ratio": (
+        "axobench.benchmark.population_dynamics",
+        "multistep_branching_ratio",
+    ),
     "compute_regime_stratified_metrics": ("axobench.benchmark.regime_stratified", "compute_regime_stratified_metrics"),
     "compute_state_conditioned_metrics": ("axobench.benchmark.state_metrics", "compute_state_conditioned_metrics"),
     "build_neuron_state_masks": ("axobench.benchmark.state_metrics", "build_neuron_state_masks"),
@@ -93,6 +109,35 @@ _EXPORTS: dict[str, tuple[str, str]] = {
         "PairedInterventionPredictions",
     ),
     "evaluate_model": ("axobench.benchmark.iteration_evaluator", "evaluate_model"),
+    "ModelEvaluationCache": (
+        "axobench.benchmark.iteration_evaluator",
+        "ModelEvaluationCache",
+    ),
+    "create_model_evaluation_cache": (
+        "axobench.benchmark.iteration_evaluator",
+        "create_model_evaluation_cache",
+    ),
+    "evaluate_model_against_cache": (
+        "axobench.benchmark.iteration_evaluator",
+        "evaluate_model_against_cache",
+    ),
+    "load_model_evaluation_cache": (
+        "axobench.benchmark.iteration_evaluator",
+        "load_model_evaluation_cache",
+    ),
+    "write_model_evaluation_cache": (
+        "axobench.benchmark.iteration_evaluator",
+        "write_model_evaluation_cache",
+    ),
+    "compare_predictions": ("axobench.benchmark.iteration_evaluator", "compare_predictions"),
+    "format_model_comparison": (
+        "axobench.benchmark.iteration_evaluator",
+        "format_model_comparison",
+    ),
+    "write_model_comparison": (
+        "axobench.benchmark.iteration_evaluator",
+        "write_model_comparison",
+    ),
     "default_iteration_sample_limits": (
         "axobench.benchmark.iteration_evaluator",
         "default_iteration_sample_limits",

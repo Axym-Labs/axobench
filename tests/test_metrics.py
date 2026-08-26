@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from axobench.metrics import (
     binary_auc,
@@ -6,6 +7,7 @@ from axobench.metrics import (
     dynamics_sera,
     response_sera,
     root_sera,
+    sera,
     soma_rmse,
     spike_auc,
     spike_event_confusion,
@@ -47,6 +49,16 @@ def test_root_sera_matches_rmse_when_relevance_is_constant():
     relevance = np.ones_like(error)
 
     assert np.isclose(root_sera(error, relevance), np.sqrt(np.mean(error ** 2)))
+
+
+def test_sera_matches_mse_and_root_sera_relation():
+    error = np.array([1.0, -2.0, 2.0])
+    relevance = np.ones_like(error)
+
+    sera_value = sera(error, relevance)
+
+    assert np.isclose(sera_value, np.mean(error**2))
+    assert np.isclose(sera_value, root_sera(error, relevance) ** 2)
 
 
 def test_voltage_sera_emphasizes_relevant_teacher_regions():
@@ -94,7 +106,36 @@ def test_spike_f1_curve_uses_one_to_one_event_matching():
 
     assert exact["rows"][0]["f1"] == 0.5
     assert loose["rows"][1]["f1"] == 1.0
+    assert loose["mean_f1"] == 0.75
+    assert loose["f1_area"] == 0.75
     assert confusion == {"tp": 2, "fp": 0, "fn": 0}
+
+
+def test_spike_mean_f1_is_the_arithmetic_mean_over_declared_tolerances():
+    predicted = np.array([[0.0, 0.0, 0.0, 2.0]])
+    target = np.array([[0.0, 1.0, 0.0, 0.0]])
+
+    result = spike_f1_curve(
+        predicted,
+        target,
+        threshold=1.0,
+        tolerances_steps=(0, 1, 2),
+    )
+
+    assert result["mean_f1"] == pytest.approx(1.0 / 3.0)
+    assert result["f1_area"] == 0.25
+
+
+def test_spike_f1_curve_requires_strictly_increasing_tolerances():
+    scores = np.zeros((1, 4))
+    target = np.zeros((1, 4))
+
+    with pytest.raises(ValueError, match="strictly increasing"):
+        spike_f1_curve(
+            scores,
+            target,
+            tolerances_steps=(0, 2, 1),
+        )
 
 
 def test_compute_core_metric_set_returns_promoted_metrics():
@@ -106,8 +147,13 @@ def test_compute_core_metric_set_returns_promoted_metrics():
     result = compute_core_metric_set(prediction, target, ignore_start=0, spike_tolerances_steps=(0, 1, 2))
 
     assert result["voltage_sera_mv"] == 0.0
+    assert result["voltage_sera_mv2"] == 0.0
     assert result["dynamics_sera_mv_per_ms"] == 0.0
+    assert result["dynamics_sera_mv2_per_ms2"] == 0.0
+    assert result["spike_mean_f1"] == 1.0
     assert result["spike_f1_area"] == 1.0
+    assert "spike_squared_f1_deficit_area" not in result
+    assert "spike_squared_deficit_f1_score" not in result
     assert result["spike_threshold_kind"] == "prevalence_matched"
     assert "voltage_rmse_mv" not in result
 
@@ -126,6 +172,7 @@ def test_compute_core_metric_set_includes_response_sera_when_pair_is_given():
     )
 
     assert result["response_sera_mv"] == 0.0
+    assert result["response_sera_mv2"] == 0.0
     assert result["response"]["response_sera_mv"] == 0.0
 
 

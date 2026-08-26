@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-import numpy as np
+import argparse
 from pathlib import Path
 from typing import Any
+
+import numpy as np
 
 
 def load_swc(swc_path: str | Path) -> np.ndarray:
@@ -235,16 +237,21 @@ def create_routing_from_branches(
 
 
 if __name__ == "__main__":
-    # Test with downloaded L2/3 morphology
-    swc_path = "/home/davwis/main/workspace/axobench/data/morphologies/specimen_327962063.swc"
-    swc_data = load_swc(swc_path)
+    parser = argparse.ArgumentParser(
+        description="Inspect an SWC morphology and its selected branches."
+    )
+    parser.add_argument("swc_path", type=Path)
+    parser.add_argument("--branches", type=int, default=45)
+    args = parser.parse_args()
+
+    swc_data = load_swc(args.swc_path)
     print(f"Loaded {len(swc_data)} nodes")
-    
-    branches = select_branches(swc_data, n_branches=45)
+
+    branches = select_branches(swc_data, n_branches=args.branches)
     print(f"Selected {len(branches)} branches")
-    
+
     lengths = [len(b) for b in branches]
     print(f"Branch lengths: min={min(lengths)}, max={max(lengths)}, mean={sum(lengths)/len(lengths):.1f}")
-    
+
     routing = create_routing_from_branches(swc_data, branches)
     print(f"Routing matrix shape: {routing.shape}")

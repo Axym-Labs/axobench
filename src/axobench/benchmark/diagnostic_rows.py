@@ -223,6 +223,7 @@ def paired_intervention_diagnostic_rows(
         for metric in (
             "soma_delta_rmse_mv",
             "soma_delta_mae_mv",
+            "response_sera_mv2",
             "response_sera_mv",
             "response_rmse_mv",
             "response_sera_over_rmse",
@@ -394,12 +395,14 @@ def _trace_core_rows(report: dict[str, Any], context: DiagnosticContext) -> list
         "lag_tolerant_voltage_rmse_mv",
         "state_trace_shape_distance",
         "spike_train_distance",
+        "voltage_sera_mv2",
         "voltage_sera_mv",
         "voltage_sera_over_rmse",
         "voltage_relevance_mean",
         "voltage_relevance_support_ge_0_5",
         "voltage_relevance_support_ge_0_9",
         "spike_auc",
+        "spike_mean_f1",
         "spike_f1_area",
         "spike_f1_t_min_steps",
         "spike_f1_t_max_steps",
@@ -492,7 +495,13 @@ def _spike_behavior_rows(
                 )
                 row["tolerance_steps"] = tolerance
                 rows.append(row)
-    for metric in ("spike_f1_area", "spike_f1_threshold", "spike_f1_t_min_steps", "spike_f1_t_max_steps"):
+    for metric in (
+        "spike_mean_f1",
+        "spike_f1_area",
+        "spike_f1_threshold",
+        "spike_f1_t_min_steps",
+        "spike_f1_t_max_steps",
+    ):
         rows.append(_row("spike_behavior", context, metric, report.get(metric), unit=_unit_for_metric(metric)))
     rows.append(_row("spike_behavior", context, "spike_f1_threshold_kind", report.get("spike_f1_threshold_kind"), unit="label"))
     return rows
@@ -723,6 +732,8 @@ def _unit_for_metric(metric: str) -> str:
         return "bits"
     if "dvdt" in metric:
         return "mV_per_step"
+    if "_mv2" in metric:
+        return "mV^2"
     if metric.endswith("_mv") or "_mv_" in metric or metric in {"soma_mean_mv", "soma_std_mv"}:
         return "mV"
     if "rate_per_1000" in metric:
@@ -731,6 +742,7 @@ def _unit_for_metric(metric: str) -> str:
         "fraction" in metric
         or metric in {"spike_auc", "spike_brier"}
         or metric.startswith(("precision_", "recall_", "f1_"))
+        or metric.endswith("_mean_f1")
         or metric.endswith("_f1_area")
         or "relevance_mean" in metric
     ):
