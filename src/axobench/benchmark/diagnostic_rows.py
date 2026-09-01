@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
 import csv
-from dataclasses import dataclass, replace
 import json
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -14,13 +14,14 @@ import numpy as np
 from axobench.benchmark.dataset_schema import (
     DIAGNOSTIC_ROW_COLUMNS,
     default_diagnostic_specs,
-    provisional_v1_morphologies,
+    v1_morphologies,
 )
 from axobench.benchmark.mechanistic_response import compute_mechanistic_response_metrics
-from axobench.benchmark.structured_intervention import compute_paired_event_intervention_metrics
+from axobench.benchmark.structured_intervention import (
+    compute_paired_event_intervention_metrics,
+)
 from axobench.benchmark.suite import BenchmarkSuite
 from axobench.neuronio_raw import DEFAULT_Y_TRAIN_SOMA_BIAS
-
 
 DEFAULT_MODEL_ID = "model"
 DEFAULT_TEACHER_ID = "teacher"
@@ -87,7 +88,9 @@ def evaluate_model_diagnostic_rows(
     rows: list[dict[str, Any]] = []
     rows.extend(_trace_core_rows(report["m1_trace_fidelity"], context))
     rows.extend(_state_dynamics_rows(report["state_conditioned_fidelity"], context))
-    rows.extend(_spike_behavior_rows(report["m1_trace_fidelity"], report["m2_regimes"], context))
+    rows.extend(
+        _spike_behavior_rows(report["m1_trace_fidelity"], report["m2_regimes"], context)
+    )
     rows.extend(_feature_fidelity_rows(report["m1b_feature_fidelity"], context))
     rows.extend(
         mechanistic_response_diagnostic_rows(
@@ -125,7 +128,16 @@ def mechanistic_response_diagnostic_rows(
             unit = "count"
         else:
             unit = _unit_for_metric(metric)
-        rows.append(_row("mechanistic_response", context, metric, value, state="phase_plane", unit=unit))
+        rows.append(
+            _row(
+                "mechanistic_response",
+                context,
+                metric,
+                value,
+                state="phase_plane",
+                unit=unit,
+            )
+        )
     for event_kind, event_report in report["event_triggered_response"].items():
         for metric, value in event_report.items():
             rows.append(
@@ -184,7 +196,9 @@ def paired_intervention_diagnostic_rows(
     trace_ids: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Return tidy rows for a paired intervention teacher/model comparison."""
-    context = context or DiagnosticContext(condition="interventions/event_dropout", intervention="event_dropout")
+    context = context or DiagnosticContext(
+        condition="interventions/event_dropout", intervention="event_dropout"
+    )
     intervention_name = context.intervention or context.condition.rsplit("/", 1)[-1]
     report = compute_paired_event_intervention_metrics(
         model_fn,
@@ -198,7 +212,9 @@ def paired_intervention_diagnostic_rows(
         ignore_start=context.ignore_start,
         trace_ids=trace_ids,
         model_spike_threshold=(
-            0.0 if context.calibrated_spike_threshold is None else context.calibrated_spike_threshold
+            0.0
+            if context.calibrated_spike_threshold is None
+            else context.calibrated_spike_threshold
         ),
     )
     rows: list[dict[str, Any]] = []
@@ -214,9 +230,33 @@ def paired_intervention_diagnostic_rows(
         "delta_spike_rate_per_1000_steps",
         "delta_spike_count_trace_mean",
     ):
-        rows.append(_row("intervention_response", context, metric, teacher.get(metric), unit=_unit_for_metric(metric)))
-    rows.append(_row("intervention_response", context, "response_detected", float(bool(teacher["response_detected"])), unit="bool"))
-    rows.append(_row("intervention_response", context, "teacher_direction", teacher["teacher_direction"], unit="label"))
+        rows.append(
+            _row(
+                "intervention_response",
+                context,
+                metric,
+                teacher.get(metric),
+                unit=_unit_for_metric(metric),
+            )
+        )
+    rows.append(
+        _row(
+            "intervention_response",
+            context,
+            "response_detected",
+            float(bool(teacher["response_detected"])),
+            unit="bool",
+        )
+    )
+    rows.append(
+        _row(
+            "intervention_response",
+            context,
+            "teacher_direction",
+            teacher["teacher_direction"],
+            unit="label",
+        )
+    )
 
     model = report.get("model_response")
     if model is not None:
@@ -224,7 +264,7 @@ def paired_intervention_diagnostic_rows(
             "soma_delta_rmse_mv",
             "soma_delta_mae_mv",
             "response_sera_mv2",
-            "response_sera_mv",
+            "response_root_sera_mv",
             "response_rmse_mv",
             "response_sera_over_rmse",
             "response_relevance_mean",
@@ -244,7 +284,15 @@ def paired_intervention_diagnostic_rows(
             "model_spike_threshold",
             "direction_agreement",
         ):
-            rows.append(_row("intervention_response", context, metric, model.get(metric), unit=_unit_for_metric(metric)))
+            rows.append(
+                _row(
+                    "intervention_response",
+                    context,
+                    metric,
+                    model.get(metric),
+                    unit=_unit_for_metric(metric),
+                )
+            )
     return _filter_rows_for_suites(rows, context.suites)
 
 
@@ -259,8 +307,12 @@ def morphology_contrast_diagnostic_rows(
     validate_diagnostic_rows(source_rows)
     if min_morphologies < 2:
         raise ValueError("min_morphologies must be at least 2")
-    context = context or DiagnosticContext(suites=("morphology-contrast", "paper-summary"), morphology_id="all")
-    grouped: dict[tuple[str, str, str, str | None, str, str, str | None], dict[str, list[float]]] = {}
+    context = context or DiagnosticContext(
+        suites=("morphology-contrast", "paper-summary"), morphology_id="all"
+    )
+    grouped: dict[
+        tuple[str, str, str, str | None, str, str, str | None], dict[str, list[float]]
+    ] = {}
     for row in source_rows:
         value = row["value"]
         morphology_id = row["morphology_id"]
@@ -282,10 +334,20 @@ def morphology_contrast_diagnostic_rows(
             str(row["condition"]),
             row["intervention"],
         )
-        grouped.setdefault(key, {}).setdefault(str(morphology_id), []).append(float(value))
+        grouped.setdefault(key, {}).setdefault(str(morphology_id), []).append(
+            float(value)
+        )
 
     rows: list[dict[str, Any]] = []
-    for (diagnostic, metric, unit, state, model_id, condition, intervention), by_morphology in sorted(grouped.items()):
+    for (
+        diagnostic,
+        metric,
+        unit,
+        state,
+        model_id,
+        condition,
+        intervention,
+    ), by_morphology in sorted(grouped.items()):
         morphology_values = {
             morphology: float(np.mean(values))
             for morphology, values in by_morphology.items()
@@ -329,21 +391,43 @@ def morphology_routing_qc_rows(
     *,
     context: DiagnosticContext | None = None,
 ) -> list[dict[str, Any]]:
-    """Return teacher-QC rows for provisional v1 morphology/routing sanity."""
-    context = context or DiagnosticContext(suites=("teacher-qc", "paper-summary"), model_id="teacher")
+    """Return teacher-QC rows for the frozen v1 morphology/routing registry."""
+    context = context or DiagnosticContext(
+        suites=("teacher-qc", "paper-summary"), model_id="teacher"
+    )
     rows: list[dict[str, Any]] = []
-    for morphology in provisional_v1_morphologies():
-        row_context = _replace_context(context, morphology_id=f"specimen_{morphology.specimen_id}")
+    for morphology in v1_morphologies():
+        row_context = _replace_context(
+            context, morphology_id=f"specimen_{morphology.specimen_id}"
+        )
         for metric, value, unit in (
             ("extracted_branches", morphology.extracted_branches, "count"),
             ("routed_branches", morphology.routed_branches, "count"),
-            ("total_length_ratio_vs_reference", morphology.total_length_ratio_vs_reference, "ratio"),
-            ("routed_length_ratio_vs_reference", morphology.routed_length_ratio_vs_reference, "ratio"),
-            ("apical_fraction_delta_vs_reference", morphology.apical_fraction_delta_vs_reference, "fraction"),
-            ("radial_extent_ratio_vs_reference", morphology.radial_extent_ratio_vs_reference, "ratio"),
+            (
+                "total_length_ratio_vs_reference",
+                morphology.total_length_ratio_vs_reference,
+                "ratio",
+            ),
+            (
+                "routed_length_ratio_vs_reference",
+                morphology.routed_length_ratio_vs_reference,
+                "ratio",
+            ),
+            (
+                "apical_fraction_delta_vs_reference",
+                morphology.apical_fraction_delta_vs_reference,
+                "fraction",
+            ),
+            (
+                "radial_extent_ratio_vs_reference",
+                morphology.radial_extent_ratio_vs_reference,
+                "ratio",
+            ),
             ("routing_shape_match", float(morphology.routing_shape_match), "bool"),
         ):
-            row = _row("morphology_routing_qc", row_context, metric, value, unit=unit, n=1)
+            row = _row(
+                "morphology_routing_qc", row_context, metric, value, unit=unit, n=1
+            )
             row["role"] = morphology.role
             row["line_name"] = morphology.line_name
             row["reconstruction_type"] = morphology.reconstruction_type
@@ -359,7 +443,9 @@ def validate_diagnostic_rows(rows: Iterable[dict[str, Any]]) -> None:
     for index, row in enumerate(rows):
         missing = required - set(row)
         if missing:
-            raise ValueError(f"diagnostic row {index} missing required columns: {sorted(missing)}")
+            raise ValueError(
+                f"diagnostic row {index} missing required columns: {sorted(missing)}"
+            )
 
 
 def write_diagnostic_rows(rows: Iterable[dict[str, Any]], path: str | Path) -> None:
@@ -369,10 +455,15 @@ def write_diagnostic_rows(rows: Iterable[dict[str, Any]], path: str | Path) -> N
     output = Path(path)
     output.parent.mkdir(parents=True, exist_ok=True)
     if output.suffix == ".json":
-        output.write_text(json.dumps(rows, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        output.write_text(
+            json.dumps(rows, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
         return
     if output.suffix == ".jsonl":
-        output.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows), encoding="utf-8")
+        output.write_text(
+            "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
+            encoding="utf-8",
+        )
         return
     if output.suffix == ".csv":
         fieldnames = list(DIAGNOSTIC_ROW_COLUMNS)
@@ -385,7 +476,9 @@ def write_diagnostic_rows(rows: Iterable[dict[str, Any]], path: str | Path) -> N
     raise ValueError("diagnostic row output path must end in .json, .jsonl, or .csv")
 
 
-def _trace_core_rows(report: dict[str, Any], context: DiagnosticContext) -> list[dict[str, Any]]:
+def _trace_core_rows(
+    report: dict[str, Any], context: DiagnosticContext
+) -> list[dict[str, Any]]:
     metrics = (
         "soma_rmse_mv",
         "soma_mae_mv",
@@ -396,7 +489,7 @@ def _trace_core_rows(report: dict[str, Any], context: DiagnosticContext) -> list
         "state_trace_shape_distance",
         "spike_train_distance",
         "voltage_sera_mv2",
-        "voltage_sera_mv",
+        "voltage_root_sera_mv",
         "voltage_sera_over_rmse",
         "voltage_relevance_mean",
         "voltage_relevance_support_ge_0_5",
@@ -410,15 +503,40 @@ def _trace_core_rows(report: dict[str, Any], context: DiagnosticContext) -> list
         "spike_log_loss",
         "spike_count_mae_per_trace",
     )
-    rows = [_row("trace_core", context, metric, report.get(metric), unit=_unit_for_metric(metric)) for metric in metrics]
+    rows = [
+        _row(
+            "trace_core",
+            context,
+            metric,
+            report.get(metric),
+            unit=_unit_for_metric(metric),
+        )
+        for metric in metrics
+    ]
     for item in report.get("per_trace_summary", {}).get("rows", []):
         trace_context = _replace_context_trace(context, item["trace_id"])
-        for metric in ("soma_rmse_mv", "soma_mae_mv", "soma_max_abs_error_mv", "target_spike_count"):
-            rows.append(_row("trace_core", trace_context, metric, item.get(metric), unit=_unit_for_metric(metric), n=1))
+        for metric in (
+            "soma_rmse_mv",
+            "soma_mae_mv",
+            "soma_max_abs_error_mv",
+            "target_spike_count",
+        ):
+            rows.append(
+                _row(
+                    "trace_core",
+                    trace_context,
+                    metric,
+                    item.get(metric),
+                    unit=_unit_for_metric(metric),
+                    n=1,
+                )
+            )
     return rows
 
 
-def _state_dynamics_rows(report: dict[str, Any], context: DiagnosticContext) -> list[dict[str, Any]]:
+def _state_dynamics_rows(
+    report: dict[str, Any], context: DiagnosticContext
+) -> list[dict[str, Any]]:
     rows = []
     for state_row in report.get("states", []):
         state = state_row["state"]
@@ -451,13 +569,27 @@ def _spike_behavior_rows(
     context: DiagnosticContext,
 ) -> list[dict[str, Any]]:
     rows = []
-    for block_name in ("spike_threshold_zero", "spike_prevalence_matched", "spike_calibrated_threshold"):
+    for block_name in (
+        "spike_threshold_zero",
+        "spike_prevalence_matched",
+        "spike_calibrated_threshold",
+    ):
         block = report.get(block_name)
         if not isinstance(block, dict):
             continue
-        block_context = _replace_context_condition(context, f"{context.condition}:{block_name}")
+        block_context = _replace_context_condition(
+            context, f"{context.condition}:{block_name}"
+        )
         for metric in ("threshold", "predicted_count", "count_mae_per_trace"):
-            rows.append(_row("spike_behavior", block_context, metric, block.get(metric), unit=_unit_for_metric(metric)))
+            rows.append(
+                _row(
+                    "spike_behavior",
+                    block_context,
+                    metric,
+                    block.get(metric),
+                    unit=_unit_for_metric(metric),
+                )
+            )
     for block_name in (
         "spike_timing",
         "spike_timing_prevalence_matched",
@@ -466,7 +598,9 @@ def _spike_behavior_rows(
         block = regime_report.get(block_name)
         if not isinstance(block, dict):
             continue
-        block_context = _replace_context_condition(context, f"{context.condition}:{block_name}")
+        block_context = _replace_context_condition(
+            context, f"{context.condition}:{block_name}"
+        )
         for metric in (
             "threshold",
             "mean_timing_error_steps",
@@ -475,16 +609,34 @@ def _spike_behavior_rows(
             "recall_at_2steps",
             "f1_at_2steps",
         ):
-            rows.append(_row("spike_behavior", block_context, metric, block.get(metric), unit=_unit_for_metric(metric)))
+            rows.append(
+                _row(
+                    "spike_behavior",
+                    block_context,
+                    metric,
+                    block.get(metric),
+                    unit=_unit_for_metric(metric),
+                )
+            )
     for metric in ("spike_auc", "spike_brier", "spike_log_loss"):
-        rows.append(_row("spike_behavior", context, metric, report.get(metric), unit=_unit_for_metric(metric)))
+        rows.append(
+            _row(
+                "spike_behavior",
+                context,
+                metric,
+                report.get(metric),
+                unit=_unit_for_metric(metric),
+            )
+        )
     curve = report.get("spike_f1_curve")
     if isinstance(curve, list):
         for item in curve:
             if not isinstance(item, dict):
                 continue
             tolerance = item.get("tolerance_steps")
-            curve_context = _replace_context_condition(context, f"{context.condition}:spike_f1_curve")
+            curve_context = _replace_context_condition(
+                context, f"{context.condition}:spike_f1_curve"
+            )
             for metric in ("precision", "recall", "f1"):
                 row = _row(
                     "spike_behavior",
@@ -502,12 +654,30 @@ def _spike_behavior_rows(
         "spike_f1_t_min_steps",
         "spike_f1_t_max_steps",
     ):
-        rows.append(_row("spike_behavior", context, metric, report.get(metric), unit=_unit_for_metric(metric)))
-    rows.append(_row("spike_behavior", context, "spike_f1_threshold_kind", report.get("spike_f1_threshold_kind"), unit="label"))
+        rows.append(
+            _row(
+                "spike_behavior",
+                context,
+                metric,
+                report.get(metric),
+                unit=_unit_for_metric(metric),
+            )
+        )
+    rows.append(
+        _row(
+            "spike_behavior",
+            context,
+            "spike_f1_threshold_kind",
+            report.get("spike_f1_threshold_kind"),
+            unit="label",
+        )
+    )
     return rows
 
 
-def _feature_fidelity_rows(report: dict[str, Any], context: DiagnosticContext) -> list[dict[str, Any]]:
+def _feature_fidelity_rows(
+    report: dict[str, Any], context: DiagnosticContext
+) -> list[dict[str, Any]]:
     rows = []
     features = report.get("features", {})
     for feature_name, feature in features.items():
@@ -537,9 +707,30 @@ def _teacher_distribution_rows(
     soma_mv = tgt[..., 1] / context.soma_scale + context.soma_bias_mv
     spikes = tgt[..., 0] > 0.5
     rows = [
-        _row("teacher_distribution_qc", context, "soma_mean_mv", float(np.mean(soma_mv)), unit="mV", n=soma_mv.size),
-        _row("teacher_distribution_qc", context, "soma_std_mv", float(np.std(soma_mv)), unit="mV", n=soma_mv.size),
-        _row("teacher_distribution_qc", context, "spike_count", int(spikes.sum()), unit="count", n=spikes.size),
+        _row(
+            "teacher_distribution_qc",
+            context,
+            "soma_mean_mv",
+            float(np.mean(soma_mv)),
+            unit="mV",
+            n=soma_mv.size,
+        ),
+        _row(
+            "teacher_distribution_qc",
+            context,
+            "soma_std_mv",
+            float(np.std(soma_mv)),
+            unit="mV",
+            n=soma_mv.size,
+        ),
+        _row(
+            "teacher_distribution_qc",
+            context,
+            "spike_count",
+            int(spikes.sum()),
+            unit="count",
+            n=spikes.size,
+        ),
         _row(
             "teacher_distribution_qc",
             context,
@@ -581,19 +772,44 @@ def _clipping_distortion_rows(
     raw = np.asarray(raw_soma_mv)
     if raw.ndim == 1:
         raw = raw[None, :]
-    raw = raw[:, context.ignore_start:]
-    tgt = _apply_time_mask(_as_trace_array(np.asarray(clipped_targets)), context.ignore_start)
+    raw = raw[:, context.ignore_start :]
+    tgt = _apply_time_mask(
+        _as_trace_array(np.asarray(clipped_targets)), context.ignore_start
+    )
     clipped_mv = tgt[..., 1] / context.soma_scale + context.soma_bias_mv
     if raw.shape != clipped_mv.shape:
-        raise ValueError(f"raw_soma_mv shape must match target time shape after mask, got {raw.shape} and {clipped_mv.shape}")
+        raise ValueError(
+            f"raw_soma_mv shape must match target time shape after mask, got {raw.shape} and {clipped_mv.shape}"
+        )
     distortion = raw - clipped_mv
     clipped_mask = np.abs(distortion) > 1e-6
     spikes = tgt[..., 0] > 0.5
     near_spike = _near_spike_mask(spikes, radius=3)
     rows = [
-        _row("clipping_distortion", context, "clipped_fraction", float(clipped_mask.mean()), unit="fraction", n=raw.size),
-        _row("clipping_distortion", context, "distortion_rmse_mv", _rmse(distortion), unit="mV", n=raw.size),
-        _row("clipping_distortion", context, "distortion_max_mv", float(np.max(np.abs(distortion))), unit="mV", n=raw.size),
+        _row(
+            "clipping_distortion",
+            context,
+            "clipped_fraction",
+            float(clipped_mask.mean()),
+            unit="fraction",
+            n=raw.size,
+        ),
+        _row(
+            "clipping_distortion",
+            context,
+            "distortion_rmse_mv",
+            _rmse(distortion),
+            unit="mV",
+            n=raw.size,
+        ),
+        _row(
+            "clipping_distortion",
+            context,
+            "distortion_max_mv",
+            float(np.max(np.abs(distortion))),
+            unit="mV",
+            n=raw.size,
+        ),
         _row(
             "clipping_distortion",
             context,
@@ -625,9 +841,11 @@ def _clipping_distortion_rows(
     return rows
 
 
-def _filter_rows_for_suites(rows: list[dict[str, Any]], suites: tuple[str, ...]) -> list[dict[str, Any]]:
+def _filter_rows_for_suites(
+    rows: list[dict[str, Any]], suites: tuple[str, ...]
+) -> list[dict[str, Any]]:
     specs = {spec.name: set(spec.suites) for spec in default_diagnostic_specs()}
-    selected = set(suites)
+    set(suites)
     filtered = []
     for row in rows:
         diagnostic_suites = specs.get(row["diagnostic"], set())
@@ -671,11 +889,15 @@ def _row(
     }
 
 
-def _replace_context_trace(context: DiagnosticContext, trace_id: str) -> DiagnosticContext:
+def _replace_context_trace(
+    context: DiagnosticContext, trace_id: str
+) -> DiagnosticContext:
     return replace(context, trace_id=trace_id)
 
 
-def _replace_context_condition(context: DiagnosticContext, condition: str) -> DiagnosticContext:
+def _replace_context_condition(
+    context: DiagnosticContext, condition: str
+) -> DiagnosticContext:
     return replace(context, condition=condition)
 
 
@@ -708,7 +930,7 @@ def _near_spike_mask(spikes: np.ndarray, *, radius: int) -> np.ndarray:
 
 def _rmse(values: np.ndarray) -> float:
     values = np.asarray(values)
-    return float(np.sqrt(np.mean(values ** 2)))
+    return float(np.sqrt(np.mean(values**2)))
 
 
 def _json_scalar(value: Any) -> Any:
@@ -734,7 +956,11 @@ def _unit_for_metric(metric: str) -> str:
         return "mV_per_step"
     if "_mv2" in metric:
         return "mV^2"
-    if metric.endswith("_mv") or "_mv_" in metric or metric in {"soma_mean_mv", "soma_std_mv"}:
+    if (
+        metric.endswith("_mv")
+        or "_mv_" in metric
+        or metric in {"soma_mean_mv", "soma_std_mv"}
+    ):
         return "mV"
     if "rate_per_1000" in metric:
         return "spikes_per_1000_steps"
@@ -742,8 +968,7 @@ def _unit_for_metric(metric: str) -> str:
         "fraction" in metric
         or metric in {"spike_auc", "spike_brier"}
         or metric.startswith(("precision_", "recall_", "f1_"))
-        or metric.endswith("_mean_f1")
-        or metric.endswith("_f1_area")
+        or metric.endswith(("_mean_f1", "_f1_area"))
         or "relevance_mean" in metric
     ):
         return "fraction"

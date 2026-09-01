@@ -94,7 +94,7 @@ class DatasetCategorySpec:
 
 @dataclass(frozen=True)
 class MorphologySpec:
-    """One provisional v1 morphology entry."""
+    """One morphology entry in the frozen v1 registry."""
 
     specimen_id: int
     role: str
@@ -213,7 +213,7 @@ def build_v1_dataset_manifest_template(
             "morphology_policy": "all_v1_morphologies",
             "intervention_selector": "interventions/<name>",
         },
-        "morphologies": [morphology.to_dict() for morphology in provisional_v1_morphologies()],
+        "morphologies": [morphology.to_dict() for morphology in v1_morphologies()],
         "target_views": [view.to_dict() for view in default_target_views()],
         "trace": {
             "duration_ms": 6000,
@@ -224,13 +224,8 @@ def build_v1_dataset_manifest_template(
     }
 
 
-def provisional_v1_morphologies() -> tuple[MorphologySpec, ...]:
-    """Return the provisional N=5 morphology set for teacher-QC pilots.
-
-    The final dataset freeze may replace entries that fail teacher sanity, but
-    any replacement should preserve the same role: close control, moderate
-    shift, line-diversity shift, or stronger sane shift.
-    """
+def v1_morphologies() -> tuple[MorphologySpec, ...]:
+    """Return the frozen five-morphology v1 registry."""
     return (
         MorphologySpec(
             specimen_id=488_683_425,
@@ -309,6 +304,12 @@ def provisional_v1_morphologies() -> tuple[MorphologySpec, ...]:
             routing_shape_match=True,
         ),
     )
+
+
+def provisional_v1_morphologies() -> tuple[MorphologySpec, ...]:
+    """Compatibility alias for :func:`v1_morphologies`."""
+
+    return v1_morphologies()
 
 
 def default_target_views() -> tuple[TargetViewSpec, ...]:
@@ -710,7 +711,7 @@ def validate_v1_manifest_template(manifest: dict[str, Any]) -> None:
     if len(morphologies) != V1_MORPHOLOGY_COUNT:
         raise ValueError("v1 manifest must declare exactly 5 morphology entries")
     if not all(entry.get("routing_shape_match") for entry in morphologies):
-        raise ValueError("all provisional v1 morphologies must match the routing shape")
+        raise ValueError("all v1 morphologies must match the routing shape")
     for name in required_categories:
         if int(categories[name]["morphologies"]) != V1_MORPHOLOGY_COUNT:
             raise ValueError(f"{name} must include all 5 v1 morphologies")

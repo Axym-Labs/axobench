@@ -48,7 +48,7 @@ def test_root_sera_matches_rmse_when_relevance_is_constant():
     error = np.array([1.0, -2.0, 2.0])
     relevance = np.ones_like(error)
 
-    assert np.isclose(root_sera(error, relevance), np.sqrt(np.mean(error ** 2)))
+    assert np.isclose(root_sera(error, relevance), np.sqrt(np.mean(error**2)))
 
 
 def test_sera_matches_mse_and_root_sera_relation():
@@ -72,7 +72,8 @@ def test_voltage_sera_emphasizes_relevant_teacher_regions():
 
     result = voltage_sera(prediction, target, raw_soma_mv=raw_soma_mv, ignore_start=0)
 
-    assert result["voltage_sera_mv"] > result["voltage_rmse_mv"]
+    assert result["voltage_root_sera_mv"] > result["voltage_rmse_mv"]
+    assert "voltage_sera_mv" not in result
     assert result["relevance_support_ge_0_9"] > 0
 
 
@@ -86,14 +87,21 @@ def test_dynamics_sera_complements_voltage_level_error():
 
     shifted_result = dynamics_sera(shifted, target, ignore_start=0)
     distorted_result = dynamics_sera(distorted, target, ignore_start=0)
-    faster_sampling_result = dynamics_sera(distorted, target, timestep_ms=0.5, ignore_start=0)
-
-    assert np.isclose(shifted_result["dynamics_sera_mv_per_ms"], 0.0, atol=1e-6)
-    assert distorted_result["dynamics_sera_mv_per_ms"] > 0.0
-    assert np.isclose(
-        faster_sampling_result["dynamics_sera_mv_per_ms"],
-        2.0 * distorted_result["dynamics_sera_mv_per_ms"],
+    faster_sampling_result = dynamics_sera(
+        distorted, target, timestep_ms=0.5, ignore_start=0
     )
+
+    assert np.isclose(
+        shifted_result["dynamics_root_sera_mv_per_ms"],
+        0.0,
+        atol=1e-6,
+    )
+    assert distorted_result["dynamics_root_sera_mv_per_ms"] > 0.0
+    assert np.isclose(
+        faster_sampling_result["dynamics_root_sera_mv_per_ms"],
+        2.0 * distorted_result["dynamics_root_sera_mv_per_ms"],
+    )
+    assert "dynamics_sera_mv_per_ms" not in distorted_result
 
 
 def test_spike_f1_curve_uses_one_to_one_event_matching():
@@ -144,11 +152,13 @@ def test_compute_core_metric_set_returns_promoted_metrics():
     target[0, 4, 0] = 1.0
     prediction[0, 4, 0] = 3.0
 
-    result = compute_core_metric_set(prediction, target, ignore_start=0, spike_tolerances_steps=(0, 1, 2))
+    result = compute_core_metric_set(
+        prediction, target, ignore_start=0, spike_tolerances_steps=(0, 1, 2)
+    )
 
-    assert result["voltage_sera_mv"] == 0.0
+    assert result["voltage_root_sera_mv"] == 0.0
     assert result["voltage_sera_mv2"] == 0.0
-    assert result["dynamics_sera_mv_per_ms"] == 0.0
+    assert result["dynamics_root_sera_mv_per_ms"] == 0.0
     assert result["dynamics_sera_mv2_per_ms2"] == 0.0
     assert result["spike_mean_f1"] == 1.0
     assert result["spike_f1_area"] == 1.0
@@ -156,6 +166,8 @@ def test_compute_core_metric_set_returns_promoted_metrics():
     assert "spike_squared_deficit_f1_score" not in result
     assert result["spike_threshold_kind"] == "prevalence_matched"
     assert "voltage_rmse_mv" not in result
+    assert "voltage_sera_mv" not in result
+    assert "dynamics_sera_mv_per_ms" not in result
 
 
 def test_compute_core_metric_set_includes_response_sera_when_pair_is_given():
@@ -171,9 +183,10 @@ def test_compute_core_metric_set_includes_response_sera_when_pair_is_given():
         ignore_start=2,
     )
 
-    assert result["response_sera_mv"] == 0.0
+    assert result["response_root_sera_mv"] == 0.0
     assert result["response_sera_mv2"] == 0.0
-    assert result["response"]["response_sera_mv"] == 0.0
+    assert result["response"]["response_root_sera_mv"] == 0.0
+    assert "response_sera_mv" not in result
 
 
 def test_response_sera_is_zero_for_correct_intervention_delta():
@@ -183,8 +196,16 @@ def test_response_sera_is_zero_for_correct_intervention_delta():
     baseline_prediction = baseline_target.copy()
     intervention_prediction = intervention_target.copy()
 
-    correct = response_sera(baseline_prediction, intervention_prediction, baseline_target, intervention_target)
-    wrong = response_sera(baseline_prediction, baseline_prediction, baseline_target, intervention_target)
+    correct = response_sera(
+        baseline_prediction,
+        intervention_prediction,
+        baseline_target,
+        intervention_target,
+    )
+    wrong = response_sera(
+        baseline_prediction, baseline_prediction, baseline_target, intervention_target
+    )
 
-    assert correct["response_sera_mv"] == 0.0
-    assert wrong["response_sera_mv"] > 0.0
+    assert correct["response_root_sera_mv"] == 0.0
+    assert wrong["response_root_sera_mv"] > 0.0
+    assert "response_sera_mv" not in correct

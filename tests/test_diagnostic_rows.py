@@ -1,5 +1,6 @@
-import numpy as np
 import json
+
+import numpy as np
 
 from axobench.benchmark.diagnostic_rows import (
     DiagnosticContext,
@@ -37,18 +38,39 @@ def test_model_diagnostics_emit_dataframe_rows_for_overlapping_suites():
     )
 
     validate_diagnostic_rows(rows)
-    assert {row["diagnostic"] for row in rows}.issuperset({"trace_core", "state_dynamics", "spike_behavior"})
-    assert any(row["suite"] == "trace-core|paper-summary" for row in rows if row["diagnostic"] == "trace_core")
-    assert any(row["trace_id"] == "trace-a" and row["metric"] == "soma_rmse_mv" for row in rows)
-    assert any(row["diagnostic"] == "trace_core" and row["metric"] == "voltage_sera_mv" for row in rows)
-    assert any(row["diagnostic"] == "trace_core" and row["metric"] == "voltage_sera_mv2" for row in rows)
-    assert any(row["diagnostic"] == "spike_behavior" and row["metric"] == "spike_f1_area" for row in rows)
+    assert {row["diagnostic"] for row in rows}.issuperset(
+        {"trace_core", "state_dynamics", "spike_behavior"}
+    )
     assert any(
-        row["diagnostic"] == "spike_behavior"
-        and row["metric"] == "spike_mean_f1"
+        row["suite"] == "trace-core|paper-summary"
+        for row in rows
+        if row["diagnostic"] == "trace_core"
+    )
+    assert any(
+        row["trace_id"] == "trace-a" and row["metric"] == "soma_rmse_mv" for row in rows
+    )
+    assert any(
+        row["diagnostic"] == "trace_core" and row["metric"] == "voltage_root_sera_mv"
         for row in rows
     )
-    assert any(row["state"] == "spiking" for row in rows if row["diagnostic"] == "state_dynamics")
+    assert not any(row["metric"] == "voltage_sera_mv" for row in rows)
+    assert any(
+        row["diagnostic"] == "trace_core" and row["metric"] == "voltage_sera_mv2"
+        for row in rows
+    )
+    assert any(
+        row["diagnostic"] == "spike_behavior" and row["metric"] == "spike_f1_area"
+        for row in rows
+    )
+    assert any(
+        row["diagnostic"] == "spike_behavior" and row["metric"] == "spike_mean_f1"
+        for row in rows
+    )
+    assert any(
+        row["state"] == "spiking"
+        for row in rows
+        if row["diagnostic"] == "state_dynamics"
+    )
     assert any(
         row["diagnostic"] == "spike_behavior"
         and row["condition"] == "val:spike_timing"
@@ -166,13 +188,16 @@ def test_paired_intervention_rows_include_teacher_and_model_delta_metrics():
     assert metrics["delta_soma_mean_mv"] < 0
     assert metrics["response_detected"] == 1.0
     assert metrics["soma_delta_rmse_mv"] == 0.0
-    assert metrics["response_sera_mv"] == 0.0
+    assert metrics["response_root_sera_mv"] == 0.0
+    assert "response_sera_mv" not in metrics
     assert metrics["soma_delta_gain"] == 1.0
     assert metrics["spike_count_delta_teacher_mean"] == -1.0
     assert metrics["spike_count_delta_model_mean"] == -1.0
     assert metrics["spike_count_delta_gain"] == 1.0
     assert metrics["model_spike_threshold"] == 0.5
-    assert "teacher-qc|intervention-response|paper-summary" in {row["suite"] for row in rows}
+    assert "teacher-qc|intervention-response|paper-summary" in {
+        row["suite"] for row in rows
+    }
 
 
 def test_morphology_contrast_rows_summarize_numeric_rows_across_morphologies():
@@ -207,19 +232,33 @@ def test_morphology_contrast_rows_summarize_numeric_rows_across_morphologies():
     assert metrics[key]["value"] == 4.0
     assert metrics[key]["n"] == 3
     assert metrics[key]["morphology_id"] == "all_v1"
-    assert metrics[key]["morphology_values"] == {"morph-a": 1.0, "morph-b": 3.0, "morph-c": 5.0}
+    assert metrics[key]["morphology_values"] == {
+        "morph-a": 1.0,
+        "morph-b": 3.0,
+        "morph-c": 5.0,
+    }
 
 
 def test_morphology_routing_qc_rows_emit_v1_routing_metadata():
     rows = morphology_routing_qc_rows(
-        context=DiagnosticContext(suites=("teacher-qc", "paper-summary"), model_id="teacher")
+        context=DiagnosticContext(
+            suites=("teacher-qc", "paper-summary"), model_id="teacher"
+        )
     )
 
     validate_diagnostic_rows(rows)
     assert {row["diagnostic"] for row in rows} == {"morphology_routing_qc"}
-    assert {row["morphology_id"] for row in rows} >= {"specimen_488683425", "specimen_488679042"}
-    assert any(row["metric"] == "routing_shape_match" and row["value"] == 1.0 for row in rows)
-    assert all("dendrite-only" in row["caveat"] or row["morphology_id"] == "specimen_488683425" for row in rows)
+    assert {row["morphology_id"] for row in rows} >= {
+        "specimen_488683425",
+        "specimen_488679042",
+    }
+    assert any(
+        row["metric"] == "routing_shape_match" and row["value"] == 1.0 for row in rows
+    )
+    assert all(
+        "dendrite-only" in row["caveat"] or row["morphology_id"] == "specimen_488683425"
+        for row in rows
+    )
 
 
 def test_write_diagnostic_rows_supports_dataframe_friendly_formats(tmp_path):
@@ -250,6 +289,14 @@ def test_write_diagnostic_rows_supports_dataframe_friendly_formats(tmp_path):
     write_diagnostic_rows(rows, jsonl_path)
     write_diagnostic_rows(rows, csv_path)
 
-    assert json.loads(json_path.read_text(encoding="utf-8"))[0]["metric"] == "soma_rmse_mv"
-    assert json.loads(jsonl_path.read_text(encoding="utf-8").splitlines()[0])["unit"] == "mV"
-    assert "diagnostic,suite,model_id" in csv_path.read_text(encoding="utf-8").splitlines()[0]
+    assert (
+        json.loads(json_path.read_text(encoding="utf-8"))[0]["metric"] == "soma_rmse_mv"
+    )
+    assert (
+        json.loads(jsonl_path.read_text(encoding="utf-8").splitlines()[0])["unit"]
+        == "mV"
+    )
+    assert (
+        "diagnostic,suite,model_id"
+        in csv_path.read_text(encoding="utf-8").splitlines()[0]
+    )

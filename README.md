@@ -42,9 +42,16 @@ sample identifiers; independent validation checks every manifest hash, shape,
 dtype, finite voltage target, and binary spike target. Connected-model input
 histories are replayed through biophysical teachers, so the labels are
 counterfactual teacher responses rather than a fully biophysical closed loop.
+AxoBench Population is available from
+[Axym-Labs/axobench-population](https://huggingface.co/datasets/Axym-Labs/axobench-population).
+Paired causal perturbations are released separately as
+[Axym-Labs/axobench-interventions](https://huggingface.co/datasets/Axym-Labs/axobench-interventions)
+so ordinary benchmark and population users do not need to download
+intervention shards.
 A fixed training recipe improves held-out trace metrics but does not improve
-the connected objective, which is why connected diagnostics remain part of
-model selection.
+the morphology-conditioned firing-rate criterion on three held-out
+connectomes, which is why connected diagnostics remain part of model
+selection.
 
 ## Iterative Model Evaluation
 
@@ -71,6 +78,11 @@ parallel CPU intervention loaders. Set `multiple_morphologies=True` to
 distribute the same 120/40 profile across all available morphologies, or pass
 `morphology_id` to choose one specimen. Trace-level uncertainty differs among
 specimens, so confirmation runs can raise either limit explicitly.
+For selection followed by untouched confirmation, set
+`validation_sample_start=0` for the selection cache and advance it by the
+selection-block size for the confirmation cache. The selector preserves
+morphology balance and records the start in both the report and cache
+protocol, so paired comparisons cannot silently mix blocks.
 
 Evaluation only prints by default. Persist a strict JSON or tidy CSV report
 when needed:
@@ -90,6 +102,9 @@ Root-SERA. The default spike score is the arithmetic mean of event F1 at
 has equal weight. The report also includes Root-SERA, ordinary trapezoidal F1
 area, exact F1, and 5 ms F1. Every report includes the full tolerance curve and
 calibrated threshold.
+Machine-readable rooted fields use explicit names such as
+`voltage_root_sera_mv`, `dynamics_root_sera_mv_per_ms`, and
+`response_root_sera_mv`; the SERA fields retain squared-unit suffixes.
 
 `attention=YES` is an early watch, `NO` is clear at the stated trigger, and
 `NA` makes missing evidence explicit. Each diagnostic row also carries its
