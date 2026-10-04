@@ -256,20 +256,23 @@ def dynamics_sera(
     }
 
 
-def spike_event_peaks(scores: np.ndarray, *, refractory_steps: int = 2) -> np.ndarray:
+def spike_event_peaks(scores: np.ndarray, *, refractory_steps: int = 2, min_score: float = -np.inf) -> np.ndarray:
     """Candidate spike events: local maxima of each trace's score, one per refractory window.
 
     A timestep is a candidate if its score exceeds the previous one and is not
     below the next one (the first step of a plateau). Candidates are then kept
     greedily from the highest score down, dropping any within
-    `refractory_steps` of a kept one. Returns a boolean (traces, time) array.
+    `refractory_steps` of a kept one. Candidates below `min_score` are dropped
+    first; since lower peaks never suppress higher ones, this does not change
+    which peaks at or above `min_score` are kept. Returns a boolean
+    (traces, time) array.
     """
     if refractory_steps < 0:
         raise ValueError("refractory_steps must be non-negative")
     s = _as_2d(scores)
     left = np.concatenate([np.full((s.shape[0], 1), -np.inf), s[:, :-1]], axis=1)
     right = np.concatenate([s[:, 1:], np.full((s.shape[0], 1), -np.inf)], axis=1)
-    candidate = (s > left) & (s >= right)
+    candidate = (s > left) & (s >= right) & (s >= min_score)
     if refractory_steps == 0:
         return candidate
     kept = np.zeros_like(candidate)
@@ -293,7 +296,7 @@ def spike_events(scores: np.ndarray, threshold: float, *, refractory_steps: int 
     s = _as_2d(scores)
     if refractory_steps is None:
         return s >= threshold
-    return spike_event_peaks(s, refractory_steps=refractory_steps) & (s >= threshold)
+    return spike_event_peaks(s, refractory_steps=refractory_steps, min_score=threshold)
 
 
 def event_count_matched_threshold(scores: np.ndarray, positive_count: int, *, refractory_steps: int | None = 2) -> float:
