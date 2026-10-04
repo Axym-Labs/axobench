@@ -165,7 +165,7 @@ def axobench_scores(
         reference = fn(null, target, raw_soma_mv=target_soma_mv, relevance_kwargs=kw)[key]
         out[f"{name}_sera"] = float(model)
         out[f"{name}_skill"] = float(1.0 - model / reference)
-    curve = spike_f1_curve(pred_spikes, target_spikes, threshold=0.5, tolerances_steps=(0, 1, 2, 3, 4, 5))
+    curve = spike_f1_curve(pred_spikes, target_spikes, threshold=0.5, tolerances_steps=(0, 1, 2, 3, 4, 5), refractory_steps=None)
     out["f1_curve"] = [0.0 if r["f1"] is None else float(r["f1"]) for r in curve["rows"]]
     out["mean_f1"] = curve["mean_f1"]
     out["gamma_2"] = coincidence_factor(pred_spikes, target_spikes, delta_steps=2)["gamma"]
