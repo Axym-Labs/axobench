@@ -289,6 +289,43 @@ def spike_event_confusion(
     return {"tp": tp, "fp": pred_total - tp, "fn": target_total - tp}
 
 
+def coincidence_factor(
+    predicted_spikes: np.ndarray,
+    target_spikes: np.ndarray,
+    *,
+    delta_steps: int = 2,
+) -> dict[str, float | int]:
+    """Coincidence factor Gamma (Kistler et al. 1997; Jolivet et al. 2008).
+
+    Gamma = (N_coinc - <N_coinc>) / (0.5 (N_pred + N_target) (1 - 2 nu delta)),
+    where coincidences are one-to-one within +-delta_steps and <N_coinc> =
+    2 nu delta N_target is the count expected from a Poisson train at the
+    predicted rate nu. Terms are pooled over traces, each with its own rate.
+    Gamma is 1 for a perfect prediction and about 0 for chance.
+    """
+    if delta_steps < 0:
+        raise ValueError("delta_steps must be non-negative")
+    pred = _as_2d(predicted_spikes) > 0.5
+    tgt = _as_2d(target_spikes) > 0.5
+    if pred.shape != tgt.shape:
+        raise ValueError(f"predicted_spikes and target_spikes must match, got {pred.shape} and {tgt.shape}")
+    coincidences = spike_event_confusion(pred, tgt, tolerance_steps=delta_steps)["tp"]
+    n_pred = pred.sum(axis=1).astype(np.float64)
+    n_target = tgt.sum(axis=1).astype(np.float64)
+    rate = n_pred / pred.shape[1]
+    expected = float(np.sum(2.0 * rate * delta_steps * n_target))
+    norm = float(np.sum((1.0 - 2.0 * rate * delta_steps) * 0.5 * (n_pred + n_target)))
+    value = (coincidences - expected) / norm if norm > 0.0 else float("nan")
+    return {
+        "gamma": float(value),
+        "coincidences": int(coincidences),
+        "expected_coincidences": expected,
+        "predicted_spikes": int(n_pred.sum()),
+        "target_spikes": int(n_target.sum()),
+        "delta_steps": int(delta_steps),
+    }
+
+
 def spike_f1_curve(
     spike_scores: np.ndarray,
     target_spikes: np.ndarray,
