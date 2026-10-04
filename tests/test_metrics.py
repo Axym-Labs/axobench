@@ -13,6 +13,9 @@ from axobench.metrics import (
     spike_event_confusion,
     spike_f1_curve,
     voltage_sera,
+    event_count_matched_threshold,
+    spike_event_peaks,
+    spike_events,
 )
 
 
@@ -100,8 +103,8 @@ def test_spike_f1_curve_uses_one_to_one_event_matching():
     predicted = np.array([[0.0, 2.0, 2.0, 0.0]])
     target = np.array([[0.0, 1.0, 0.0, 1.0]])
 
-    exact = spike_f1_curve(predicted, target, threshold=1.0, tolerances_steps=(0,))
-    loose = spike_f1_curve(predicted, target, threshold=1.0, tolerances_steps=(0, 1))
+    exact = spike_f1_curve(predicted, target, threshold=1.0, tolerances_steps=(0,), refractory_steps=None)
+    loose = spike_f1_curve(predicted, target, threshold=1.0, tolerances_steps=(0, 1), refractory_steps=None)
     confusion = spike_event_confusion(predicted >= 1.0, target, tolerance_steps=1)
 
     assert exact["rows"][0]["f1"] == 0.5
@@ -188,3 +191,31 @@ def test_response_sera_is_zero_for_correct_intervention_delta():
 
     assert correct["response_sera_mv"] == 0.0
     assert wrong["response_sera_mv"] > 0.0
+
+
+def test_spike_events_count_a_supra_threshold_run_once():
+    scores = np.array([[0.1, 0.6, 0.9, 0.7, 0.1, 0.2, 0.8, 0.1]])
+    events = spike_events(scores, 0.5)
+    np.testing.assert_array_equal(np.flatnonzero(events[0]), [2, 6])
+    np.testing.assert_array_equal(np.flatnonzero(spike_events(scores, 0.5, refractory_steps=None)[0]), [1, 2, 3, 6])
+
+
+def test_spike_event_peaks_suppress_within_refractory_window():
+    scores = np.array([[0.0, 0.9, 0.2, 0.8, 0.0, 0.0, 0.0, 0.7, 0.0]])
+    np.testing.assert_array_equal(np.flatnonzero(spike_event_peaks(scores, refractory_steps=2)[0]), [1, 7])
+    np.testing.assert_array_equal(np.flatnonzero(spike_event_peaks(scores, refractory_steps=0)[0]), [1, 3, 7])
+
+
+def test_event_count_matched_threshold_yields_requested_event_count():
+    rng = np.random.default_rng(0)
+    scores = rng.random((3, 400))
+    for count in (1, 10, 40):
+        thr = event_count_matched_threshold(scores, count)
+        assert spike_events(scores, thr).sum() == count
+
+
+def test_spike_f1_curve_scores_a_plateau_prediction_as_one_event():
+    predicted = np.array([[0.0, 2.0, 2.0, 2.0, 0.0, 0.0]])
+    target = np.array([[0.0, 1.0, 0.0, 0.0, 0.0, 0.0]])
+    curve = spike_f1_curve(predicted, target, threshold=1.0, tolerances_steps=(0,))
+    assert curve["rows"][0]["f1"] == 1.0
