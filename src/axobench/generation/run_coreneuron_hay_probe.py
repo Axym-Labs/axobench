@@ -182,7 +182,16 @@ def attach_deterministic_synapses(
     inh_gmax_scale: float = 1.0,
     gid_start: int = 1,
     event_sink: list[tuple[float, int]] | None = None,
+    delay_ms: float = 1.0,
 ) -> tuple[list, list, list]:
+    """One deterministic excitatory and inhibitory synapse per entry of `segments`.
+
+    `segments` may repeat a segment, which places several synapses on it.
+    `delay_ms` is the NetCon delay; 1.0 ms (NEURON's default for
+    `pc.gid_connect`) reproduces the released v1 data, 0.0 matches NeuronIO.
+    """
+    if delay_ms < 0:
+        raise ValueError("delay_ms must be non-negative")
     netcons = []
     synapses = []
     event_times = []
@@ -200,6 +209,7 @@ def attach_deterministic_synapses(
         next_gid += 1
         ex_nc = pc.gid_connect(ex_gid, ex_syn)
         ex_nc.weight[0] = 1
+        ex_nc.delay = delay_ms
         ex_times = np.flatnonzero(inputs_exc[index]).astype(np.float64)
         event_times.extend(float(x) for x in ex_times)
         event_gids.extend(ex_gid for _ in range(ex_times.size))
@@ -215,6 +225,7 @@ def attach_deterministic_synapses(
         next_gid += 1
         inh_nc = pc.gid_connect(inh_gid, inh_syn)
         inh_nc.weight[0] = 1
+        inh_nc.delay = delay_ms
         inh_times = np.flatnonzero(inputs_inh[index]).astype(np.float64)
         event_times.extend(float(x) for x in inh_times)
         event_gids.extend(inh_gid for _ in range(inh_times.size))

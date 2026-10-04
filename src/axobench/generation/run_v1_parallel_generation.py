@@ -1,9 +1,20 @@
 #!/usr/bin/env python3
-"""Generate v1 NeuronIO-like morphology shards with parallel NEURON workers."""
+"""Generate NeuronIO-like morphology shards with parallel NEURON workers.
+
+`--data-version v1` (default) reproduces the released v1 settings: 1 ms NetCon
+delay, `normalized_by_type` routing (one input site per dendritic segment, so
+42-59% of NeuronIO's sites stay unconnected), Hay's 40 um compartments, 1 ms
+voltage. `--data-version v2` sets delay 0 (as NeuronIO), connects all 1,278
+input sites (`all_sites_by_type`), uses d_lambda compartments, stores the raw
+soma voltage at 4 kHz as well, adds the original NeuronIO (Hay) cell as a
+morphology, and uses excitatory gmax scale 1.0. Every option can be overridden
+individually, and every shard sidecar records the complete generator settings.
+"""
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -38,14 +49,36 @@ DEFAULT_PYTHON = Path(".venv/bin/python")
 from axobench.benchmark import make_structured_intervention_inputs
 from axobench.benchmark.dataset_schema import INTERVENTION_CONDITIONS, build_v1_dataset_manifest_template, provisional_v1_morphologies
 from axobench.generation.generate_hay_neuron_dataset import SOMA_BIAS_MV, SOMA_CLIP_THRESHOLD_MV, SOMA_SCALE, local_peak_spike_labels
-from axobench.generation.run_coreneuron_event_dropout_pair import _build_source_site_route, _summarize_input_routing, simulate_signed_trace_batch
+from axobench.generation.run_coreneuron_event_dropout_pair import (
+    NSEG_POLICIES,
+    _build_source_site_route,
+    _summarize_input_routing,
+    simulate_signed_trace_batch,
+)
 from axobench.generation.run_coreneuron_hay_probe import load_probe_mechanisms
 from axobench.generation.run_hay_neuron_driven_probe import collect_segments, sample_neuronio_inputs
 
 
+DATA_VERSIONS: dict[str, dict[str, Any]] = {
+    "v1": {"synapse_delay_ms": 1.0, "input_routing": "normalized_by_type", "nseg_policy": "hay40",
+           "soma_samples_per_ms": 0, "include_hay_cell": False, "exc_gmax_scale": 0.925},
+    "v2": {"synapse_delay_ms": 0.0, "input_routing": "all_sites_by_type", "nseg_policy": "d_lambda",
+           "soma_samples_per_ms": 4, "include_hay_cell": True, "exc_gmax_scale": 1.0},
+}
+HAY_CELL_ID = "neuronio_hay_cell1"
+
+
+def apply_data_version(args: argparse.Namespace) -> argparse.Namespace:
+    """Fill every generator option left unset with the preset of `--data-version`."""
+    for key, value in DATA_VERSIONS[args.data_version].items():
+        if getattr(args, key) is None:
+            setattr(args, key, value)
+    return args
+
+
 def main() -> int:
     parser = build_parser()
-    args = parser.parse_args()
+    args = apply_data_version(parser.parse_args())
     validate_positive(args.exc_gmax_scale, "exc-gmax-scale")
     validate_positive(args.inh_gmax_scale, "inh-gmax-scale")
     if args.worker:
@@ -76,7 +109,17 @@ def build_parser() -> argparse.ArgumentParser:
         default="axobench_ei_balanced",
         help="Human-readable label for the AxoBench teacher calibration stored in metadata.",
     )
-    parser.add_argument("--exc-gmax-scale", type=float, default=0.925)
+    parser.add_argument("--data-version", choices=sorted(DATA_VERSIONS), default="v1",
+                        help="Preset for the options below that are not given explicitly.")
+    parser.add_argument("--synapse-delay-ms", type=float, help="NetCon delay (v1 1.0, v2 0.0 as NeuronIO).")
+    parser.add_argument("--input-routing", choices=["normalized_by_type", "all_sites_by_type"])
+    parser.add_argument("--nseg-policy", choices=list(NSEG_POLICIES))
+    parser.add_argument("--soma-samples-per-ms", type=int, help="Also store raw soma voltage at this rate (0 = 1 ms only).")
+    parser.add_argument("--include-hay-cell", action=argparse.BooleanOptionalAction, default=None,
+                        help="Add the original NeuronIO (Hay) cell as a morphology.")
+    parser.add_argument("--heldout-morphology", action="append", default=[],
+                        help="Morphology id (specimen id or neuronio_hay_cell1) that gets no train/val samples.")
+    parser.add_argument("--exc-gmax-scale", type=float)
     parser.add_argument("--inh-gmax-scale", type=float, default=1.0)
     parser.add_argument("--train-samples-per-morphology", type=int, default=0)
     parser.add_argument("--val-samples-per-morphology", type=int, default=1)
@@ -114,7 +157,10 @@ def orchestrator_main(args: argparse.Namespace) -> int:
         shutil.rmtree(output_root)
     output_root.mkdir(parents=True, exist_ok=True)
 
-    morphologies = selected_morphologies(args.morphology)
+    morphologies = selected_morphologies(args.morphology, include_hay_cell=bool(args.include_hay_cell))
+    unknown = set(args.heldout_morphology) - {m["id"].replace("specimen_", "") for m in morphologies} - {HAY_CELL_ID}
+    if unknown:
+        raise ValueError(f"held-out morphologies not among the selected ones: {sorted(unknown)}")
     interventions = tuple(args.intervention or INTERVENTION_CONDITIONS)
     intervention_counts = intervention_counts_per_morphology(args, interventions)
     tasks = build_tasks(args, output_root, morphologies, interventions)
@@ -146,6 +192,8 @@ def orchestrator_main(args: argparse.Namespace) -> int:
             "excitatory": float(args.exc_gmax_scale),
             "inhibitory": float(args.inh_gmax_scale),
         },
+        "generator": generator_settings(args),
+        "heldout_morphologies": sorted(args.heldout_morphology),
         "parallelism": int(args.parallelism),
         "samples_per_shard": int(args.samples_per_shard),
         "intervention_samples_per_shard": int(intervention_samples_per_shard(args)),
@@ -178,9 +226,12 @@ def orchestrator_main(args: argparse.Namespace) -> int:
     return 0
 
 
-def selected_morphologies(selected: list[str] | None) -> list[dict[str, str]]:
-    wanted = {int(item) for item in selected} if selected else None
+def selected_morphologies(selected: list[str] | None, include_hay_cell: bool = False) -> list[dict[str, str]]:
+    wanted_raw = set(selected or [])
+    wanted = {int(item) for item in wanted_raw if item != HAY_CELL_ID} if selected else None
     rows = []
+    if include_hay_cell and (not selected or HAY_CELL_ID in wanted_raw):
+        rows.append({"id": HAY_CELL_ID, "path": str((SOURCE_ROOT / "morphologies" / "cell1.asc").resolve())})
     for morphology in provisional_v1_morphologies():
         if wanted is not None and morphology.specimen_id not in wanted:
             continue
@@ -213,9 +264,10 @@ def build_tasks(
     intervention_counts = intervention_counts_per_morphology(args, interventions)
     tasks = []
     shard_index = 0
+    heldout = {f"specimen_{item}" if item != HAY_CELL_ID else item for item in getattr(args, "heldout_morphology", [])}
     for morphology in morphologies:
         for split, samples in split_counts.items():
-            if samples <= 0:
+            if samples <= 0 or (morphology["id"] in heldout and split in ("train", "val")):
                 continue
             for offset in range(0, samples, args.samples_per_shard):
                 shard_samples = min(args.samples_per_shard, samples - offset)
@@ -308,6 +360,11 @@ def task_payload(
         "teacher_balance_label": args.teacher_balance_label,
         "exc_gmax_scale": float(args.exc_gmax_scale),
         "inh_gmax_scale": float(args.inh_gmax_scale),
+        "data_version": args.data_version,
+        "synapse_delay_ms": float(args.synapse_delay_ms),
+        "input_routing": args.input_routing,
+        "nseg_policy": args.nseg_policy,
+        "soma_samples_per_ms": int(args.soma_samples_per_ms),
         "python": str(args.python),
     }
 
@@ -349,6 +406,16 @@ def run_tasks(tasks: list[dict[str, Any]], parallelism: int) -> None:
                 str(task["exc_gmax_scale"]),
                 "--inh-gmax-scale",
                 str(task["inh_gmax_scale"]),
+                "--data-version",
+                task["data_version"],
+                "--synapse-delay-ms",
+                str(task["synapse_delay_ms"]),
+                "--input-routing",
+                task["input_routing"],
+                "--nseg-policy",
+                task["nseg_policy"],
+                "--soma-samples-per-ms",
+                str(task["soma_samples_per_ms"]),
             ]
             if task["intervention"]:
                 cmd += ["--worker-intervention", task["intervention"]]
@@ -392,7 +459,16 @@ def task_is_complete(task: dict[str, Any]) -> bool:
         and meta.get("input_event_policy") == "source_neuronio_sampler_unmodified"
         and abs(float(meta.get("exc_gmax_scale", float("nan"))) - float(task["exc_gmax_scale"])) < 1e-12
         and abs(float(meta.get("inh_gmax_scale", float("nan"))) - float(task["inh_gmax_scale"])) < 1e-12
+        and _generator_matches(meta, task)
     )
+
+
+def _generator_matches(meta: dict[str, Any], task: dict[str, Any]) -> bool:
+    gen = meta.get("generator")
+    if gen is None:  # shards written before generator settings were recorded are v1 shards
+        return task["data_version"] == "v1" and task["synapse_delay_ms"] == 1.0 and task["input_routing"] == "normalized_by_type" \
+            and task["nseg_policy"] == "hay40" and task["soma_samples_per_ms"] == 0
+    return all(gen.get(key) == task[key] for key in ("synapse_delay_ms", "input_routing", "nseg_policy", "soma_samples_per_ms"))
 
 
 def worker_main(args: argparse.Namespace) -> int:
@@ -444,13 +520,19 @@ def worker_main(args: argparse.Namespace) -> int:
         v_init_mv=-76.0,
         exc_gmax_scale=args.exc_gmax_scale,
         inh_gmax_scale=args.inh_gmax_scale,
-        input_routing="normalized_by_type",
+        input_routing=args.input_routing,
         source_route=setup["source_route"],
+        synapse_delay_ms=args.synapse_delay_ms,
+        nseg_policy=args.nseg_policy,
+        soma_samples_per_ms=args.soma_samples_per_ms or None,
     )
+    baseline_soma_hr, intervention_soma_hr = [], []
     for baseline in baseline_traces:
         baseline_targets.append(baseline["targets"])
         baseline_soma.append(baseline["soma_mv"])
         sample_rows.append(baseline["input_routing"])
+        if "soma_mv_hr" in baseline:
+            baseline_soma_hr.append(baseline["soma_mv_hr"])
 
     if args.worker_kind == "intervention":
         intervention_traces = simulate_signed_trace_batch(
@@ -462,14 +544,24 @@ def worker_main(args: argparse.Namespace) -> int:
             v_init_mv=-76.0,
             exc_gmax_scale=args.exc_gmax_scale,
             inh_gmax_scale=args.inh_gmax_scale,
-            input_routing="normalized_by_type",
+            input_routing=args.input_routing,
             source_route=setup["source_route"],
+            synapse_delay_ms=args.synapse_delay_ms,
+            nseg_policy=args.nseg_policy,
+            soma_samples_per_ms=args.soma_samples_per_ms or None,
         )
         for intervention in intervention_traces:
             intervention_targets.append(intervention["targets"])
             intervention_soma.append(intervention["soma_mv"])
+            if "soma_mv_hr" in intervention:
+                intervention_soma_hr.append(intervention["soma_mv_hr"])
 
     worker_output.parent.mkdir(parents=True, exist_ok=True)
+    high_res = {}
+    if baseline_soma_hr:
+        high_res["soma_mv_hr" if args.worker_kind == "split" else "baseline_soma_mv_hr"] = np.stack(baseline_soma_hr).astype(np.float32)
+    if intervention_soma_hr:
+        high_res["intervention_soma_mv_hr"] = np.stack(intervention_soma_hr).astype(np.float32)
     if args.worker_kind == "split":
         np.savez_compressed(
             worker_output,
@@ -477,10 +569,12 @@ def worker_main(args: argparse.Namespace) -> int:
             targets=np.stack(baseline_targets).astype(np.float32, copy=False),
             soma_mv=np.stack(baseline_soma).astype(np.float32, copy=False),
             sample_ids=np.asarray(sample_ids),
+            **high_res,
         )
     else:
         np.savez_compressed(
             worker_output,
+            **high_res,
             baseline_inputs=np.stack(baseline_inputs).astype(np.int8, copy=False),
             baseline_targets=np.stack(baseline_targets).astype(np.float32, copy=False),
             baseline_soma_mv=np.stack(baseline_soma).astype(np.float32, copy=False),
@@ -505,9 +599,62 @@ def worker_main(args: argparse.Namespace) -> int:
         "samples": int(args.worker_samples),
         "shard_index": int(args.worker_shard_index),
         "input_routing": _summarize_input_routing(sample_rows),
+        "generator": generator_settings(args, morphology_path=args.worker_morphology_path),
     }
     worker_output.with_suffix(".json").write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return 0
+
+
+def _sha256(path: Path) -> str | None:
+    try:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _code_revision() -> dict[str, Any]:
+    try:
+        rev = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True, check=True).stdout.strip()
+        dirty = bool(subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"], cwd=ROOT,
+                                    capture_output=True, text=True, check=True).stdout.strip())
+        return {"commit": rev, "dirty": dirty}
+    except (OSError, subprocess.CalledProcessError):
+        return {"commit": None, "dirty": None}
+
+
+def generator_settings(args: argparse.Namespace, morphology_path: Path | None = None) -> dict[str, Any]:
+    """Every setting that determines a generated trace, for the shard sidecar and the run summary."""
+    import neuron
+
+    mods = sorted(SWC_MECH_ROOT.glob("*.mod"))
+    digest = hashlib.sha256()
+    for mod in mods:
+        digest.update(mod.name.encode() + mod.read_bytes())
+    out = {
+        "data_version": args.data_version,
+        "synapse_delay_ms": float(args.synapse_delay_ms),
+        "exc_gmax_scale": float(args.exc_gmax_scale),
+        "inh_gmax_scale": float(args.inh_gmax_scale),
+        "input_routing": args.input_routing,
+        "nseg_policy": args.nseg_policy,
+        "soma_samples_per_ms": int(args.soma_samples_per_ms),
+        "integrator": "fixed_step",
+        "dt_ms": 0.025,
+        "v_init_mv": -76.0,
+        "synapses": "DetAMPANMDA/DetGABA (deterministic ProbAMPANMDA2/ProbUDFsyn2 at Use=1, Dep=0, Fac=0)",
+        "spike_label_rule": "local maxima > -25 mV on the 8 samples/ms trace, labelled floor(t)",
+        "input_sampler": "axobench sample_neuronio_inputs (NeuronIO sampler reimplementation)",
+        "backend": args.backend,
+        "neuron_version": getattr(neuron, "__version__", None),
+        "code_revision": _code_revision(),
+        "mechanisms_sha256": digest.hexdigest(),
+        "mechanism_files": [mod.name for mod in mods],
+        "template_hoc_sha256": _sha256(TEMPLATE_HOC),
+        "biophysics_hoc_sha256": _sha256(SOURCE_ROOT / "L5PCbiophys5b.hoc"),
+    }
+    if morphology_path is not None:
+        out["morphology_sha256"] = _sha256(morphology_path)
+    return out
 
 
 def prepare_neuron(backend: str, coreneuron_gpu: bool) -> dict[str, Any]:
