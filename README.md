@@ -109,3 +109,13 @@ Dynamics SERA, Response SERA, and Mean F1 should be reported with the
 tolerance grid, trace selection, calibration split, and uncertainty procedure.
 Ordinary trapezoidal F1 area and Root-SERA remain compatibility views rather
 than headline metrics.
+
+## License
+
+The code is licensed under Apache-2.0 (`LICENSE`). A few bundled files are
+third-party material under their own terms; `NOTICE` lists them. The released
+datasets are CC BY-NC 4.0: every trace is simulated on Allen Cell Types
+Database reconstructions, and the Allen Institute Terms of Use permit derived
+works for noncommercial purposes only. Data you generate with this code on
+Allen reconstructions or models fall under the same restriction; the Apache
+License covers the code, not its output.

@@ -1,0 +1,31 @@
+axobench
+Copyright 2026 Axym Labs
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+The following files are third-party material and are not covered by that
+licence:
+
+- src/axobench/generation/assets/allen_l5_template.swc: reconstruction of
+  Allen Cell Types Database specimen 488683425, (c) Allen Institute for Brain
+  Science, used under the Allen Institute Terms of Use
+  (https://alleninstitute.org/terms-of-use/), which permit noncommercial use
+  only. Cite: Allen Institute for Brain Science (2015). Allen Cell Types
+  Database. Available from celltypes.brain-map.org.
+
+- src/axobench/generation/assets/DetAMPANMDA.mod and DetGABA.mod: deterministic
+  versions of ProbAMPANMDA2.mod and ProbUDFsyn2.mod (Blue Brain Project, 2009),
+  as distributed with Hay et al. (2011), ModelDB 139653. The original authors
+  state no licence.
+
+- src/axobench/generation/mechanisms/nmda.mod: re-implementation of
+  NMDA_CA1_pyr_SC.mod, ModelDB 2019343.
+
+At run time the generator loads the Hay et al. (2011) model files from a local
+checkout of github.com/SelfishGene/neuron_as_deep_net and downloads Allen Cell
+Types Database content through the Allen API. Neither is distributed with
+axobench, and both remain under their own terms.
+
+Data generated with axobench on Allen Cell Types Database reconstructions or
+models are derived works of Allen content and may be used for noncommercial
+purposes only, unless the Allen Institute grants written permission. The
+Apache License covers the code, not such data.
