@@ -112,8 +112,10 @@ than headline metrics.
 
 ## License
 
-The code is licensed under Apache-2.0 (`LICENSE`). A few bundled files are
-third-party material under their own terms; `NOTICE` lists them. The released
+The code is licensed under Apache-2.0 (`LICENSE`). The three NMODL synapse
+mechanisms derive from NEURON's `exp2syn.mod` and are BSD-3-Clause
+(`LICENSES/`); the bundled Allen morphology is under the Allen Terms of Use.
+`NOTICE` lists these files. The released
 datasets are CC BY-NC 4.0: every trace is simulated on Allen Cell Types
 Database reconstructions, and the Allen Institute Terms of Use permit derived
 works for noncommercial purposes only. Data you generate with this code on

@@ -4,6 +4,15 @@ COMMENT
 Deterministic subset of ProbUDFsyn2 used by the Hay source-teacher generator
 when Use=1, Dep=0, Fac=0, u0=0. Each event always increments a
 dual-exponential inhibitory conductance state by the NetCon weight.
+
+The dual-exponential scheme follows NEURON's exp2syn.mod. Parameter values
+follow ProbUDFsyn2.mod (Blue Brain Project, as distributed with Hay et al.
+2011 and NeuronIO); none of its stochastic release code is used.
+
+SPDX-License-Identifier: BSD-3-Clause
+Copyright (c) 2018, Michael Hines (NEURON exp2syn.mod)
+Copyright (c) 2026, Axym Labs (modifications)
+Licence text: LICENSES/NEURON-BSD-3-Clause.txt in the axobench repository.
 ENDCOMMENT
 
 NEURON {
