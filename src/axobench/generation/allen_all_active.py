@@ -132,12 +132,19 @@ def simulate_allen_signed_trace(
     synapse_delay_ms: float = 0.0,
     soma_samples_per_ms: int | None = None,
     teacher_info: dict[str, Any] | None = None,
+    merge_synapses: bool = False,
 ) -> dict[str, Any]:
     """Simulate one exact-millisecond AxoBench trace on an Allen cell.
 
     `teacher_info` replaces the role metadata stored with the trace (default:
     the inhibitory Sst teacher). With `soma_samples_per_ms`, the raw soma
     voltage is also returned at that rate as `soma_mv_hr`.
+
+    With `merge_synapses`, all excitatory (inhibitory) sites routed to the same
+    segment drive one shared DetAMPANMDA (DetGABA) that receives every site's
+    events. The synapse states are linear in the events and share time
+    constants and gmax, so this is the same model up to floating-point
+    summation order, with far fewer point processes to integrate.
     """
     duration_ms = int(signed_inputs.shape[0])
     segments, segment_types, segment_lengths = (
@@ -156,6 +163,11 @@ def simulate_allen_signed_trace(
         source_route,
         policy=input_routing,
     )
+    if merge_synapses:
+        routed_segments, inputs_exc, inputs_inh = merge_sites_per_segment(
+            routed_segments, inputs_exc, inputs_inh
+        )
+        routing["synapses_per_sign"] = len(routed_segments)
     netcons, synapses, events = _attach_synapses(
         h,
         routed_segments,
@@ -306,6 +318,37 @@ def route_source_sites_to_segments(
     }
 
 
+def merge_sites_per_segment(
+    segments: list[Any],
+    inputs_exc: np.ndarray,
+    inputs_inh: np.ndarray,
+) -> tuple[list[Any], np.ndarray, np.ndarray]:
+    """Sum the per-site event trains of sites that share a segment.
+
+    Returns the unique segments (first-appearance order) and event counts of
+    shape (segments, time).
+    """
+    keys: dict[tuple[str, float], int] = {}
+    owner = np.empty(len(segments), dtype=np.int64)
+    unique: list[Any] = []
+    for index, segment in enumerate(segments):
+        key = (segment.sec.name(), float(segment.x))
+        if key not in keys:
+            keys[key] = len(unique)
+            unique.append(segment)
+        owner[index] = keys[key]
+    exc = np.zeros((len(unique), inputs_exc.shape[1]), dtype=np.int32)
+    inh = np.zeros((len(unique), inputs_inh.shape[1]), dtype=np.int32)
+    np.add.at(exc, owner, inputs_exc.astype(np.int32))
+    np.add.at(inh, owner, inputs_inh.astype(np.int32))
+    return unique, exc, inh
+
+
+def _event_times(row: np.ndarray) -> np.ndarray:
+    """Event times in ms for a boolean or count train (a count of n gives n events)."""
+    return np.repeat(np.arange(row.shape[0], dtype=np.float64), np.asarray(row, dtype=np.int64))
+
+
 def _sections(h: Any, name: str) -> tuple[Any, ...]:
     if not hasattr(h, name):
         return ()
@@ -416,12 +459,7 @@ def _attach_synapses(
         ex_nc.weight[0] = 1.0
         netcons.append(ex_nc)
         synapses.append(ex_syn)
-        events.append(
-            (
-                ex_nc,
-                np.flatnonzero(inputs_exc[index]).astype(np.float64),
-            )
-        )
+        events.append((ex_nc, _event_times(inputs_exc[index])))
 
         inh_syn = h.DetGABA(segment)
         inh_syn.tau_r = 0.2
@@ -433,10 +471,5 @@ def _attach_synapses(
         inh_nc.weight[0] = 1.0
         netcons.append(inh_nc)
         synapses.append(inh_syn)
-        events.append(
-            (
-                inh_nc,
-                np.flatnonzero(inputs_inh[index]).astype(np.float64),
-            )
-        )
+        events.append((inh_nc, _event_times(inputs_inh[index])))
     return netcons, synapses, events

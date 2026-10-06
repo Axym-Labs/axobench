@@ -212,6 +212,7 @@ def orchestrator_main(args: argparse.Namespace) -> int:
         write_source_route(args, output_root)
     run_tasks(tasks, args.parallelism)
     write_split_manifests(output_root)
+    write_morphology_index(args, output_root, morphologies)
     summary = {
         "kind": "v1_parallel_generation",
         "output_root": str(output_root),
@@ -305,6 +306,47 @@ def allen_all_active_morphologies(root: Path) -> list[dict[str, str]]:
          "teacher": "allen_all_active", "model_id": str(row["model_id"])}
         for row in json.loads(index.read_text(encoding="utf-8"))
     ]
+
+
+def write_morphology_index(args: argparse.Namespace, output_root: Path, morphologies: list[dict[str, str]]) -> Path:
+    """Write `morphologies.json` and copy each Allen reconstruction to `morphologies/<id>.swc`.
+
+    Models in the conditioned and zero-shot tracks get each sample's
+    morphology id (`supports_morphology_ids`); this index lets them look up the
+    cell itself (reconstruction, Cre line, held-out status, excitatory gain).
+    The NeuronIO cell's morphology is referenced, not copied: it is part of the
+    Hay et al. (2011) model files, which carry no licence.
+    """
+    gains = exc_gains(args, morphologies)
+    heldout = {f"specimen_{item}" if item != HAY_CELL_ID else item for item in args.heldout_morphology}
+    rows = []
+    (output_root / "morphologies").mkdir(exist_ok=True)
+    for morphology in morphologies:
+        row: dict[str, Any] = {"id": morphology["id"], "teacher": morphology.get("teacher", "hay"),
+                               "heldout": morphology["id"] in heldout,
+                               "exc_gmax_scale": float(args.exc_gmax_scale) * gains[morphology["id"]]}
+        if morphology["id"] == HAY_CELL_ID:
+            row.update(species="rat", source="Hay et al. 2011, ModelDB 139653, morphologies/cell1.asc "
+                                            "(as distributed with github.com/SelfishGene/neuron_as_deep_net)")
+        elif row["teacher"] == "allen_all_active":
+            root = Path(morphology["path"])
+            meta = json.loads((root / "model_metadata.json").read_text(encoding="utf-8"))
+            swc = output_root / "morphologies" / f"{morphology['id']}.swc"
+            shutil.copy2(root / "reconstruction.swc", swc)
+            row.update(species="mouse", allen_specimen_id=int(meta["specimen_id"]), allen_model_id=int(meta["id"]),
+                       transgenic_line=str(meta.get("name", "")).split("_", 1)[-1].split(";")[0] or None,
+                       structure=((meta.get("specimen") or {}).get("structure") or {}).get("acronym"),
+                       swc=str(swc.relative_to(output_root)),
+                       source="Allen Cell Types Database, celltypes.brain-map.org (Allen Institute Terms of Use)")
+        else:
+            swc = output_root / "morphologies" / f"{morphology['id']}.swc"
+            shutil.copy2(morphology["path"], swc)
+            row.update(species="mouse", swc=str(swc.relative_to(output_root)),
+                       source="Allen Cell Types Database, celltypes.brain-map.org (Allen Institute Terms of Use)")
+        rows.append(row)
+    path = output_root / "morphologies.json"
+    path.write_text(json.dumps({"version": 1, "morphologies": rows}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
 
 
 def write_source_route(args: argparse.Namespace, output_root: Path) -> Path:
@@ -731,6 +773,7 @@ def simulate_batch(args: argparse.Namespace, setup: dict[str, Any], signed_input
             synapse_delay_ms=args.synapse_delay_ms,
             soma_samples_per_ms=args.soma_samples_per_ms or None,
             teacher_info=setup["teacher_info"],
+            merge_synapses=True,
         )
         for signed_inputs in signed_inputs_batch
     ]
@@ -822,6 +865,8 @@ def generator_settings(args: argparse.Namespace, morphology_path: Path | None = 
             junction_potential_mv=float(json.loads((root / "fit_parameters.json").read_text())["fitting"][0]
                                         ["junction_potential"]),
             axon="Allen truncated: two 30 um sections with the diameters of the reconstruction's first 60 um",
+            synapse_objects="one DetAMPANMDA and one DetGABA per segment, driven by every site routed to it "
+                            "(exact: linear synapse states, shared time constants and gmax)",
         )
     return out
 

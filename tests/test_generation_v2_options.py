@@ -144,3 +144,25 @@ def test_calibrated_gain_multiplies_the_excitatory_scale_of_allen_cells_only(tmp
     cal.write_text(__import__("json").dumps({"gains": {"specimen_111": 0.5}}))
     with pytest.raises(ValueError, match="specimen_222"):
         gen.build_tasks(args, tmp_path / "out", morphologies, ())
+
+
+def test_morphology_index_lists_cells_and_copies_allen_reconstructions(tmp_path):
+    import json
+
+    root = _allen_root(tmp_path / "allen", specimens=(111,))
+    model_root = root / "specimen_111" / "model"
+    (model_root / "reconstruction.swc").write_text("1 1 0 0 0 5 -1\n")
+    (model_root / "model_metadata.json").write_text(json.dumps(
+        {"id": 112, "specimen_id": 111, "name": "Biophysical - all active_Rorb-IRES2-Cre-D;Ai14-1",
+         "specimen": {"structure": {"acronym": "VISp5"}}}))
+    args = gen.apply_data_version(gen.build_parser().parse_args(
+        ["--data-version", "v2", "--allen-all-active-root", str(root), "--heldout-morphology", "111"]))
+    morphologies = gen.selected_morphologies(None, include_hay_cell=True, excitatory_teacher="allen_all_active",
+                                             allen_root=root)
+    out = tmp_path / "out"
+    out.mkdir()
+    index = json.loads(gen.write_morphology_index(args, out, morphologies).read_text())["morphologies"]
+    hay, allen = index
+    assert hay["id"] == gen.HAY_CELL_ID and not hay["heldout"] and "swc" not in hay
+    assert allen["heldout"] and allen["transgenic_line"] == "Rorb-IRES2-Cre-D" and allen["allen_model_id"] == 112
+    assert (out / allen["swc"]).read_text().startswith("1 1")
