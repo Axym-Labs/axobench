@@ -1,4 +1,5 @@
 import argparse
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -166,3 +167,34 @@ def test_morphology_index_lists_cells_and_copies_allen_reconstructions(tmp_path)
     assert hay["id"] == gen.HAY_CELL_ID and not hay["heldout"] and "swc" not in hay
     assert allen["heldout"] and allen["transgenic_line"] == "Rorb-IRES2-Cre-D" and allen["allen_model_id"] == 112
     assert (out / allen["swc"]).read_text().startswith("1 1")
+
+
+def test_v2_generates_each_intervention_at_three_doses(tmp_path):
+    root = _allen_root(tmp_path / "allen", specimens=(111,))
+    args = gen.apply_data_version(gen.build_parser().parse_args(
+        ["--data-version", "v2", "--allen-all-active-root", str(root), "--val-samples-per-morphology", "0",
+         "--intervention-samples-per-morphology", "1", "--intervention", "inh_dropout", "--intervention", "temporal_jitter"]))
+    variants = gen.intervention_variants(args, ("inh_dropout", "temporal_jitter"))
+    assert [v[0] for v in variants] == ["inh_dropout_p10", "inh_dropout_p35", "inh_dropout_p70",
+                                        "temporal_jitter_j1", "temporal_jitter_j2", "temporal_jitter_j8"]
+    morphologies = gen.selected_morphologies(["111"], excitatory_teacher="allen_all_active", allen_root=root)
+    tasks = gen.build_tasks(args, tmp_path / "out", morphologies, ("inh_dropout", "temporal_jitter"))
+    assert {(t["intervention"], t["intervention_dose"], Path(t["output"]).parent.name) for t in tasks} == {
+        ("inh_dropout", 0.1, "inh_dropout_p10"), ("inh_dropout", 0.35, "inh_dropout_p35"),
+        ("inh_dropout", 0.7, "inh_dropout_p70"), ("temporal_jitter", 1.0, "temporal_jitter_j1"),
+        ("temporal_jitter", 2.0, "temporal_jitter_j2"), ("temporal_jitter", 8.0, "temporal_jitter_j8")}
+    assert gen.dose_kwargs("temporal_jitter", 8.0)["jitter_steps"] == 8
+    assert gen.dose_kwargs("inh_dropout", 0.7)["dropout_probability"] == 0.7
+
+
+def test_v1_keeps_one_default_dose_per_intervention():
+    args = gen.apply_data_version(gen.build_parser().parse_args(["--data-version", "v1"]))
+    assert gen.intervention_variants(args, ("inh_dropout",)) == [("inh_dropout", "inh_dropout", 0.35)]
+
+
+def test_dose_change_invalidates_existing_pair_shards():
+    task = {"kind": "intervention", "intervention": "inh_dropout", "intervention_dose": 0.7, "synapse_delay_ms": 0.0,
+            "input_routing": "all_sites_by_type", "nseg_policy": "d_lambda", "soma_samples_per_ms": 4}
+    gen_meta = {k: task[k] for k in ("synapse_delay_ms", "input_routing", "nseg_policy", "soma_samples_per_ms")}
+    assert gen._generator_matches({"generator": gen_meta, "intervention_dose": 0.7}, task)
+    assert not gen._generator_matches({"generator": gen_meta, "intervention_dose": 0.35}, task)

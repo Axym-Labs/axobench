@@ -72,16 +72,24 @@ from axobench.generation.run_hay_neuron_driven_probe import collect_segments, sa
 
 DATA_VERSIONS: dict[str, dict[str, Any]] = {
     "v1": {"synapse_delay_ms": 1.0, "input_routing": "normalized_by_type", "nseg_policy": "hay40",
-           "soma_samples_per_ms": 0, "include_hay_cell": False,
+           "soma_samples_per_ms": 0, "include_hay_cell": False, "intervention_dose": [],
            # The released v1 shards reproduce exactly with 1.0, not the 0.925 the old default said
            # (axobench-internal ta1 results.md, exp6: 8/8 identical traces at 1.0, 0/8 at 0.925).
            "exc_gmax_scale": 1.0,
            "excitatory_teacher": "hay"},
     "v2": {"synapse_delay_ms": 0.0, "input_routing": "all_sites_by_type", "nseg_policy": "d_lambda",
            "soma_samples_per_ms": 4, "include_hay_cell": True, "exc_gmax_scale": 1.0,
-           "excitatory_teacher": "allen_all_active"},
+           "excitatory_teacher": "allen_all_active",
+           # A weak dose, the v1 default, and a dose past the disinhibition breakdown (article A, exp27).
+           "intervention_dose": ["event_dropout=0.1,0.35,0.7", "exc_dropout=0.1,0.35,0.7", "inh_dropout=0.1,0.35,0.7",
+                                 "temporal_jitter=1,2,8", "site_silence=0.1,0.25,0.5"]},
 }
 HAY_CELL_ID = "neuronio_hay_cell1"
+# Intervention strength: the parameter each condition's dose sets, and its v1 default.
+DOSE_PARAMETER = {"event_dropout": "dropout_probability", "exc_dropout": "dropout_probability",
+                  "inh_dropout": "dropout_probability", "temporal_jitter": "jitter_steps", "site_silence": "site_fraction"}
+DEFAULT_DOSE = {"event_dropout": 0.35, "exc_dropout": 0.35, "inh_dropout": 0.35, "temporal_jitter": 2.0,
+                "site_silence": 0.25}
 # Allen all-active models keep the compartments they were fitted with (1 + 2 * int(L / 40)).
 ALLEN_NSEG_POLICY = "allen_fit"
 
@@ -162,6 +170,9 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--intervention", action="append", choices=INTERVENTION_CONDITIONS)
+    parser.add_argument("--intervention-dose", action="append", metavar="CONDITION=D1,D2,...",
+                        help="Generate a condition at several strengths (dropout or site fraction, jitter in ms), each "
+                             "in its own folder, e.g. inh_dropout_p70. Without it a condition uses its v1 default.")
     parser.add_argument("--morphology", action="append", help="Specimen id to include; defaults to all v1 morphologies")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--resume", action="store_true", help="Skip existing valid shard outputs and rebuild manifests/summaries.")
@@ -174,6 +185,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--worker-morphology-path", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--worker-split", help=argparse.SUPPRESS)
     parser.add_argument("--worker-intervention", choices=INTERVENTION_CONDITIONS, help=argparse.SUPPRESS)
+    parser.add_argument("--worker-intervention-dose", type=float, help=argparse.SUPPRESS)
     parser.add_argument("--worker-samples", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--worker-shard-index", type=int, help=argparse.SUPPRESS)
     return parser
@@ -192,6 +204,7 @@ def orchestrator_main(args: argparse.Namespace) -> int:
     if unknown:
         raise ValueError(f"held-out morphologies not among the selected ones: {sorted(unknown)}")
     interventions = tuple(args.intervention or INTERVENTION_CONDITIONS)
+    variants = intervention_variants(args, interventions)
     intervention_counts = intervention_counts_per_morphology(args, interventions)
     tasks = build_tasks(args, output_root, morphologies, interventions)
     total_tasks = len(tasks)
@@ -237,6 +250,7 @@ def orchestrator_main(args: argparse.Namespace) -> int:
         "elapsed_seconds": time.perf_counter() - started,
         "morphologies": [morphology["id"] for morphology in morphologies],
         "interventions": list(interventions),
+        "intervention_variants": {name: {"condition": cond, "dose": dose} for name, cond, dose in variants},
         "intervention_samples_per_morphology_by_condition": intervention_counts,
         "intervention_total_samples_per_morphology": sum(intervention_counts.values()),
         "tasks": len(tasks),
@@ -401,25 +415,25 @@ def build_tasks(
                     )
                 )
                 shard_index += 1
-        for intervention in interventions:
-            intervention_samples = intervention_counts[intervention]
+        for name, condition, dose in intervention_variants(args, interventions):
+            intervention_samples = intervention_counts[name]
             if intervention_samples <= 0:
                 continue
             for offset in range(0, intervention_samples, pair_samples_per_shard):
                 shard_samples = min(pair_samples_per_shard, intervention_samples - offset)
-                tasks.append(
-                    task_payload(
-                        args,
-                        "intervention",
-                        output_root / "interventions" / intervention / f"{morphology['id']}_intervention_pair_{shard_index:05d}.npz",
-                        morphology,
-                        "",
-                        intervention,
-                        shard_samples,
-                        shard_index,
-                        exc_gain=gains[morphology["id"]],
-                    )
+                task = task_payload(
+                    args,
+                    "intervention",
+                    output_root / "interventions" / name / f"{morphology['id']}_intervention_pair_{shard_index:05d}.npz",
+                    morphology,
+                    "",
+                    condition,
+                    shard_samples,
+                    shard_index,
+                    exc_gain=gains[morphology["id"]],
                 )
+                task["intervention_dose"] = float(dose)
+                tasks.append(task)
                 shard_index += 1
     return tasks
 
@@ -447,7 +461,32 @@ def intervention_samples_per_shard(args: argparse.Namespace) -> int:
     return value
 
 
+def intervention_variants(args: argparse.Namespace, interventions: tuple[str, ...]) -> list[tuple[str, str, float]]:
+    """(folder name, condition, dose) for every requested condition and dose.
+
+    A condition without `--intervention-dose` keeps its v1 folder name and default dose;
+    with doses, each gets a folder named by the dose (`_p10` = 10%, `_j8` = up to 8 ms).
+    """
+    doses: dict[str, list[float]] = {}
+    for item in getattr(args, "intervention_dose", None) or []:
+        condition, _, values = item.partition("=")
+        if condition not in DOSE_PARAMETER or not values:
+            raise ValueError(f"--intervention-dose expects CONDITION=D1,D2,... with a known condition, got {item!r}")
+        doses[condition] = [float(v) for v in values.split(",")]
+    out = []
+    for condition in interventions:
+        if condition not in doses:
+            out.append((condition, condition, DEFAULT_DOSE[condition]))
+            continue
+        for dose in doses[condition]:
+            label = f"j{dose:g}" if condition == "temporal_jitter" else f"p{round(100 * dose):02d}"
+            out.append((f"{condition}_{label}", condition, dose))
+    return out
+
+
 def intervention_counts_per_morphology(args: argparse.Namespace, interventions: tuple[str, ...]) -> dict[str, int]:
+    """Pairs per morphology for each intervention variant (folder name)."""
+    interventions = tuple(name for name, _, _ in intervention_variants(args, interventions))
     if not interventions:
         return {}
     total = args.intervention_total_samples_per_morphology
@@ -556,7 +595,8 @@ def run_tasks(tasks: list[dict[str, Any]], parallelism: int) -> None:
                 task["source_route"],
             ]
             if task["intervention"]:
-                cmd += ["--worker-intervention", task["intervention"]]
+                cmd += ["--worker-intervention", task["intervention"],
+                        "--worker-intervention-dose", str(task.get("intervention_dose", DEFAULT_DOSE[task["intervention"]]))]
             if task["coreneuron_gpu"]:
                 cmd += ["--coreneuron-gpu"]
             env = os.environ.copy()
@@ -606,6 +646,10 @@ def _generator_matches(meta: dict[str, Any], task: dict[str, Any]) -> bool:
     if gen is None:  # shards written before generator settings were recorded are v1 shards
         return task["data_version"] == "v1" and task["synapse_delay_ms"] == 1.0 and task["input_routing"] == "normalized_by_type" \
             and task["nseg_policy"] == "hay40" and task["soma_samples_per_ms"] == 0
+    if task.get("kind") == "intervention" and task.get("intervention"):
+        default = DEFAULT_DOSE[task["intervention"]]
+        if float(meta.get("intervention_dose") or default) != float(task.get("intervention_dose", default)):
+            return False
     return all(gen.get(key) == task[key] for key in ("synapse_delay_ms", "input_routing", "nseg_policy", "soma_samples_per_ms")) \
         and gen.get("teacher", "hay") == task.get("teacher", "hay")
 
@@ -643,17 +687,17 @@ def worker_main(args: argparse.Namespace) -> int:
             seed=sample_seed,
         )
         baseline_inputs.append(signed_inputs)
-        sample_id = f"{args.worker_morphology_id}:{args.worker_kind}:{args.worker_split or args.worker_intervention}:{args.worker_shard_index:05d}:{sample_index:04d}:seed{sample_seed}"
+        condition = args.worker_split or (f"{args.worker_intervention}@{intervention_dose(args):g}"
+                                          if args.worker_intervention_dose is not None else args.worker_intervention)
+        sample_id = f"{args.worker_morphology_id}:{args.worker_kind}:{condition}:{args.worker_shard_index:05d}:{sample_index:04d}:seed{sample_seed}"
         sample_ids.append(sample_id)
         if args.worker_kind == "intervention":
             intervention_batch, changed_mask, _ = make_structured_intervention_inputs(
                 signed_inputs[None, ...],
                 intervention=args.worker_intervention,
-                dropout_probability=0.35,
-                jitter_steps=2,
-                site_start_fraction=0.0,
-                site_fraction=0.25,
                 seed=args.seed + sample_index,
+                site_start_fraction=0.0,
+                **dose_kwargs(args.worker_intervention, intervention_dose(args)),
             )
             intervention_inputs.append(intervention_batch[0])
             changed_masks.append(changed_mask[0])
@@ -717,6 +761,8 @@ def worker_main(args: argparse.Namespace) -> int:
         "morphology_path": str(args.worker_morphology_path),
         "samples": int(args.worker_samples),
         "shard_index": int(args.worker_shard_index),
+        "intervention": args.worker_intervention,
+        "intervention_dose": intervention_dose(args) if args.worker_kind == "intervention" else None,
         "input_routing": _summarize_input_routing(sample_rows),
         "generator": generator_settings(args, morphology_path=args.worker_morphology_path, setup=setup),
     }
@@ -739,6 +785,19 @@ def _code_revision() -> dict[str, Any]:
         return {"commit": rev, "dirty": dirty}
     except (OSError, subprocess.CalledProcessError):
         return {"commit": None, "dirty": None}
+
+
+def intervention_dose(args: argparse.Namespace) -> float:
+    dose = getattr(args, "worker_intervention_dose", None)
+    return float(DEFAULT_DOSE[args.worker_intervention] if dose is None else dose)
+
+
+def dose_kwargs(condition: str, dose: float) -> dict[str, Any]:
+    """Keyword arguments of `make_structured_intervention_inputs` for one dose, other parameters at v1 defaults."""
+    kwargs: dict[str, Any] = {"dropout_probability": 0.35, "jitter_steps": 2, "site_fraction": 0.25}
+    parameter = DOSE_PARAMETER[condition]
+    kwargs[parameter] = int(round(dose)) if parameter == "jitter_steps" else float(dose)
+    return kwargs
 
 
 def simulate_batch(args: argparse.Namespace, setup: dict[str, Any], signed_inputs_batch: np.ndarray) -> list[dict[str, Any]]:
@@ -935,8 +994,10 @@ def validate_positive(value: float, name: str) -> None:
 def write_split_manifests(output_root: Path) -> None:
     for split in ("train", "val", "test", "private-test"):
         write_npz_manifest(output_root / split)
-    for intervention in INTERVENTION_CONDITIONS:
-        write_pair_manifest(output_root / "interventions" / intervention)
+    interventions_root = output_root / "interventions"
+    if interventions_root.exists():
+        for folder in sorted(path for path in interventions_root.iterdir() if path.is_dir()):
+            write_pair_manifest(folder)
 
 
 def write_npz_manifest(root: Path) -> None:
