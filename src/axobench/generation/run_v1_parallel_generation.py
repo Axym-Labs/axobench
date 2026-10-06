@@ -9,6 +9,15 @@ input sites (`all_sites_by_type`), uses d_lambda compartments, stores the raw
 soma voltage at 4 kHz as well, adds the original NeuronIO (Hay) cell as a
 morphology, and uses excitatory gmax scale 1.0. Every option can be overridden
 individually, and every shard sidecar records the complete generator settings.
+
+`--excitatory-teacher` chooses the biophysics of the Allen cells: `hay` puts
+the Hay et al. (2011) densities on the v1 reconstructions; `allen_all_active`
+(v2) uses the Allen all-active models (Gouwens et al. 2018) prepared by
+`scripts/prepare_allen_all_active.py`, each with its own channels, compartments
+and v_init. The NeuronIO (Hay) cell keeps the Hay biophysics in both cases.
+Allen and Hay channel files share names, so an Allen worker never loads the Hay
+mechanisms; it reads the NeuronIO site map from `source_route.npz`, which the
+orchestrator writes once per output root.
 """
 
 from __future__ import annotations
@@ -44,6 +53,7 @@ SOURCE_ROOT = Path(
     )
 ).resolve()
 TEMPLATE_HOC = Path(os.environ.get("AXOBENCH_SWC_TEMPLATE_HOC", SWC_MECH_ROOT / "L5PCtemplate_swc.hoc")).resolve()
+ALLEN_ALL_ACTIVE_ROOT = Path(os.environ.get("AXOBENCH_ALLEN_ALL_ACTIVE_ROOT", ARTIFACTS / "allen_all_active")).resolve()
 DEFAULT_PYTHON = Path(".venv/bin/python")
 
 from axobench.benchmark import make_structured_intervention_inputs
@@ -52,6 +62,7 @@ from axobench.generation.generate_hay_neuron_dataset import SOMA_BIAS_MV, SOMA_C
 from axobench.generation.run_coreneuron_event_dropout_pair import (
     NSEG_POLICIES,
     _build_source_site_route,
+    _segment_route,
     _summarize_input_routing,
     simulate_signed_trace_batch,
 )
@@ -61,11 +72,18 @@ from axobench.generation.run_hay_neuron_driven_probe import collect_segments, sa
 
 DATA_VERSIONS: dict[str, dict[str, Any]] = {
     "v1": {"synapse_delay_ms": 1.0, "input_routing": "normalized_by_type", "nseg_policy": "hay40",
-           "soma_samples_per_ms": 0, "include_hay_cell": False, "exc_gmax_scale": 0.925},
+           "soma_samples_per_ms": 0, "include_hay_cell": False,
+           # The released v1 shards reproduce exactly with 1.0, not the 0.925 the old default said
+           # (axobench-internal ta1 results.md, exp6: 8/8 identical traces at 1.0, 0/8 at 0.925).
+           "exc_gmax_scale": 1.0,
+           "excitatory_teacher": "hay"},
     "v2": {"synapse_delay_ms": 0.0, "input_routing": "all_sites_by_type", "nseg_policy": "d_lambda",
-           "soma_samples_per_ms": 4, "include_hay_cell": True, "exc_gmax_scale": 1.0},
+           "soma_samples_per_ms": 4, "include_hay_cell": True, "exc_gmax_scale": 1.0,
+           "excitatory_teacher": "allen_all_active"},
 }
 HAY_CELL_ID = "neuronio_hay_cell1"
+# Allen all-active models keep the compartments they were fitted with (1 + 2 * int(L / 40)).
+ALLEN_NSEG_POLICY = "allen_fit"
 
 
 def apply_data_version(args: argparse.Namespace) -> argparse.Namespace:
@@ -113,7 +131,15 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Preset for the options below that are not given explicitly.")
     parser.add_argument("--synapse-delay-ms", type=float, help="NetCon delay (v1 1.0, v2 0.0 as NeuronIO).")
     parser.add_argument("--input-routing", choices=["normalized_by_type", "all_sites_by_type"])
-    parser.add_argument("--nseg-policy", choices=list(NSEG_POLICIES))
+    parser.add_argument("--nseg-policy", choices=[*NSEG_POLICIES, ALLEN_NSEG_POLICY],
+                        help="Compartments of Hay-biophysics cells; Allen all-active cells always use allen_fit.")
+    parser.add_argument("--excitatory-teacher", choices=["hay", "allen_all_active"],
+                        help="Biophysics of the Allen cells (v1 hay, v2 allen_all_active).")
+    parser.add_argument("--allen-all-active-root", type=Path, default=ALLEN_ALL_ACTIVE_ROOT,
+                        help="Output root of scripts/prepare_allen_all_active.py.")
+    parser.add_argument("--exc-gain-calibration", type=Path,
+                        help="Output of calibrate_exc_gain: per-cell factors applied on top of --exc-gmax-scale. "
+                             "Every Allen all-active morphology must be listed.")
     parser.add_argument("--soma-samples-per-ms", type=int, help="Also store raw soma voltage at this rate (0 = 1 ms only).")
     parser.add_argument("--include-hay-cell", action=argparse.BooleanOptionalAction, default=None,
                         help="Add the original NeuronIO (Hay) cell as a morphology.")
@@ -140,7 +166,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--resume", action="store_true", help="Skip existing valid shard outputs and rebuild manifests/summaries.")
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument("--worker-kind", choices=["split", "intervention"], help=argparse.SUPPRESS)
+    parser.add_argument("--worker-kind", choices=["split", "intervention", "source-route"], help=argparse.SUPPRESS)
+    parser.add_argument("--worker-teacher", choices=["hay", "allen_all_active"], default="hay", help=argparse.SUPPRESS)
+    parser.add_argument("--worker-source-route", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--worker-output", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--worker-morphology-id", help=argparse.SUPPRESS)
     parser.add_argument("--worker-morphology-path", type=Path, help=argparse.SUPPRESS)
@@ -157,7 +185,9 @@ def orchestrator_main(args: argparse.Namespace) -> int:
         shutil.rmtree(output_root)
     output_root.mkdir(parents=True, exist_ok=True)
 
-    morphologies = selected_morphologies(args.morphology, include_hay_cell=bool(args.include_hay_cell))
+    morphologies = selected_morphologies(args.morphology, include_hay_cell=bool(args.include_hay_cell),
+                                         excitatory_teacher=args.excitatory_teacher,
+                                         allen_root=args.allen_all_active_root)
     unknown = set(args.heldout_morphology) - {m["id"].replace("specimen_", "") for m in morphologies} - {HAY_CELL_ID}
     if unknown:
         raise ValueError(f"held-out morphologies not among the selected ones: {sorted(unknown)}")
@@ -178,6 +208,8 @@ def orchestrator_main(args: argparse.Namespace) -> int:
                 remaining_tasks.append(task)
         tasks = remaining_tasks
     started = time.perf_counter()
+    if any(task["teacher"] == "allen_all_active" for task in tasks):
+        write_source_route(args, output_root)
     run_tasks(tasks, args.parallelism)
     write_split_manifests(output_root)
     summary = {
@@ -193,6 +225,10 @@ def orchestrator_main(args: argparse.Namespace) -> int:
             "inhibitory": float(args.inh_gmax_scale),
         },
         "generator": generator_settings(args),
+        "excitatory_teacher": args.excitatory_teacher,
+        "exc_gain_calibration": None if args.exc_gain_calibration is None else {
+            "path": str(args.exc_gain_calibration), "sha256": _sha256(args.exc_gain_calibration),
+            "gains": exc_gains(args, morphologies)},
         "heldout_morphologies": sorted(args.heldout_morphology),
         "parallelism": int(args.parallelism),
         "samples_per_shard": int(args.samples_per_shard),
@@ -226,12 +262,24 @@ def orchestrator_main(args: argparse.Namespace) -> int:
     return 0
 
 
-def selected_morphologies(selected: list[str] | None, include_hay_cell: bool = False) -> list[dict[str, str]]:
+def selected_morphologies(
+    selected: list[str] | None,
+    include_hay_cell: bool = False,
+    excitatory_teacher: str = "hay",
+    allen_root: Path | None = None,
+) -> list[dict[str, str]]:
     wanted_raw = set(selected or [])
     wanted = {int(item) for item in wanted_raw if item != HAY_CELL_ID} if selected else None
     rows = []
     if include_hay_cell and (not selected or HAY_CELL_ID in wanted_raw):
-        rows.append({"id": HAY_CELL_ID, "path": str((SOURCE_ROOT / "morphologies" / "cell1.asc").resolve())})
+        rows.append({"id": HAY_CELL_ID, "path": str((SOURCE_ROOT / "morphologies" / "cell1.asc").resolve()),
+                     "teacher": "hay"})
+    if excitatory_teacher == "allen_all_active":
+        rows += [row for row in allen_all_active_morphologies(allen_root or ALLEN_ALL_ACTIVE_ROOT)
+                 if wanted is None or int(row["id"].split("_")[1]) in wanted]
+        if not rows:
+            raise ValueError("no selected morphologies")
+        return rows
     for morphology in provisional_v1_morphologies():
         if wanted is not None and morphology.specimen_id not in wanted:
             continue
@@ -239,11 +287,36 @@ def selected_morphologies(selected: list[str] | None, include_hay_cell: bool = F
             {
                 "id": f"specimen_{morphology.specimen_id}",
                 "path": str((ROOT / morphology.swc_path).resolve()),
+                "teacher": "hay",
             }
         )
     if not rows:
         raise ValueError("no selected morphologies")
     return rows
+
+
+def allen_all_active_morphologies(root: Path) -> list[dict[str, str]]:
+    """One row per prepared Allen all-active model, in the order of `models.json`."""
+    index = root / "models.json"
+    if not index.exists():
+        raise FileNotFoundError(f"{index} not found; run scripts/prepare_allen_all_active.py first")
+    return [
+        {"id": f"specimen_{row['specimen_id']}", "path": str(Path(row["model_root"]).resolve()),
+         "teacher": "allen_all_active", "model_id": str(row["model_id"])}
+        for row in json.loads(index.read_text(encoding="utf-8"))
+    ]
+
+
+def write_source_route(args: argparse.Namespace, output_root: Path) -> Path:
+    """Write the NeuronIO site map from a process that has the Hay mechanisms loaded."""
+    path = output_root / "source_route.npz"
+    if not path.exists():
+        env = os.environ.copy()
+        env["PYTHONPATH"] = f"{ROOT / 'src'}:{ARTIFACTS}:{CORENEURON_PROBE}:{env.get('PYTHONPATH', '')}"
+        subprocess.run([str(args.python), "-m", "axobench.generation.run_v1_parallel_generation", "--worker",
+                        "--worker-kind", "source-route", "--worker-output", str(path), "--worker-samples", "0"],
+                       cwd=ROOT, env=env, check=True)
+    return path
 
 
 def build_tasks(
@@ -262,6 +335,7 @@ def build_tasks(
         "private-test": args.private_test_samples_per_morphology,
     }
     intervention_counts = intervention_counts_per_morphology(args, interventions)
+    gains = exc_gains(args, morphologies)
     tasks = []
     shard_index = 0
     heldout = {f"specimen_{item}" if item != HAY_CELL_ID else item for item in getattr(args, "heldout_morphology", [])}
@@ -281,6 +355,7 @@ def build_tasks(
                         None,
                         shard_samples,
                         shard_index,
+                        exc_gain=gains[morphology["id"]],
                     )
                 )
                 shard_index += 1
@@ -300,10 +375,24 @@ def build_tasks(
                         intervention,
                         shard_samples,
                         shard_index,
+                        exc_gain=gains[morphology["id"]],
                     )
                 )
                 shard_index += 1
     return tasks
+
+
+def exc_gains(args: argparse.Namespace, morphologies: list[dict[str, str]]) -> dict[str, float]:
+    """Per-morphology excitatory gain from `--exc-gain-calibration` (1.0 without it, and for Hay cells)."""
+    path = getattr(args, "exc_gain_calibration", None)
+    if path is None:
+        return {m["id"]: 1.0 for m in morphologies}
+    calibrated = json.loads(Path(path).read_text(encoding="utf-8"))["gains"]
+    missing = [m["id"] for m in morphologies if m.get("teacher") == "allen_all_active" and m["id"] not in calibrated]
+    if missing:
+        raise ValueError(f"no calibrated excitatory gain for {missing} in {path}")
+    return {m["id"]: float(calibrated.get(m["id"], 1.0)) if m.get("teacher") == "allen_all_active" else 1.0
+            for m in morphologies}
 
 
 def intervention_samples_per_shard(args: argparse.Namespace) -> int:
@@ -343,12 +432,15 @@ def task_payload(
     intervention: str | None,
     samples: int,
     shard_index: int,
+    exc_gain: float = 1.0,
 ) -> dict[str, Any]:
     return {
         "kind": kind,
         "output": str(output),
         "morphology_id": morphology["id"],
         "morphology_path": morphology["path"],
+        "teacher": morphology.get("teacher", "hay"),
+        "source_route": str(output.parents[2 if kind == "intervention" else 1] / "source_route.npz"),
         "split": split,
         "intervention": intervention,
         "samples": int(samples),
@@ -358,12 +450,12 @@ def task_payload(
         "coreneuron_gpu": bool(args.coreneuron_gpu),
         "seed": int(args.seed + 1009 * shard_index),
         "teacher_balance_label": args.teacher_balance_label,
-        "exc_gmax_scale": float(args.exc_gmax_scale),
+        "exc_gmax_scale": float(args.exc_gmax_scale) * float(exc_gain),
         "inh_gmax_scale": float(args.inh_gmax_scale),
         "data_version": args.data_version,
         "synapse_delay_ms": float(args.synapse_delay_ms),
         "input_routing": args.input_routing,
-        "nseg_policy": args.nseg_policy,
+        "nseg_policy": ALLEN_NSEG_POLICY if morphology.get("teacher") == "allen_all_active" else args.nseg_policy,
         "soma_samples_per_ms": int(args.soma_samples_per_ms),
         "python": str(args.python),
     }
@@ -416,6 +508,10 @@ def run_tasks(tasks: list[dict[str, Any]], parallelism: int) -> None:
                 task["nseg_policy"],
                 "--soma-samples-per-ms",
                 str(task["soma_samples_per_ms"]),
+                "--worker-teacher",
+                task["teacher"],
+                "--worker-source-route",
+                task["source_route"],
             ]
             if task["intervention"]:
                 cmd += ["--worker-intervention", task["intervention"]]
@@ -468,7 +564,8 @@ def _generator_matches(meta: dict[str, Any], task: dict[str, Any]) -> bool:
     if gen is None:  # shards written before generator settings were recorded are v1 shards
         return task["data_version"] == "v1" and task["synapse_delay_ms"] == 1.0 and task["input_routing"] == "normalized_by_type" \
             and task["nseg_policy"] == "hay40" and task["soma_samples_per_ms"] == 0
-    return all(gen.get(key) == task[key] for key in ("synapse_delay_ms", "input_routing", "nseg_policy", "soma_samples_per_ms"))
+    return all(gen.get(key) == task[key] for key in ("synapse_delay_ms", "input_routing", "nseg_policy", "soma_samples_per_ms")) \
+        and gen.get("teacher", "hay") == task.get("teacher", "hay")
 
 
 def worker_main(args: argparse.Namespace) -> int:
@@ -476,8 +573,16 @@ def worker_main(args: argparse.Namespace) -> int:
         raise ValueError("worker requires --worker-samples and --worker-output")
     started = time.perf_counter()
     worker_output = args.worker_output.resolve()
+    if args.worker_kind == "source-route":
+        setup = prepare_neuron("neuron", False)
+        worker_output.parent.mkdir(parents=True, exist_ok=True)
+        np.savez(worker_output, types=setup["source_segment_types"], lengths=setup["source_segment_lengths"])
+        return 0
     rng = np.random.default_rng(args.seed)
-    setup = prepare_neuron(args.backend, args.coreneuron_gpu)
+    if args.worker_teacher == "allen_all_active":
+        setup = prepare_allen_all_active(args)
+    else:
+        setup = prepare_neuron(args.backend, args.coreneuron_gpu)
     sample_rows = []
     baseline_inputs = []
     baseline_targets = []
@@ -511,21 +616,7 @@ def worker_main(args: argparse.Namespace) -> int:
             intervention_inputs.append(intervention_batch[0])
             changed_masks.append(changed_mask[0])
 
-    baseline_traces = simulate_signed_trace_batch(
-        h=setup["h"],
-        source_root=SOURCE_ROOT,
-        morphology_path=args.worker_morphology_path.resolve(),
-        backend=args.backend,
-        signed_inputs_batch=np.stack(baseline_inputs).astype(np.int8, copy=False),
-        v_init_mv=-76.0,
-        exc_gmax_scale=args.exc_gmax_scale,
-        inh_gmax_scale=args.inh_gmax_scale,
-        input_routing=args.input_routing,
-        source_route=setup["source_route"],
-        synapse_delay_ms=args.synapse_delay_ms,
-        nseg_policy=args.nseg_policy,
-        soma_samples_per_ms=args.soma_samples_per_ms or None,
-    )
+    baseline_traces = simulate_batch(args, setup, np.stack(baseline_inputs).astype(np.int8, copy=False))
     baseline_soma_hr, intervention_soma_hr = [], []
     for baseline in baseline_traces:
         baseline_targets.append(baseline["targets"])
@@ -535,21 +626,7 @@ def worker_main(args: argparse.Namespace) -> int:
             baseline_soma_hr.append(baseline["soma_mv_hr"])
 
     if args.worker_kind == "intervention":
-        intervention_traces = simulate_signed_trace_batch(
-            h=setup["h"],
-            source_root=SOURCE_ROOT,
-            morphology_path=args.worker_morphology_path.resolve(),
-            backend=args.backend,
-            signed_inputs_batch=np.stack(intervention_inputs).astype(np.int8, copy=False),
-            v_init_mv=-76.0,
-            exc_gmax_scale=args.exc_gmax_scale,
-            inh_gmax_scale=args.inh_gmax_scale,
-            input_routing=args.input_routing,
-            source_route=setup["source_route"],
-            synapse_delay_ms=args.synapse_delay_ms,
-            nseg_policy=args.nseg_policy,
-            soma_samples_per_ms=args.soma_samples_per_ms or None,
-        )
+        intervention_traces = simulate_batch(args, setup, np.stack(intervention_inputs).astype(np.int8, copy=False))
         for intervention in intervention_traces:
             intervention_targets.append(intervention["targets"])
             intervention_soma.append(intervention["soma_mv"])
@@ -599,7 +676,7 @@ def worker_main(args: argparse.Namespace) -> int:
         "samples": int(args.worker_samples),
         "shard_index": int(args.worker_shard_index),
         "input_routing": _summarize_input_routing(sample_rows),
-        "generator": generator_settings(args, morphology_path=args.worker_morphology_path),
+        "generator": generator_settings(args, morphology_path=args.worker_morphology_path, setup=setup),
     }
     worker_output.with_suffix(".json").write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return 0
@@ -622,7 +699,75 @@ def _code_revision() -> dict[str, Any]:
         return {"commit": None, "dirty": None}
 
 
-def generator_settings(args: argparse.Namespace, morphology_path: Path | None = None) -> dict[str, Any]:
+def simulate_batch(args: argparse.Namespace, setup: dict[str, Any], signed_inputs_batch: np.ndarray) -> list[dict[str, Any]]:
+    """Simulate a batch on the worker's cell with the worker's teacher."""
+    if args.worker_teacher != "allen_all_active":
+        return simulate_signed_trace_batch(
+            h=setup["h"],
+            source_root=SOURCE_ROOT,
+            morphology_path=args.worker_morphology_path.resolve(),
+            backend=args.backend,
+            signed_inputs_batch=signed_inputs_batch,
+            v_init_mv=-76.0,
+            exc_gmax_scale=args.exc_gmax_scale,
+            inh_gmax_scale=args.inh_gmax_scale,
+            input_routing=args.input_routing,
+            source_route=setup["source_route"],
+            synapse_delay_ms=args.synapse_delay_ms,
+            nseg_policy=args.nseg_policy,
+            soma_samples_per_ms=args.soma_samples_per_ms or None,
+        )
+    from axobench.generation.allen_all_active import simulate_allen_signed_trace
+
+    return [
+        simulate_allen_signed_trace(
+            h=setup["h"],
+            cell=setup["cell"],
+            signed_inputs=signed_inputs,
+            source_route=setup["source_route"],
+            exc_gmax_scale=args.exc_gmax_scale,
+            inh_gmax_scale=args.inh_gmax_scale,
+            input_routing="source_site_normalized_arclength",
+            synapse_delay_ms=args.synapse_delay_ms,
+            soma_samples_per_ms=args.soma_samples_per_ms or None,
+            teacher_info=setup["teacher_info"],
+        )
+        for signed_inputs in signed_inputs_batch
+    ]
+
+
+def prepare_allen_all_active(args: argparse.Namespace) -> dict[str, Any]:
+    """Load one Allen all-active model and the cached NeuronIO site map (no Hay mechanisms)."""
+    from neuron import h
+
+    from axobench.generation.allen_all_active import load_allen_all_active_cell
+
+    if args.backend != "neuron":
+        raise ValueError("Allen all-active teachers run on the NEURON backend only")
+    if args.input_routing != "all_sites_by_type":
+        raise ValueError("Allen all-active teachers connect every source site; use --input-routing all_sites_by_type")
+    if args.worker_source_route is None or not args.worker_source_route.exists():
+        raise FileNotFoundError(f"source route not found: {args.worker_source_route}")
+    with np.load(args.worker_source_route) as data:
+        types = data["types"].astype(str)
+        lengths = data["lengths"].astype(np.float64)
+    model_root = args.worker_morphology_path.resolve()
+    cell = load_allen_all_active_cell(h, model_root, mechanism_root=model_root / "runtime")
+    metadata = json.loads((model_root / "model_metadata.json").read_text(encoding="utf-8"))
+    line = str(metadata.get("name", "")).split("_", 1)[-1].split(";")[0] or None
+    return {
+        "h": h,
+        "cell": cell,
+        "model_root": model_root,
+        "source_route": _segment_route(types, lengths),
+        "source_segment_types": types,
+        "source_segment_lengths": lengths,
+        "teacher_info": {"cell_role": "excitatory", "transgenic_line": line},
+    }
+
+
+def generator_settings(args: argparse.Namespace, morphology_path: Path | None = None,
+                       setup: dict[str, Any] | None = None) -> dict[str, Any]:
     """Every setting that determines a generated trace, for the shard sidecar and the run summary."""
     import neuron
 
@@ -654,6 +799,30 @@ def generator_settings(args: argparse.Namespace, morphology_path: Path | None = 
     }
     if morphology_path is not None:
         out["morphology_sha256"] = _sha256(morphology_path)
+    teacher = getattr(args, "worker_teacher", "hay") if args.worker else "hay"
+    out["teacher"] = teacher
+    if teacher == "allen_all_active" and setup is not None:
+        root, cell = setup["model_root"], setup["cell"]
+        mods = sorted((root / "runtime" / "mod").glob("*.mod"))
+        digest = hashlib.sha256()
+        for mod in mods:
+            digest.update(mod.name.encode() + mod.read_bytes())
+        out.update(
+            mechanisms_sha256=digest.hexdigest(),
+            mechanism_files=[mod.name for mod in mods],
+            template_hoc_sha256=None,
+            biophysics_hoc_sha256=None,
+            allen_model_id=cell.model_id,
+            allen_specimen_id=cell.specimen_id,
+            fit_parameters_sha256=_sha256(root / "fit_parameters.json"),
+            morphology_sha256=_sha256(root / "reconstruction.swc"),
+            v_init_mv=cell.v_init_mv,
+            celsius=cell.celsius,
+            # Stored voltages are the model's; Allen's recorded features correspond to v - junction potential.
+            junction_potential_mv=float(json.loads((root / "fit_parameters.json").read_text())["fitting"][0]
+                                        ["junction_potential"]),
+            axon="Allen truncated: two 30 um sections with the diameters of the reconstruction's first 60 um",
+        )
     return out
 
 

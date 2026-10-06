@@ -14,6 +14,14 @@ fast trough, upstroke/downstroke ratio). It also records whether an Allen
 The Allen features are fetched once from api.brain-map.org and cached next to
 the output. Simulations use the generator's v2 settings (d_lambda compartments,
 Hay's 60 um axon stub, 34 degrees C from the Hay biophysics).
+
+With `--allen-all-active-root` the same protocol runs on the Allen all-active
+models prepared by `scripts/prepare_allen_all_active.py` instead (Allen's own
+compartments, truncated axon, temperature and v_init). Each model loads its own
+mechanism library, so each runs in a separate process. Allen fits its models to
+recordings that are not corrected for the liquid junction potential (-14 mV in
+every fit_parameters.json), so the model voltage minus the junction potential is
+compared with the recorded features, as in AllenSDK.
 """
 
 from __future__ import annotations
@@ -21,6 +29,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
+import sys
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -71,13 +81,33 @@ class StepCell:
         self.t.record(h._ref_t)
         self.v.record(self.cell.soma[0](0.5)._ref_v)
 
+    v_init_mv = -76.0
+    junction_potential_mv = 0.0
+
     def run(self, amp_pa: float, *, delay=1000.0, dur=1000.0, tail=200.0) -> tuple[np.ndarray, np.ndarray]:
         h = self.h
         self.stim.delay, self.stim.dur, self.stim.amp = delay, dur, amp_pa / 1000.0
         h.dt = 0.025
-        h.finitialize(-76.0)
+        h.finitialize(self.v_init_mv)
         h.continuerun(delay + dur + tail)
-        return np.asarray(self.t), np.asarray(self.v)
+        return np.asarray(self.t), np.asarray(self.v) - self.junction_potential_mv
+
+
+class AllenStepCell(StepCell):
+    """One Allen all-active model with a somatic current clamp."""
+
+    def __init__(self, h, model_root: Path):
+        from axobench.generation.allen_all_active import load_allen_all_active_cell
+
+        self.h = h
+        self.cell = load_allen_all_active_cell(h, model_root, mechanism_root=model_root / "runtime")
+        self.v_init_mv = self.cell.v_init_mv
+        fitting = json.loads((Path(model_root) / "fit_parameters.json").read_text())["fitting"][0]
+        self.junction_potential_mv = float(fitting["junction_potential"])
+        self.stim = h.IClamp(self.cell.soma[0](0.5))
+        self.t, self.v = h.Vector(), h.Vector()
+        self.t.record(h._ref_t)
+        self.v.record(self.cell.soma[0](0.5)._ref_v)
 
 
 def ap_features(t: np.ndarray, v: np.ndarray, start: float, stop: float) -> dict[str, Any]:
@@ -100,8 +130,7 @@ def ap_features(t: np.ndarray, v: np.ndarray, start: float, stop: float) -> dict
     return out
 
 
-def validate(h, morphology: Path, *, nseg_policy: str, resolution_pa: float, fi_steps: int) -> dict[str, Any]:
-    cell = StepCell(h, morphology, nseg_policy)
+def validate(cell: StepCell, *, resolution_pa: float, fi_steps: int) -> dict[str, Any]:
     t, v = cell.run(-50.0)
     vrest = float(v[(t > 900) & (t < 1000)].mean())
     vss = float(v[(t > 1900) & (t < 2000)].mean())
@@ -137,7 +166,20 @@ def main() -> int:
     ap.add_argument("--nseg-policy", default="d_lambda")
     ap.add_argument("--rheobase-resolution-pa", type=float, default=10.0)
     ap.add_argument("--fi-steps", type=int, default=5)
+    ap.add_argument("--allen-all-active-root", type=Path,
+                    help="validate the all-active models under this root (specimen_<id>/model) instead")
+    ap.add_argument("--one-allen-model", type=Path, help=argparse.SUPPRESS)
+    ap.add_argument("--jobs", type=int, default=os.cpu_count(), help="parallel Allen models")
     args = ap.parse_args()
+    if args.one_allen_model:
+        from neuron import h
+
+        result = validate(AllenStepCell(h, args.one_allen_model), resolution_pa=args.rheobase_resolution_pa,
+                          fi_steps=args.fi_steps)
+        print(json.dumps(result))
+        return 0
+    if args.allen_all_active_root:
+        return validate_all_active(args)
 
     setup = gen.prepare_neuron("neuron", False)
     h = setup["h"]
@@ -146,11 +188,35 @@ def main() -> int:
         row: dict[str, Any] = {"morphology": m["id"]}
         if m["id"].startswith("specimen_"):
             row["allen"] = fetch_allen(int(m["id"].split("_")[1]), args.out.parent / "allen_cache")
-        row["model"] = validate(h, Path(m["path"]), nseg_policy=args.nseg_policy,
+        row["model"] = validate(StepCell(h, Path(m["path"]), args.nseg_policy),
                                 resolution_pa=args.rheobase_resolution_pa, fi_steps=args.fi_steps)
         rows[m["id"]] = row
         print(json.dumps(row), flush=True)
         args.out.write_text(json.dumps({"nseg_policy": args.nseg_policy, "morphologies": rows}, indent=2))
+    return 0
+
+
+def validate_all_active(args: argparse.Namespace) -> int:
+    from concurrent.futures import ThreadPoolExecutor
+
+    roots = [root for root in sorted(args.allen_all_active_root.glob("specimen_*/model"))
+             if not args.morphology or root.parent.name.split("_")[1] in args.morphology]
+
+    def one(model_root: Path) -> dict[str, Any]:
+        specimen = int(model_root.parent.name.split("_")[1])
+        out = subprocess.run([sys.executable, "-m", "axobench.generation.validate_biophysics", "--out", str(args.out),
+                              "--one-allen-model", str(model_root),
+                              "--rheobase-resolution-pa", str(args.rheobase_resolution_pa),
+                              "--fi-steps", str(args.fi_steps)],
+                             capture_output=True, text=True, check=True)
+        row = {"morphology": f"specimen_{specimen}", "allen": fetch_allen(specimen, args.out.parent / "allen_cache"),
+               "model": json.loads(out.stdout.strip().splitlines()[-1])}
+        print(json.dumps(row), flush=True)
+        return row
+
+    with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+        rows = {row["morphology"]: row for row in pool.map(one, roots)}
+    args.out.write_text(json.dumps({"teacher": "allen_all_active", "morphologies": rows}, indent=2))
     return 0
 
 

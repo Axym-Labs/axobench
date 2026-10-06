@@ -80,3 +80,67 @@ def test_v1_shards_without_generator_record_count_as_v1_only():
             "nseg_policy": "hay40", "soma_samples_per_ms": 0}
     assert gen._generator_matches({}, task)
     assert not gen._generator_matches({}, {**task, "data_version": "v2", "synapse_delay_ms": 0.0})
+
+
+def _allen_root(tmp_path, specimens=(111, 222)):
+    rows = []
+    for specimen in specimens:
+        model_root = tmp_path / f"specimen_{specimen}" / "model"
+        model_root.mkdir(parents=True)
+        rows.append({"specimen_id": specimen, "model_id": specimen + 1, "model_root": str(model_root)})
+    (tmp_path / "models.json").write_text(__import__("json").dumps(rows))
+    return tmp_path
+
+
+def test_v2_uses_allen_all_active_teachers_and_keeps_the_hay_cell(tmp_path):
+    root = _allen_root(tmp_path / "allen")
+    args = gen.apply_data_version(gen.build_parser().parse_args(
+        ["--data-version", "v2", "--allen-all-active-root", str(root), "--val-samples-per-morphology", "1",
+         "--intervention-samples-per-morphology", "1", "--intervention", "inh_dropout"]))
+    assert args.excitatory_teacher == "allen_all_active"
+    morphologies = gen.selected_morphologies(None, include_hay_cell=True, excitatory_teacher=args.excitatory_teacher,
+                                             allen_root=root)
+    assert [m["id"] for m in morphologies] == [gen.HAY_CELL_ID, "specimen_111", "specimen_222"]
+    assert [m["teacher"] for m in morphologies] == ["hay", "allen_all_active", "allen_all_active"]
+    out = tmp_path / "out"
+    tasks = gen.build_tasks(args, out, morphologies, ("inh_dropout",))
+    for task in tasks:
+        allen = task["morphology_id"] != gen.HAY_CELL_ID
+        assert task["teacher"] == ("allen_all_active" if allen else "hay")
+        assert task["nseg_policy"] == (gen.ALLEN_NSEG_POLICY if allen else "d_lambda")
+        assert task["source_route"] == str(out / "source_route.npz")
+
+
+def test_allen_morphology_selection_by_specimen(tmp_path):
+    root = _allen_root(tmp_path)
+    rows = gen.selected_morphologies(["222"], excitatory_teacher="allen_all_active", allen_root=root)
+    assert [r["id"] for r in rows] == ["specimen_222"]
+
+
+def test_v1_preset_matches_the_released_shards():
+    args = gen.apply_data_version(gen.build_parser().parse_args(["--data-version", "v1"]))
+    assert args.exc_gmax_scale == 1.0 and args.synapse_delay_ms == 1.0 and args.excitatory_teacher == "hay"
+
+
+def test_teacher_change_invalidates_existing_shards():
+    task = {"data_version": "v2", "synapse_delay_ms": 0.0, "input_routing": "all_sites_by_type",
+            "nseg_policy": gen.ALLEN_NSEG_POLICY, "soma_samples_per_ms": 4, "teacher": "allen_all_active"}
+    gen_meta = {k: task[k] for k in ("synapse_delay_ms", "input_routing", "nseg_policy", "soma_samples_per_ms")}
+    assert gen._generator_matches({"generator": {**gen_meta, "teacher": "allen_all_active"}}, task)
+    assert not gen._generator_matches({"generator": gen_meta}, task)
+
+
+def test_calibrated_gain_multiplies_the_excitatory_scale_of_allen_cells_only(tmp_path):
+    root = _allen_root(tmp_path / "allen")
+    cal = tmp_path / "gains.json"
+    cal.write_text(__import__("json").dumps({"gains": {"specimen_111": 0.5, "specimen_222": 3.0}}))
+    args = gen.apply_data_version(gen.build_parser().parse_args(
+        ["--data-version", "v2", "--allen-all-active-root", str(root), "--val-samples-per-morphology", "1",
+         "--intervention-samples-per-morphology", "0", "--exc-gain-calibration", str(cal)]))
+    morphologies = gen.selected_morphologies(None, include_hay_cell=True, excitatory_teacher="allen_all_active",
+                                             allen_root=root)
+    scales = {t["morphology_id"]: t["exc_gmax_scale"] for t in gen.build_tasks(args, tmp_path / "out", morphologies, ())}
+    assert scales == {gen.HAY_CELL_ID: 1.0, "specimen_111": 0.5, "specimen_222": 3.0}
+    cal.write_text(__import__("json").dumps({"gains": {"specimen_111": 0.5}}))
+    with pytest.raises(ValueError, match="specimen_222"):
+        gen.build_tasks(args, tmp_path / "out", morphologies, ())
