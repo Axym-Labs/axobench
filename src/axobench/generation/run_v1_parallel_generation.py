@@ -10,6 +10,13 @@ soma voltage at 4 kHz as well, adds the original NeuronIO (Hay) cell as a
 morphology, and uses excitatory gmax scale 1.0. Every option can be overridden
 individually, and every shard sidecar records the complete generator settings.
 
+Long runs can be paused and resumed. Shards are written atomically (temporary
+file, then rename), and `--resume` skips every complete shard. Creating the file
+`<output-root>/STOP` lets the running shards finish, starts no new ones, writes
+the manifests and exits; SIGINT or SIGTERM stops at once and kills the running
+workers, losing only their unfinished shards. Tasks are interleaved across
+morphologies, so a paused run holds a balanced partial dataset.
+
 `--excitatory-teacher` chooses the biophysics of the Allen cells: `hay` puts
 the Hay et al. (2011) densities on the v1 reconstructions; `allen_all_active`
 (v2) uses the Allen all-active models (Gouwens et al. 2018) prepared by
@@ -28,6 +35,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -196,6 +204,9 @@ def orchestrator_main(args: argparse.Namespace) -> int:
     if args.force and output_root.exists():
         shutil.rmtree(output_root)
     output_root.mkdir(parents=True, exist_ok=True)
+    if (output_root / "STOP").exists():
+        print(f"removing {output_root / 'STOP'} left by the previous run", flush=True)
+        (output_root / "STOP").unlink()
 
     morphologies = selected_morphologies(args.morphology, include_hay_cell=bool(args.include_hay_cell),
                                          excitatory_teacher=args.excitatory_teacher,
@@ -223,7 +234,7 @@ def orchestrator_main(args: argparse.Namespace) -> int:
     started = time.perf_counter()
     if any(task["teacher"] == "allen_all_active" for task in tasks):
         write_source_route(args, output_root)
-    run_tasks(tasks, args.parallelism)
+    finished = run_tasks(interleave_by_morphology(tasks), args.parallelism, stop_file=output_root / "STOP")
     write_split_manifests(output_root)
     write_morphology_index(args, output_root, morphologies)
     summary = {
@@ -254,6 +265,8 @@ def orchestrator_main(args: argparse.Namespace) -> int:
         "intervention_samples_per_morphology_by_condition": intervention_counts,
         "intervention_total_samples_per_morphology": sum(intervention_counts.values()),
         "tasks": len(tasks),
+        "tasks_finished_this_run": finished,
+        "complete": finished == len(tasks),
         "tasks_total": total_tasks,
         "tasks_skipped_existing": skipped_tasks,
         "samples": sum(task["samples"] for task in tasks),
@@ -542,76 +555,116 @@ def task_payload(
     }
 
 
-def run_tasks(tasks: list[dict[str, Any]], parallelism: int) -> None:
+def interleave_by_morphology(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Round-robin over morphologies, keeping each morphology's task order (seeds depend on shard index only)."""
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for task in tasks:
+        groups.setdefault(task["morphology_id"], []).append(task)
+    ordered = []
+    for offset in range(max((len(g) for g in groups.values()), default=0)):
+        ordered += [g[offset] for g in groups.values() if offset < len(g)]
+    return ordered
+
+
+def run_tasks(tasks: list[dict[str, Any]], parallelism: int, stop_file: Path | None = None) -> int:
+    """Run worker tasks; returns the number that finished.
+
+    If `stop_file` appears, no new task starts and the running ones are awaited.
+    SIGINT or SIGTERM terminates the running workers and raises KeyboardInterrupt.
+    """
     running: list[tuple[subprocess.Popen, dict[str, Any]]] = []
     pending = list(tasks)
-    while pending or running:
-        while pending and len(running) < parallelism:
-            task = pending.pop(0)
-            cmd = [
-                task["python"],
-                "-m",
-                "axobench.generation.run_v1_parallel_generation",
-                "--worker",
-                "--worker-kind",
-                task["kind"],
-                "--worker-output",
-                task["output"],
-                "--worker-morphology-id",
-                task["morphology_id"],
-                "--worker-morphology-path",
-                task["morphology_path"],
-                "--worker-split",
-                task["split"],
-                "--worker-samples",
-                str(task["samples"]),
-                "--worker-shard-index",
-                str(task["shard_index"]),
-                "--duration-ms",
-                str(task["duration_ms"]),
-                "--backend",
-                task["backend"],
-                "--seed",
-                str(task["seed"]),
-                "--teacher-balance-label",
-                task["teacher_balance_label"],
-                "--exc-gmax-scale",
-                str(task["exc_gmax_scale"]),
-                "--inh-gmax-scale",
-                str(task["inh_gmax_scale"]),
-                "--data-version",
-                task["data_version"],
-                "--synapse-delay-ms",
-                str(task["synapse_delay_ms"]),
-                "--input-routing",
-                task["input_routing"],
-                "--nseg-policy",
-                task["nseg_policy"],
-                "--soma-samples-per-ms",
-                str(task["soma_samples_per_ms"]),
-                "--worker-teacher",
-                task["teacher"],
-                "--worker-source-route",
-                task["source_route"],
-            ]
-            if task["intervention"]:
-                cmd += ["--worker-intervention", task["intervention"],
-                        "--worker-intervention-dose", str(task.get("intervention_dose", DEFAULT_DOSE[task["intervention"]]))]
-            if task["coreneuron_gpu"]:
-                cmd += ["--coreneuron-gpu"]
-            env = os.environ.copy()
-            env["PYTHONPATH"] = f"{ROOT / 'src'}:{ARTIFACTS}:{CORENEURON_PROBE}:{env.get('PYTHONPATH', '')}"
-            running.append((subprocess.Popen(cmd, cwd=ROOT, env=env), task))
-        next_running = []
-        for proc, task in running:
-            status = proc.poll()
-            if status is None:
-                next_running.append((proc, task))
-            elif status != 0:
-                raise RuntimeError(f"task failed with status {status}: {task}")
-        running = next_running
-        if running:
-            time.sleep(0.25)
+    finished = 0
+
+    def stop_now(signum, _frame):
+        for proc, _ in running:
+            proc.terminate()
+        for proc, _ in running:
+            try:
+                proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        raise KeyboardInterrupt(f"stopped by signal {signum}; rerun with --resume")
+
+    previous = {sig: signal.signal(sig, stop_now) for sig in (signal.SIGINT, signal.SIGTERM)}
+    try:
+        while pending or running:
+            if pending and stop_file is not None and stop_file.exists():
+                print(f"{stop_file} found: finishing {len(running)} running tasks, {len(pending)} left for --resume",
+                      flush=True)
+                pending = []
+            while pending and len(running) < parallelism:
+                task = pending.pop(0)
+                cmd = [
+                    task["python"],
+                    "-m",
+                    "axobench.generation.run_v1_parallel_generation",
+                    "--worker",
+                    "--worker-kind",
+                    task["kind"],
+                    "--worker-output",
+                    task["output"],
+                    "--worker-morphology-id",
+                    task["morphology_id"],
+                    "--worker-morphology-path",
+                    task["morphology_path"],
+                    "--worker-split",
+                    task["split"],
+                    "--worker-samples",
+                    str(task["samples"]),
+                    "--worker-shard-index",
+                    str(task["shard_index"]),
+                    "--duration-ms",
+                    str(task["duration_ms"]),
+                    "--backend",
+                    task["backend"],
+                    "--seed",
+                    str(task["seed"]),
+                    "--teacher-balance-label",
+                    task["teacher_balance_label"],
+                    "--exc-gmax-scale",
+                    str(task["exc_gmax_scale"]),
+                    "--inh-gmax-scale",
+                    str(task["inh_gmax_scale"]),
+                    "--data-version",
+                    task["data_version"],
+                    "--synapse-delay-ms",
+                    str(task["synapse_delay_ms"]),
+                    "--input-routing",
+                    task["input_routing"],
+                    "--nseg-policy",
+                    task["nseg_policy"],
+                    "--soma-samples-per-ms",
+                    str(task["soma_samples_per_ms"]),
+                    "--worker-teacher",
+                    task["teacher"],
+                    "--worker-source-route",
+                    task["source_route"],
+                ]
+                if task["intervention"]:
+                    cmd += ["--worker-intervention", task["intervention"],
+                            "--worker-intervention-dose", str(task.get("intervention_dose", DEFAULT_DOSE[task["intervention"]]))]
+                if task["coreneuron_gpu"]:
+                    cmd += ["--coreneuron-gpu"]
+                env = os.environ.copy()
+                env["PYTHONPATH"] = f"{ROOT / 'src'}:{ARTIFACTS}:{CORENEURON_PROBE}:{env.get('PYTHONPATH', '')}"
+                running.append((subprocess.Popen(cmd, cwd=ROOT, env=env), task))
+            next_running = []
+            for proc, task in running:
+                status = proc.poll()
+                if status is None:
+                    next_running.append((proc, task))
+                elif status != 0:
+                    raise RuntimeError(f"task failed with status {status}: {task}")
+                else:
+                    finished += 1
+            running = next_running
+            if running:
+                time.sleep(0.25)
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+    return finished
 
 
 def task_is_complete(task: dict[str, Any]) -> bool:
@@ -725,9 +778,9 @@ def worker_main(args: argparse.Namespace) -> int:
         high_res["soma_mv_hr" if args.worker_kind == "split" else "baseline_soma_mv_hr"] = np.stack(baseline_soma_hr).astype(np.float32)
     if intervention_soma_hr:
         high_res["intervention_soma_mv_hr"] = np.stack(intervention_soma_hr).astype(np.float32)
+    partial = worker_output.with_name(worker_output.name + ".partial")
     if args.worker_kind == "split":
-        np.savez_compressed(
-            worker_output,
+        arrays = dict(
             inputs=np.stack(baseline_inputs).astype(np.int8, copy=False),
             targets=np.stack(baseline_targets).astype(np.float32, copy=False),
             soma_mv=np.stack(baseline_soma).astype(np.float32, copy=False),
@@ -735,8 +788,7 @@ def worker_main(args: argparse.Namespace) -> int:
             **high_res,
         )
     else:
-        np.savez_compressed(
-            worker_output,
+        arrays = dict(
             **high_res,
             baseline_inputs=np.stack(baseline_inputs).astype(np.int8, copy=False),
             baseline_targets=np.stack(baseline_targets).astype(np.float32, copy=False),
@@ -747,6 +799,9 @@ def worker_main(args: argparse.Namespace) -> int:
             changed_event_mask=np.stack(changed_masks).astype(bool, copy=False),
             sample_ids=np.asarray(sample_ids),
         )
+    with partial.open("wb") as handle:
+        np.savez_compressed(handle, **arrays)
+    os.replace(partial, worker_output)
     metadata = {
         "kind": args.worker_kind,
         "backend": args.backend,
@@ -766,7 +821,9 @@ def worker_main(args: argparse.Namespace) -> int:
         "input_routing": _summarize_input_routing(sample_rows),
         "generator": generator_settings(args, morphology_path=args.worker_morphology_path, setup=setup),
     }
-    worker_output.with_suffix(".json").write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    partial_json = worker_output.with_name(worker_output.stem + ".json.partial")
+    partial_json.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(partial_json, worker_output.with_suffix(".json"))
     return 0
 
 
