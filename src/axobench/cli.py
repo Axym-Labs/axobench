@@ -30,6 +30,7 @@ from axobench.benchmark.runner import (
 from axobench.benchmark.selectors import V1DatasetLayout
 from axobench.data import repack_shards_as_npy, write_demo_shards
 from axobench.generation import ArborHeteroConfig, parse_split_samples, write_arbor_hetero_dataset, write_arbor_hetero_splits
+from axobench.hub import POPULATION_SPLITS, download_dataset, download_population_dataset
 from axobench.neuronio_raw import convert_neuronio_pickles
 
 
@@ -37,6 +38,23 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(prog="axobench")
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    download = subparsers.add_parser(
+        "download-data",
+        help="download the public AxoBench datasets from the Hugging Face Hub",
+    )
+    download.add_argument(
+        "--output",
+        help="dataset root; defaults to $AXOBENCH_DATA_DIR/v1 (or .../population with --population)",
+    )
+    download.add_argument("--splits", help="comma-separated splits; default val (train,val with --population)")
+    download.add_argument(
+        "--interventions",
+        default="all",
+        help="comma-separated intervention conditions, 'all', or 'none'",
+    )
+    download.add_argument("--population", action="store_true", help="download the population-context corpus instead")
+    download.add_argument("--revision", help="Hub branch, tag, or commit to download")
 
     demo = subparsers.add_parser("make-demo-data", help="write deterministic demo NPZ shards")
     demo.add_argument("--output", required=True)
@@ -337,6 +355,32 @@ def main(argv: list[str] | None = None) -> int:
             print(str(error))
             return 2
         print(json.dumps(manifest, indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "download-data":
+        try:
+            if args.population:
+                root = download_population_dataset(
+                    args.output,
+                    splits=_parse_suites(args.splits) if args.splits else POPULATION_SPLITS,
+                    revision=args.revision,
+                )
+            else:
+                interventions = _parse_suites(args.interventions)
+                root = download_dataset(
+                    args.output,
+                    splits=_parse_suites(args.splits or "val"),
+                    interventions=(
+                        None if interventions == ("none",)
+                        else "all" if interventions == ("all",)
+                        else interventions
+                    ),
+                    revision=args.revision,
+                )
+        except (FileNotFoundError, ValueError) as error:
+            print(str(error))
+            return 2
+        print(json.dumps({"dataset_root": str(root)}, indent=2, sort_keys=True))
         return 0
 
     if args.command == "make-demo-data":

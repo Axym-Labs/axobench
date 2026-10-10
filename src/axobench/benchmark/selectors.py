@@ -59,7 +59,11 @@ class V1DatasetLayout:
         interventions_root = self.root / "interventions"
         if not interventions_root.exists():
             return ()
-        names = {path.name for path in interventions_root.iterdir() if path.is_dir()}
+        names = {
+            path.name
+            for path in interventions_root.iterdir()
+            if path.is_dir() and not path.name.startswith(".")
+        }
         ordered = [name for name in INTERVENTION_CONDITIONS if name in names]
         ordered.extend(sorted(names - set(ordered)))
         return tuple(ordered)

@@ -152,7 +152,7 @@ class ModelEvaluationCache:
 def evaluate_model(
     model_fn: Callable[[np.ndarray], np.ndarray],
     *,
-    dataset_root: str | Path,
+    dataset_root: str | Path | None = None,
     model_id: str = "model",
     max_samples: int | None = None,
     batch_size: int = DEFAULT_BATCH_SIZE,
@@ -167,6 +167,9 @@ def evaluate_model(
 ) -> dict[str, Any]:
     """Run batched model inference and evaluate a v1-style dataset.
 
+    Without ``dataset_root``, the validation split and the requested
+    interventions are downloaded from the Hugging Face Hub on first use (see
+    ``axobench.hub.download_dataset``).
     Full synaptic input tensors are released after each batch. Only model
     outputs, targets, raw soma voltage, and two compact E/I event-count channels
     are retained for the diagnostic pass.
@@ -189,7 +192,12 @@ def evaluate_model(
     if multiple_morphologies and morphology_id is not None:
         raise ValueError("morphology_id cannot be combined with multiple_morphologies=True")
     started_at = time.perf_counter()
-    root = Path(dataset_root)
+    intervention_names = tuple(intervention_names) if intervention_names is not None else None
+    root = _resolve_dataset_root(
+        dataset_root,
+        intervention_names=intervention_names,
+        max_interventions=max_interventions,
+    )
     validation = ShardedNeuronIODataset(root / "val", cache_shards=cache_shards)
     selected_indices, selected_morphologies = _validation_indices(
         validation,
@@ -267,7 +275,7 @@ def evaluate_model(
 def create_model_evaluation_cache(
     model_fn: Callable[[np.ndarray], np.ndarray],
     *,
-    dataset_root: str | Path,
+    dataset_root: str | Path | None = None,
     model_id: str = "baseline",
     max_samples: int | None = None,
     batch_size: int = DEFAULT_BATCH_SIZE,
@@ -344,7 +352,7 @@ def evaluate_model_against_cache(
     candidate_model_fn: Callable[[np.ndarray], np.ndarray],
     *,
     baseline_cache: ModelEvaluationCache | str | Path,
-    dataset_root: str | Path,
+    dataset_root: str | Path | None = None,
     candidate_id: str = "candidate",
     max_samples: int | None = None,
     batch_size: int = DEFAULT_BATCH_SIZE,
@@ -853,10 +861,27 @@ def _evaluation_cache_protocol(
     )
 
 
+def _resolve_dataset_root(
+    dataset_root: str | Path | None,
+    *,
+    intervention_names: tuple[str, ...] | None,
+    max_interventions: int,
+) -> Path:
+    if dataset_root is not None:
+        return Path(dataset_root)
+    from axobench.hub import download_dataset
+
+    if max_interventions == 0:
+        interventions: tuple[str, ...] | str | None = None
+    else:
+        interventions = "all" if intervention_names is None else intervention_names
+    return download_dataset(splits=("val",), interventions=interventions)
+
+
 def _collect_model_outputs(
     model_fn: Callable[[np.ndarray], np.ndarray],
     *,
-    dataset_root: str | Path,
+    dataset_root: str | Path | None = None,
     max_samples: int,
     batch_size: int,
     max_intervention_samples: int,
@@ -873,7 +898,11 @@ def _collect_model_outputs(
         raise ValueError("intervention_workers must be positive")
     if multiple_morphologies and morphology_id is not None:
         raise ValueError("morphology_id cannot be combined with multiple_morphologies=True")
-    root = Path(dataset_root)
+    root = _resolve_dataset_root(
+        dataset_root,
+        intervention_names=intervention_names,
+        max_interventions=max_interventions,
+    )
     validation = ShardedNeuronIODataset(root / "val", cache_shards=cache_shards)
     selected_indices, selected_morphologies = _validation_indices(
         validation,
@@ -1598,7 +1627,9 @@ def _run_dataset_interventions(
     requested = set(intervention_names) if intervention_names is not None else None
     directories = [
         path for path in sorted(interventions_root.iterdir())
-        if path.is_dir() and (requested is None or path.name in requested)
+        if path.is_dir()
+        and not path.name.startswith(".")
+        and (requested is None or path.name in requested)
     ][:max_interventions]
     missing = requested - {path.name for path in directories} if requested is not None else set()
     if missing:

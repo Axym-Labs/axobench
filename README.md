@@ -25,6 +25,28 @@ experiments stay in the separate AxoSim model repository. AxoBench evaluates
 caller-supplied prediction functions or stored prediction/diagnostic artifacts;
 it does not ship BranchELM, Mamba, RNN, or training code.
 
+## Download the data
+
+The released corpora live on the Hugging Face Hub:
+[`Axym-Labs/axobench`](https://huggingface.co/datasets/Axym-Labs/axobench)
+(train/val/test),
+[`Axym-Labs/axobench-interventions`](https://huggingface.co/datasets/Axym-Labs/axobench-interventions)
+(paired interventions), and
+[`Axym-Labs/axobench-population`](https://huggingface.co/datasets/Axym-Labs/axobench-population)
+(population context). `download-data` assembles the first two into the
+dataset-root layout the evaluator reads:
+
+```bash
+axobench download-data                          # val + all interventions (~8.5 GB)
+axobench download-data --splits train,val,test  # full corpus
+axobench download-data --population             # population-context corpus
+```
+
+The same is available from Python as `axobench.hub.download_dataset` and
+`download_population_dataset`. Data goes to `$AXOBENCH_DATA_DIR` (default
+`~/.cache/axobench`) unless `--output` is given. Complete folders are skipped,
+so repeated calls work offline, and `--revision` pins a Hub commit.
+
 ## Population-context extension
 
 The population-context route preserves source identity, E/I role, causal
@@ -49,16 +71,17 @@ model selection.
 ## Iterative Model Evaluation
 
 `evaluate_model` accepts any batched NumPy prediction callable and a v1-style
-dataset root. It calibrates the spike threshold on a held-out fraction of the
-selected validation traces, computes the core metric set, evaluates available
-paired interventions, and returns a fixed 24-row attention panel.
+dataset root; when `dataset_root` is omitted, the validation split and the
+requested interventions are downloaded on first use. It calibrates the spike
+threshold on a held-out fraction of the selected validation traces, computes
+the core metric set, evaluates available paired interventions, and returns a
+fixed 24-row attention panel.
 
 ```python
 from axobench.benchmark import EvaluationConfig, evaluate_model, format_evaluation_report
 
 report = evaluate_model(
     predict,
-    dataset_root="data/axobench-v1",
     model_id="candidate-17",
     config=EvaluationConfig(default_spike_threshold=0.0),
 )
