@@ -17,6 +17,8 @@ computed exactly with the O(n log n) algorithm of Johnson and Mizoguchi
 
 from __future__ import annotations
 
+import hashlib
+
 import numpy as np
 
 
@@ -47,20 +49,11 @@ def medcouple(values: np.ndarray) -> float:
     zminus = z[z <= 0.0]  # descending
     p, q = zplus.size, zminus.size
 
-    def kernel(i: int, j: int) -> float:
+    def kernel(i: np.ndarray, j: np.ndarray) -> np.ndarray:
         a, b = zplus[i], zminus[j]
-        if a == b:  # both zero: ties at the median
-            return float(np.sign(p - 1 - i - j))
-        return (a + b) / (a - b)
-
-    def kernel_row(i: int, js: np.ndarray) -> np.ndarray:
-        a = zplus[i]
-        b = zminus[js]
-        out = np.empty(js.size, dtype=np.float64)
-        tie = a == b
-        out[~tie] = (a + b[~tie]) / (a - b[~tie])
-        out[tie] = np.sign(p - 1 - i - js[tie])
-        return out
+        with np.errstate(divide="ignore", invalid="ignore"):
+            # a == b only for ties at the median (both zero).
+            return np.where(a == b, np.sign(p - 1 - i - j), (a + b) / (a - b))
 
     left = np.zeros(p, dtype=np.int64)
     right = np.full(p, q - 1, dtype=np.int64)
@@ -69,28 +62,16 @@ def medcouple(values: np.ndarray) -> float:
     median_index = right_total // 2
     while right_total - left_total > p:
         rows = np.flatnonzero(left <= right)
-        row_medians = np.array(
-            [kernel(int(i), int((left[i] + right[i]) // 2)) for i in rows]
-        )
+        row_medians = kernel(rows, (left[rows] + right[rows]) // 2)
         weights = (right[rows] - left[rows] + 1).astype(np.float64)
         order = np.argsort(row_medians, kind="mergesort")
         cumulative = np.cumsum(weights[order])
         guess = row_medians[order][np.searchsorted(cumulative, 0.5 * cumulative[-1])]
 
-        # P: for each row, count of kernel values > guess (columns 0..P-1).
+        # P: for each row, index of the last kernel value > guess.
         # Q: for each row, count of kernel values >= guess.
-        p_bounds = np.empty(p, dtype=np.int64)
-        j = 0
-        for i in range(p - 1, -1, -1):
-            while j < q and kernel(i, j) > guess:
-                j += 1
-            p_bounds[i] = j - 1
-        q_bounds = np.empty(p, dtype=np.int64)
-        j = q - 1
-        for i in range(p):
-            while j >= 0 and kernel(i, j) < guess:
-                j -= 1
-            q_bounds[i] = j + 1
+        p_bounds = _row_counts(kernel, p, q, guess, strict=True) - 1
+        q_bounds = _row_counts(kernel, p, q, guess, strict=False)
         sum_p = int(np.sum(p_bounds + 1))
         sum_q = int(np.sum(q_bounds))
         if median_index <= sum_p - 1:
@@ -102,12 +83,31 @@ def medcouple(values: np.ndarray) -> float:
         else:
             return float(guess)
 
-    remaining = []
-    for i in range(p):
-        if left[i] <= right[i]:
-            remaining.append(kernel_row(i, np.arange(left[i], right[i] + 1)))
-    remaining_values = np.sort(np.concatenate(remaining))[::-1]
+    widths = np.maximum(right - left + 1, 0)
+    rows = np.repeat(np.arange(p), widths)
+    columns = np.arange(widths.sum()) - np.repeat(np.cumsum(widths) - widths, widths) + np.repeat(left, widths)
+    remaining_values = np.sort(kernel(rows, columns))[::-1]
     return float(remaining_values[median_index - left_total])
+
+
+def _row_counts(kernel, p: int, q: int, guess: float, *, strict: bool) -> np.ndarray:
+    """Per row i, the number of columns j with kernel(i, j) > guess (strict) or >= guess.
+
+    Every kernel row is non-increasing in j, so the hits form a prefix whose
+    length a binary search over all rows at once finds with the exact kernel.
+    """
+    rows = np.arange(p)
+    lo = np.zeros(p, dtype=np.int64)  # hits known for columns < lo
+    hi = np.full(p, q, dtype=np.int64)  # misses known for columns >= hi
+    while True:
+        active = rows[lo < hi]
+        if active.size == 0:
+            return lo
+        mid = (lo[active] + hi[active]) // 2
+        values = kernel(active, mid)
+        hit = values > guess if strict else values >= guess
+        lo[active[hit]] = mid[hit] + 1
+        hi[active[~hit]] = mid[~hit]
 
 
 def adjusted_box_fences(values: np.ndarray, *, coef: float = 1.5, a: float = -4.0, b: float = 3.0) -> tuple[float, float, float]:
@@ -147,6 +147,23 @@ def _pchip_zero_slope(x: np.ndarray, knots: np.ndarray, levels: np.ndarray) -> n
     return out
 
 
+_FENCE_CACHE: dict[tuple[int, str], tuple[float, float, float]] = {}
+
+
+def _cached_fences(values: np.ndarray) -> tuple[float, float, float]:
+    """``adjusted_box_fences`` memoized on the content of ``values``.
+
+    The evaluator, paired bootstrap and null references score many predictions
+    against the same teacher traces; the fences depend only on those.
+    """
+    key = (values.size, hashlib.sha1(np.ascontiguousarray(values).tobytes()).hexdigest())
+    if key not in _FENCE_CACHE:
+        if len(_FENCE_CACHE) >= 64:
+            _FENCE_CACHE.pop(next(iter(_FENCE_CACHE)))
+        _FENCE_CACHE[key] = adjusted_box_fences(values)
+    return _FENCE_CACHE[key]
+
+
 def iron_relevance(target: np.ndarray, *, reference: np.ndarray | None = None) -> np.ndarray:
     """IRon default relevance ``phi(y, phi.control(y))``.
 
@@ -155,7 +172,7 @@ def iron_relevance(target: np.ndarray, *, reference: np.ndarray | None = None) -
     """
     y = np.asarray(target, dtype=np.float64)
     ref = y if reference is None else np.asarray(reference, dtype=np.float64)
-    low, median, high = adjusted_box_fences(ref.reshape(-1))
+    low, median, high = _cached_fences(ref.reshape(-1))
     knots = np.array([low, median, high])
     levels = np.array([1.0, 0.0, 1.0])
     return _pchip_zero_slope(y.reshape(-1), knots, levels).reshape(y.shape)
