@@ -24,6 +24,8 @@ from axobench.data import ShardedNeuronIODataset
 from axobench.metrics import (
     _tail_relevance,
     dynamics_sera,
+    iron_dynamics_sera,
+    iron_voltage_sera,
     prevalence_matched_threshold,
     response_sera,
     spike_event_confusion,
@@ -670,6 +672,22 @@ def evaluate_predictions(
         timestep_ms=cfg.timestep_ms,
     )
 
+    iron_voltage = iron_voltage_sera(
+        pred_score,
+        tgt_score,
+        raw_soma_mv=raw_score,
+        soma_scale=cfg.soma_scale,
+        soma_bias_mv=cfg.soma_bias_mv,
+    )
+    iron_dynamics = iron_dynamics_sera(
+        pred_score,
+        tgt_score,
+        raw_soma_mv=raw_score,
+        soma_scale=cfg.soma_scale,
+        soma_bias_mv=cfg.soma_bias_mv,
+        timestep_ms=cfg.timestep_ms,
+    )
+
     intervention_reports = [_evaluate_intervention(item, cfg) for item in interventions]
     response_sera_value = _root_mean_square(
         [item["response_root_sera_mv"] for item in intervention_reports]
@@ -680,10 +698,22 @@ def evaluate_predictions(
 
     metrics = [
         _metric(
+            "voltage_sera_iron_per_spike_mv2",
+            iron_voltage["voltage_sera_iron_per_spike_mv2"],
+            "mV^2 per spike",
+            "IRon-default SERA (adjusted-boxplot relevance on teacher voltage) per teacher spike",
+        ),
+        _metric(
+            "dynamics_sera_iron_per_spike_mv2_per_ms2",
+            iron_dynamics["dynamics_sera_iron_per_spike_mv2_per_ms2"],
+            "mV^2/ms^2 per spike",
+            "IRon-default SERA (adjusted-boxplot relevance on teacher dV/dt) per teacher spike",
+        ),
+        _metric(
             "voltage_sera_mv2",
             voltage["voltage_sera_mv2"],
             "mV^2",
-            "support-normalized squared teacher-relevance voltage error",
+            "legacy: support-normalized squared teacher-relevance voltage error",
         ),
         _metric(
             "voltage_root_sera_mv",
@@ -695,7 +725,7 @@ def evaluate_predictions(
             "dynamics_sera_mv2_per_ms2",
             dynamics["dynamics_sera_mv2_per_ms2"],
             "mV^2/ms^2",
-            "support-normalized squared voltage-transition error",
+            "legacy: support-normalized squared voltage-transition error",
         ),
         _metric(
             "dynamics_root_sera_mv_per_ms",
@@ -1398,6 +1428,24 @@ def _paired_metric_bootstrap(
         np.diff(baseline_mv, axis=1) / config.timestep_ms - target_rate,
         transition_relevance,
     )
+    from axobench.relevance import iron_relevance, iron_threshold_weights
+
+    iron_voltage_weights = iron_threshold_weights(iron_relevance(target_mv))
+    iron_rate_weights = iron_threshold_weights(iron_relevance(target_rate))
+    trace_spikes = (target_score[..., 0] > 0.5).sum(axis=1).astype(np.float64)
+    candidate_iron_voltage = ((candidate_mv - target_mv) ** 2 * iron_voltage_weights).sum(axis=1)
+    baseline_iron_voltage = ((baseline_mv - target_mv) ** 2 * iron_voltage_weights).sum(axis=1)
+    candidate_iron_dynamics = (
+        (np.diff(candidate_mv, axis=1) / config.timestep_ms - target_rate) ** 2 * iron_rate_weights
+    ).sum(axis=1)
+    baseline_iron_dynamics = (
+        (np.diff(baseline_mv, axis=1) / config.timestep_ms - target_rate) ** 2 * iron_rate_weights
+    ).sum(axis=1)
+
+    def _per_spike(values: np.ndarray, indices: np.ndarray) -> float:
+        spikes = float(trace_spikes[indices].sum())
+        return float(values[indices].sum() / spikes) if spikes else float("nan")
+
     candidate_f1 = _f1_trace_statistics(
         candidate_score[..., 0],
         target_score[..., 0] > 0.5,
@@ -1418,6 +1466,8 @@ def _paired_metric_bootstrap(
         config,
     )
     values = {
+        "voltage_sera_iron_per_spike_mv2": [],
+        "dynamics_sera_iron_per_spike_mv2_per_ms2": [],
         "voltage_sera_mv2": [],
         "voltage_root_sera_mv": [],
         "dynamics_sera_mv2_per_ms2": [],
@@ -1433,6 +1483,12 @@ def _paired_metric_bootstrap(
     exact_step, tolerant_step = config.selected_f1_steps
     for _ in range(replicates):
         indices = _draw_stratified_bootstrap(ordinary_groups, rng)
+        values["voltage_sera_iron_per_spike_mv2"].append(
+            _per_spike(candidate_iron_voltage, indices) - _per_spike(baseline_iron_voltage, indices)
+        )
+        values["dynamics_sera_iron_per_spike_mv2_per_ms2"].append(
+            _per_spike(candidate_iron_dynamics, indices) - _per_spike(baseline_iron_dynamics, indices)
+        )
         values["voltage_sera_mv2"].append(
             _sera_from_trace_statistics(*candidate_voltage, indices)
             - _sera_from_trace_statistics(*baseline_voltage, indices)

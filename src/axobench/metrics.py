@@ -737,3 +737,71 @@ def _trapezoid(y: np.ndarray, x: np.ndarray) -> float:
     if hasattr(np, "trapezoid"):
         return float(np.trapezoid(y, x))
     return float(np.trapz(y, x))
+
+
+def iron_voltage_sera(
+    prediction: np.ndarray,
+    target: np.ndarray,
+    *,
+    raw_soma_mv: np.ndarray | None = None,
+    soma_scale: float = 0.1,
+    soma_bias_mv: float = -67.7,
+    ignore_start: int = 0,
+) -> dict[str, Any]:
+    """IRon-default voltage SERA per teacher spike.
+
+    Relevance is IRon's default ``phi`` on the teacher somatic voltage
+    (adjusted-boxplot extremes; :mod:`axobench.relevance`), derived from the
+    pooled scored voltages. SERA is IRon's threshold area of summed squared
+    errors, divided by the number of teacher spikes in the scored region.
+    """
+    from axobench.relevance import iron_relevance, iron_threshold_weights
+
+    pred, tgt, raw = _prepare_prediction_target(
+        prediction, target, raw_soma_mv=raw_soma_mv, ignore_start=ignore_start
+    )
+    pred_mv = pred[..., 1] / soma_scale + soma_bias_mv
+    target_mv = raw if raw is not None else tgt[..., 1] / soma_scale + soma_bias_mv
+    spikes = int((tgt[..., 0] > 0.5).sum())
+    weights = iron_threshold_weights(iron_relevance(target_mv))
+    area = float(np.sum((pred_mv - target_mv) ** 2 * weights))
+    return {
+        "voltage_sera_iron_mv2": area,
+        "voltage_sera_iron_per_spike_mv2": area / spikes if spikes else float("nan"),
+        "teacher_spikes": spikes,
+        "relevance_mean": float(np.mean(weights)),
+    }
+
+
+def iron_dynamics_sera(
+    prediction: np.ndarray,
+    target: np.ndarray,
+    *,
+    raw_soma_mv: np.ndarray | None = None,
+    soma_scale: float = 0.1,
+    soma_bias_mv: float = -67.7,
+    timestep_ms: float = 1.0,
+    ignore_start: int = 0,
+) -> dict[str, Any]:
+    """IRon-default SERA of the voltage rate of change, per teacher spike.
+
+    Relevance is IRon's default ``phi`` on the teacher dV/dt.
+    """
+    from axobench.relevance import iron_relevance, iron_threshold_weights
+
+    pred, tgt, raw = _prepare_prediction_target(
+        prediction, target, raw_soma_mv=raw_soma_mv, ignore_start=ignore_start
+    )
+    pred_mv = pred[..., 1] / soma_scale + soma_bias_mv
+    target_mv = raw if raw is not None else tgt[..., 1] / soma_scale + soma_bias_mv
+    spikes = int((tgt[..., 0] > 0.5).sum())
+    pred_rate = np.diff(pred_mv, axis=1) / timestep_ms
+    target_rate = np.diff(target_mv, axis=1) / timestep_ms
+    weights = iron_threshold_weights(iron_relevance(target_rate))
+    area = float(np.sum((pred_rate - target_rate) ** 2 * weights))
+    return {
+        "dynamics_sera_iron_mv2_per_ms2": area,
+        "dynamics_sera_iron_per_spike_mv2_per_ms2": area / spikes if spikes else float("nan"),
+        "teacher_spikes": spikes,
+        "relevance_mean": float(np.mean(weights)),
+    }

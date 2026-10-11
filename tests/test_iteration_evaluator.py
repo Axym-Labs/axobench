@@ -201,6 +201,8 @@ def test_paired_comparison_identifies_consistent_candidate_improvement() -> None
 
     rows = {row["id"]: row for row in comparison["comparison"]}
     assert set(rows) == {
+        "voltage_sera_iron_per_spike_mv2",
+        "dynamics_sera_iron_per_spike_mv2_per_ms2",
         "voltage_sera_mv2",
         "voltage_root_sera_mv",
         "dynamics_sera_mv2_per_ms2",
@@ -266,7 +268,7 @@ def test_paired_comparison_writes_json_and_tidy_csv(tmp_path) -> None:
     )
     with csv_path.open(newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
-    assert len(rows) == 10
+    assert len(rows) == 12
     assert {row["assessment"] for row in rows} == {"uncertain"}
 
 
@@ -358,7 +360,7 @@ def test_report_format_is_deterministic_and_bounded() -> None:
     assert "spike_f1_exact" in rendered
     assert "mV/ms" in rendered
     assert "YES = early watch" in rendered
-    assert len(rendered.splitlines()) <= 45
+    assert len(rendered.splitlines()) <= 47
     assert rendered == format_evaluation_report(report)
 
 
@@ -603,7 +605,7 @@ def test_machine_readable_report_writes_json_or_tidy_csv_only_when_called(
     with csv_path.open(newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
     assert {row["row_type"] for row in rows} == {"metric", "diagnostic", "intervention"}
-    assert len([row for row in rows if row["row_type"] == "metric"]) == 10
+    assert len([row for row in rows if row["row_type"] == "metric"]) == 12
     assert len([row for row in rows if row["row_type"] == "diagnostic"]) == 24
     exact = next(row for row in rows if row["id"] == "spike_f1_exact")
     assert exact["model_id"] == "candidate"
