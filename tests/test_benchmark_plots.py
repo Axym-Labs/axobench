@@ -13,9 +13,9 @@ def test_core_metric_artifact_promotes_dynamics_sera(tmp_path):
             {
                 "model_id": "branch_elm_m5",
                 "n_parameters": 10_000,
-                "voltage_sera_mv2": 16.0,
-                "dynamics_sera_mv2_per_ms2": 4.0,
-                "mean_response_sera_mv2": 9.0,
+                "voltage_sera_iron_per_spike_mv2": 16.0,
+                "dynamics_sera_iron_per_spike_mv2_per_ms2": 4.0,
+                "response_sera_iron_per_spike_mv2": 9.0,
                 "spike_f1_area": 0.4,
                 "spike_f1_curve": [
                     {"tolerance_steps": 0, "f1": 0.2},
@@ -25,9 +25,9 @@ def test_core_metric_artifact_promotes_dynamics_sera(tmp_path):
             {
                 "model_id": "axosim",
                 "n_parameters": 20_000,
-                "voltage_sera_mv2": 9.0,
-                "dynamics_sera_mv2_per_ms2": 1.0,
-                "mean_response_sera_mv2": 4.0,
+                "voltage_sera_iron_per_spike_mv2": 9.0,
+                "dynamics_sera_iron_per_spike_mv2_per_ms2": 1.0,
+                "response_sera_iron_per_spike_mv2": 4.0,
                 "spike_f1_area": 0.7,
                 "spike_f1_curve": [
                     {"tolerance_steps": 0, "f1": 0.6},
@@ -45,8 +45,9 @@ def test_core_metric_artifact_promotes_dynamics_sera(tmp_path):
 
     table = (tmp_path / "table01_core_metric_set.md").read_text()
     pareto = (tmp_path / "fig02_sera_model_size_pareto.svg").read_text()
-    assert "Dynamics SERA (mV²/ms²)" in table
-    assert "Dynamics SERA (mV²/ms²)" in pareto
+    assert "Dynamics SERA (mV²/ms²/spike)" in table
+    assert "Dynamics SERA (mV²/ms²/spike)" in pareto
+    assert "| branch_elm_m5 | 10000 | 16 | 4 | 9 |" in table
     assert len(artifacts["figures"]) == 3
 
 

@@ -289,8 +289,12 @@ class BenchmarkSuite:
                 "state_trace_shape_distance": m1.get("state_trace_shape_distance"),
                 "spike_train_distance": m1.get("spike_train_distance"),
                 "spike_auc": m1.get("spike_auc"),
-                "voltage_sera_mv2": m1.get("voltage_sera_mv2"),
-                "voltage_root_sera_mv": m1.get("voltage_root_sera_mv"),
+                "voltage_sera_iron_per_spike_mv2": m1.get(
+                    "voltage_sera_iron_per_spike_mv2"
+                ),
+                "dynamics_sera_iron_per_spike_mv2_per_ms2": m1.get(
+                    "dynamics_sera_iron_per_spike_mv2_per_ms2"
+                ),
                 "spike_mean_f1": m1.get("spike_mean_f1"),
                 "spike_f1_area": m1.get("spike_f1_area"),
                 "spike_brier": m1.get("spike_brier"),
@@ -588,18 +592,12 @@ def _compute_m1_trace_fidelity(
                 + (1.0 - spike_labels) * np.log(1.0 - clipped)
             )
         ),
-        "voltage_sera_mv2": core_metrics["voltage_sera_mv2"],
-        "voltage_root_sera_mv": core_metrics["voltage_root_sera_mv"],
-        "voltage_sera_over_rmse": core_metrics["voltage"]["voltage_sera_over_rmse"],
-        "voltage_relevance_mean": core_metrics["voltage"]["relevance_mean"],
-        "voltage_relevance_support_ge_0_5": core_metrics["voltage"][
-            "relevance_support_ge_0_5"
+        "voltage_sera_iron_per_spike_mv2": core_metrics[
+            "voltage_sera_iron_per_spike_mv2"
         ],
-        "voltage_relevance_support_ge_0_9": core_metrics["voltage"][
-            "relevance_support_ge_0_9"
+        "dynamics_sera_iron_per_spike_mv2_per_ms2": core_metrics[
+            "dynamics_sera_iron_per_spike_mv2_per_ms2"
         ],
-        "dynamics_sera_mv2_per_ms2": core_metrics["dynamics_sera_mv2_per_ms2"],
-        "dynamics_root_sera_mv_per_ms": core_metrics["dynamics_root_sera_mv_per_ms"],
         "spike_mean_f1": core_metrics["spike_mean_f1"],
         "spike_f1_area": core_metrics["spike_f1_area"],
         "spike_f1_t_min_steps": core_metrics["spike"]["t_min_steps"],

@@ -1040,13 +1040,17 @@ def _plot_core_sera_pareto(
     fig, axes = plt.subplots(1, 3, figsize=(10.4, 3.05), sharex=True)
     legend_handles: dict[str, Any] = {}
     panels = (
-        (axes[0], "voltage_sera_mv2", "Voltage SERA (mV²)"),
+        (axes[0], "voltage_sera_iron_per_spike_mv2", "Voltage SERA (mV²/spike)"),
         (
             axes[1],
-            "dynamics_sera_mv2_per_ms2",
-            "Dynamics SERA (mV²/ms²)",
+            "dynamics_sera_iron_per_spike_mv2_per_ms2",
+            "Dynamics SERA (mV²/ms²/spike)",
         ),
-        (axes[2], "mean_response_sera_mv2", "Response SERA (mV²)"),
+        (
+            axes[2],
+            "response_sera_iron_per_spike_mv2",
+            "Response SERA (mV²/spike)",
+        ),
     )
     for ax, metric, label in panels:
         points = _core_metric_points(models, metric)
@@ -1278,11 +1282,10 @@ def _write_core_metric_table(models: list[dict[str, Any]], output: Path) -> str:
     headers = (
         "model",
         "params",
-        "Voltage SERA (mV²)",
-        "Dynamics SERA (mV²/ms²)",
-        "Response SERA (mV²)",
+        "Voltage SERA (mV²/spike)",
+        "Dynamics SERA (mV²/ms²/spike)",
+        "Response SERA (mV²/spike)",
         "Mean F1 (0-5 ms)",
-        "Root-SERA (mV)",
         "trapezoidal F1 area",
     )
     rows = []
@@ -1291,11 +1294,10 @@ def _write_core_metric_table(models: list[dict[str, Any]], output: Path) -> str:
             (
                 model.get("model_id"),
                 model.get("n_parameters"),
-                _fmt_table(model.get("voltage_sera_mv2")),
-                _fmt_table(model.get("dynamics_sera_mv2_per_ms2")),
-                _fmt_table(model.get("mean_response_sera_mv2")),
+                _fmt_table(model.get("voltage_sera_iron_per_spike_mv2")),
+                _fmt_table(model.get("dynamics_sera_iron_per_spike_mv2_per_ms2")),
+                _fmt_table(model.get("response_sera_iron_per_spike_mv2")),
                 _fmt_table(model.get("spike_mean_f1")),
-                _fmt_table(model.get("voltage_root_sera_mv")),
                 _fmt_table(model.get("spike_f1_area")),
             )
         )

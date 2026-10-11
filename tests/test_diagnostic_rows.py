@@ -50,13 +50,19 @@ def test_model_diagnostics_emit_dataframe_rows_for_overlapping_suites():
         row["trace_id"] == "trace-a" and row["metric"] == "soma_rmse_mv" for row in rows
     )
     assert any(
-        row["diagnostic"] == "trace_core" and row["metric"] == "voltage_root_sera_mv"
+        row["diagnostic"] == "trace_core"
+        and row["metric"] == "voltage_sera_iron_per_spike_mv2"
+        and row["unit"] == "mV^2/spike"
         for row in rows
     )
-    assert not any(row["metric"] == "voltage_sera_mv" for row in rows)
     assert any(
-        row["diagnostic"] == "trace_core" and row["metric"] == "voltage_sera_mv2"
+        row["diagnostic"] == "trace_core"
+        and row["metric"] == "dynamics_sera_iron_per_spike_mv2_per_ms2"
+        and row["unit"] == "mV^2/ms^2/spike"
         for row in rows
+    )
+    assert not any(
+        row["metric"] in {"voltage_sera_mv2", "voltage_root_sera_mv"} for row in rows
     )
     assert any(
         row["diagnostic"] == "spike_behavior" and row["metric"] == "spike_f1_area"
@@ -188,8 +194,8 @@ def test_paired_intervention_rows_include_teacher_and_model_delta_metrics():
     assert metrics["delta_soma_mean_mv"] < 0
     assert metrics["response_detected"] == 1.0
     assert metrics["soma_delta_rmse_mv"] == 0.0
-    assert metrics["response_root_sera_mv"] == 0.0
-    assert "response_sera_mv" not in metrics
+    assert metrics["response_sera_iron_per_spike_mv2"] == 0.0
+    assert "response_root_sera_mv" not in metrics
     assert metrics["soma_delta_gain"] == 1.0
     assert metrics["spike_count_delta_teacher_mean"] == -1.0
     assert metrics["spike_count_delta_model_mean"] == -1.0

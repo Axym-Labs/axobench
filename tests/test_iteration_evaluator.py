@@ -32,7 +32,6 @@ from axobench.benchmark.iteration_evaluator import (
     write_model_comparison,
     write_model_evaluation_cache,
 )
-from axobench.metrics import root_sera, sera
 
 
 def _ordinary_fixture(
@@ -125,15 +124,22 @@ def test_perfect_predictions_clear_available_attention_rows() -> None:
     assert metrics["spike_f1_5ms"]["value"] == 1.0
     assert metrics["spike_mean_f1_0_5ms"]["value"] == 1.0
     assert metrics["spike_f1_area_0_5ms"]["value"] == 1.0
-    assert metrics["voltage_sera_mv2"]["value"] == 0.0
-    assert metrics["voltage_root_sera_mv"]["value"] == 0.0
-    assert metrics["dynamics_sera_mv2_per_ms2"]["value"] == 0.0
-    assert metrics["dynamics_root_sera_mv_per_ms"]["value"] == 0.0
-    assert metrics["response_sera_mv2"]["value"] == 0.0
-    assert metrics["response_root_sera_mv"]["value"] == 0.0
-    assert "voltage_sera_mv" not in metrics
-    assert "dynamics_sera_mv_per_ms" not in metrics
-    assert "response_sera_mv" not in metrics
+    assert metrics["voltage_sera_iron_per_spike_mv2"]["value"] == 0.0
+    assert metrics["dynamics_sera_iron_per_spike_mv2_per_ms2"]["value"] == 0.0
+    assert metrics["response_sera_iron_per_spike_mv2"]["value"] == 0.0
+    assert set(metrics) == {
+        "voltage_sera_iron_per_spike_mv2",
+        "dynamics_sera_iron_per_spike_mv2_per_ms2",
+        "spike_mean_f1_0_5ms",
+        "spike_f1_area_0_5ms",
+        "spike_f1_exact",
+        "spike_f1_5ms",
+        "response_sera_iron_per_spike_mv2",
+    }
+    (intervention,) = report["interventions"]
+    assert intervention["response_sera_iron_per_spike_mv2"] == 0.0
+    assert intervention["zero_response_sera_iron_per_spike_mv2"] > 0.0
+    assert intervention["response_skill"] == 1.0
     assert [row["tolerance_steps"] for row in report["spike_f1_curve"]] == [
         0,
         1,
@@ -142,14 +148,6 @@ def test_perfect_predictions_clear_available_attention_rows() -> None:
         4,
         5,
     ]
-    for field in ("voltage_sera_curve", "dynamics_sera_curve"):
-        curve = report[field]
-        assert len(curve["thresholds"]) == 101
-        assert len(curve["mse"]) == 101
-        assert len(curve["support"]) == 101
-        assert curve["thresholds"][0] == 0.0
-        assert curve["thresholds"][-1] == 1.0
-        assert curve["value"] >= 0.0
     assert "raw_voltage_rmse_mv" not in metrics
     assert "clipped_voltage_rmse_mv" not in metrics
     assert "spike_auc" not in metrics
@@ -203,16 +201,11 @@ def test_paired_comparison_identifies_consistent_candidate_improvement() -> None
     assert set(rows) == {
         "voltage_sera_iron_per_spike_mv2",
         "dynamics_sera_iron_per_spike_mv2_per_ms2",
-        "voltage_sera_mv2",
-        "voltage_root_sera_mv",
-        "dynamics_sera_mv2_per_ms2",
-        "dynamics_root_sera_mv_per_ms",
         "spike_mean_f1_0_5ms",
         "spike_f1_area_0_5ms",
         "spike_f1_exact",
         "spike_f1_5ms",
-        "response_sera_mv2",
-        "response_root_sera_mv",
+        "response_sera_iron_per_spike_mv2",
     }
     assert all(
         row["assessment"] == "improved"
@@ -220,7 +213,8 @@ def test_paired_comparison_identifies_consistent_candidate_improvement() -> None
         if identifier != "spike_f1_5ms"
     )
     assert rows["spike_f1_5ms"]["assessment"] == "uncertain"
-    assert rows["voltage_root_sera_mv"]["delta"] < 0.0
+    assert rows["voltage_sera_iron_per_spike_mv2"]["delta"] < 0.0
+    assert rows["response_sera_iron_per_spike_mv2"]["delta"] < 0.0
     assert rows["spike_f1_exact"]["delta"] > 0.0
     rendered = format_model_comparison(comparison)
     assert "PAIRED COMPARISON" in rendered
@@ -268,39 +262,36 @@ def test_paired_comparison_writes_json_and_tidy_csv(tmp_path) -> None:
     )
     with csv_path.open(newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
-    assert len(rows) == 12
+    assert len(rows) == 7
     assert {row["assessment"] for row in rows} == {"uncertain"}
 
 
-def test_bootstrap_sera_statistics_match_metric_definition() -> None:
-    rng = np.random.default_rng(29)
-    error = rng.normal(size=(4, 30))
-    relevance = rng.uniform(size=(4, 30))
-    sums, counts = iteration_evaluator._sera_trace_statistics(error, relevance)
-    indices = np.arange(error.shape[0])
-
-    from_statistics = iteration_evaluator._root_sera_from_trace_statistics(
-        sums, counts, indices
+def test_bootstrap_response_delta_is_ratio_of_resampled_sums() -> None:
+    candidate = _intervention_fixture()
+    baseline = _intervention_fixture(ignored=True)
+    config = EvaluationConfig(ignore_start=0)
+    rows = iteration_evaluator._paired_response_statistics(
+        [candidate], [baseline], config
     )
-    direct = root_sera(
-        error,
-        relevance,
-        thresholds=iteration_evaluator._BOOTSTRAP_SERA_THRESHOLDS,
-    )
-
-    assert np.isclose(from_statistics, direct)
+    (row,) = rows
+    full = iteration_evaluator._evaluate_intervention(baseline, config)
     assert np.isclose(
-        iteration_evaluator._sera_from_trace_statistics(
-            sums,
-            counts,
-            indices,
-        ),
-        sera(
-            error,
-            relevance,
-            thresholds=iteration_evaluator._BOOTSTRAP_SERA_THRESHOLDS,
-        ),
+        row["baseline_area"].sum() / row["teacher_spikes"].sum(),
+        full["response_sera_iron_per_spike_mv2"],
     )
+
+    seed = 31
+    delta = iteration_evaluator._bootstrap_response_delta(
+        rows, np.random.default_rng(seed)
+    )
+    indices = iteration_evaluator._draw_stratified_bootstrap(
+        row["groups"], np.random.default_rng(seed)
+    )
+    expected = (
+        row["candidate_area"][indices].sum() - row["baseline_area"][indices].sum()
+    ) / row["teacher_spikes"][indices].sum()
+    assert np.isclose(delta, expected)
+    assert delta < 0.0
 
 
 def test_invalid_outputs_raise_numerical_and_physiological_attention_without_crashing() -> (
@@ -358,9 +349,9 @@ def test_report_format_is_deterministic_and_bounded() -> None:
     assert "CORE METRICS" in rendered
     assert "ATTENTION PANEL" in rendered
     assert "spike_f1_exact" in rendered
-    assert "mV/ms" in rendered
+    assert "mV^2/ms^2/spike" in rendered
     assert "YES = early watch" in rendered
-    assert len(rendered.splitlines()) <= 47
+    assert len(rendered.splitlines()) <= 42
     assert rendered == format_evaluation_report(report)
 
 
@@ -470,7 +461,9 @@ def test_cached_baseline_comparison_reuses_predictions_and_report(tmp_path) -> N
     assert comparison["baseline"] == loaded.report
     assert comparison["baseline_cache"] == str(cache_path.resolve())
     voltage = next(
-        row for row in comparison["comparison"] if row["id"] == "voltage_root_sera_mv"
+        row
+        for row in comparison["comparison"]
+        if row["id"] == "voltage_sera_iron_per_spike_mv2"
     )
     assert voltage["assessment"] == "improved"
 
@@ -605,8 +598,16 @@ def test_machine_readable_report_writes_json_or_tidy_csv_only_when_called(
     with csv_path.open(newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
     assert {row["row_type"] for row in rows} == {"metric", "diagnostic", "intervention"}
-    assert len([row for row in rows if row["row_type"] == "metric"]) == 12
+    assert len([row for row in rows if row["row_type"] == "metric"]) == 7
     assert len([row for row in rows if row["row_type"] == "diagnostic"]) == 24
+    intervention_ids = [row["id"] for row in rows if row["row_type"] == "intervention"]
+    assert intervention_ids == [
+        "response_sera_iron_per_spike_mv2",
+        "zero_response_sera_iron_per_spike_mv2",
+        "response_skill",
+        "direction_agreement",
+        "response_gain",
+    ]
     exact = next(row for row in rows if row["id"] == "spike_f1_exact")
     assert exact["model_id"] == "candidate"
     assert float(exact["value"]) == 1.0

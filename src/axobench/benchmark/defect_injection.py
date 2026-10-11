@@ -5,7 +5,8 @@ defect grows. `inject_defect` corrupts a teacher's spike train and soma voltage
 with one defect at a given dose, and `defect_dose_rows` scores the corrupted
 traces against the teacher with the historical NeuronIO scores (timestep AUC,
 clipped and rescaled RMSE) and the AxoBench scores (event F1, Mean F1, the
-coincidence factor, Voltage SERA, Dynamics SERA).
+coincidence factor, IRon-default Voltage SERA and Dynamics SERA per teacher
+spike).
 
 Spike-timing defects move the action-potential waveform together with the
 spike, so the voltage stays consistent with the spike train. Voltage defects
@@ -22,9 +23,9 @@ import numpy as np
 from axobench.metrics import (
     binary_auc,
     coincidence_factor,
-    dynamics_sera,
+    iron_dynamics_sera,
+    iron_voltage_sera,
     spike_f1_curve,
-    voltage_sera,
 )
 
 AP_PRE_STEPS = 2
@@ -141,13 +142,12 @@ def axobench_scores(
     pred_soma_mv: np.ndarray,
     target_spikes: np.ndarray,
     target_soma_mv: np.ndarray,
-    *,
-    relevance_kwargs: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """AxoBench scores of a prediction against raw teacher voltage and spikes.
 
-    Voltage and Dynamics skill are 1 - SERA / SERA of the per-trace mean of
-    the teacher voltage.
+    Voltage and Dynamics SERA are the IRon-default SERA per teacher spike.
+    Their skill is 1 - SERA / SERA of the per-trace mean of the teacher
+    voltage (same relevance and spike count).
     """
     bias, scale = -67.7, 0.1
     stack = lambda s, x: np.stack([s, (x - bias) * scale], axis=-1)  # noqa: E731
@@ -155,16 +155,21 @@ def axobench_scores(
     null_v = np.repeat(target_soma_mv.mean(axis=1, keepdims=True), target_soma_mv.shape[1], axis=1)
     pred = stack(pred_spikes, pred_soma_mv)
     null = stack(np.zeros_like(pred_spikes), null_v)
-    kw = dict(relevance_kwargs or {})
     out: dict[str, Any] = {}
-    for name, fn, key in (
-        ("voltage", voltage_sera, "voltage_sera_mv2"),
-        ("dynamics", dynamics_sera, "dynamics_sera_mv2_per_ms2"),
+    for name, fn, area_key, value_key in (
+        ("voltage", iron_voltage_sera, "voltage_sera_iron_mv2", "voltage_sera_iron_per_spike_mv2"),
+        (
+            "dynamics",
+            iron_dynamics_sera,
+            "dynamics_sera_iron_mv2_per_ms2",
+            "dynamics_sera_iron_per_spike_mv2_per_ms2",
+        ),
     ):
-        model = fn(pred, target, raw_soma_mv=target_soma_mv, relevance_kwargs=kw)[key]
-        reference = fn(null, target, raw_soma_mv=target_soma_mv, relevance_kwargs=kw)[key]
-        out[f"{name}_sera"] = float(model)
-        out[f"{name}_skill"] = float(1.0 - model / reference)
+        model = fn(pred, target, raw_soma_mv=target_soma_mv)
+        reference = fn(null, target, raw_soma_mv=target_soma_mv)
+        value = model[value_key]
+        out[f"{name}_sera"] = float("nan") if value is None else float(value)
+        out[f"{name}_skill"] = float(1.0 - model[area_key] / reference[area_key])
     curve = spike_f1_curve(pred_spikes, target_spikes, threshold=0.5, tolerances_steps=(0, 1, 2, 3, 4, 5), refractory_steps=None)
     out["f1_curve"] = [0.0 if r["f1"] is None else float(r["f1"]) for r in curve["rows"]]
     out["mean_f1"] = curve["mean_f1"]
@@ -179,7 +184,6 @@ def defect_dose_rows(
     *,
     seed: int = 0,
     ignore_start: int = 0,
-    relevance_kwargs: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Score every defect at every dose against the uncorrupted teacher."""
     doses = DEFAULT_DOSES if doses is None else doses
@@ -199,7 +203,7 @@ def defect_dose_rows(
                     "predicted_spikes": int(p_spk.sum()),
                     "target_spikes": int(t_spk.sum()),
                     **historical_scores(p_spk, p_v, t_spk, t_v),
-                    **axobench_scores(p_spk, p_v, t_spk, t_v, relevance_kwargs=relevance_kwargs),
+                    **axobench_scores(p_spk, p_v, t_spk, t_v),
                 }
             )
     return rows

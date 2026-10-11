@@ -5,6 +5,8 @@ from typing import Any
 
 import numpy as np
 
+from axobench.relevance import iron_relevance, iron_threshold_weights
+
 
 def soma_rmse(prediction: np.ndarray, target: np.ndarray) -> float:
     pred_soma = np.asarray(prediction, dtype=np.float64)[..., 1]
@@ -53,232 +55,6 @@ def prevalence_matched_threshold(scores: np.ndarray, positive_count: int) -> flo
     return float(
         np.partition(flat, flat.size - positive_count)[flat.size - positive_count]
     )
-
-
-def voltage_relevance(
-    target_soma_mv: np.ndarray,
-    spike_labels: np.ndarray | None = None,
-    *,
-    spike_radius_steps: int = 5,
-    voltage_tail_start: float = 0.80,
-    voltage_tail_stop: float = 0.995,
-    hyperpolar_tail_start: float = 0.90,
-    hyperpolar_tail_stop: float = 0.995,
-    dvdt_tail_start: float = 0.85,
-    dvdt_tail_stop: float = 0.995,
-) -> np.ndarray:
-    """Teacher-defined relevance for voltage-trace error.
-
-    The returned value is in `[0, 1]` and is high near teacher spikes, at
-    voltage extrema, and during high absolute dV/dt.  It is a weighting
-    function for evaluation only; it does not clip or transform the target.
-    """
-    soma = _as_2d(target_soma_mv)
-    if spike_radius_steps < 0:
-        raise ValueError("spike_radius_steps must be non-negative")
-    relevance = np.zeros_like(soma, dtype=np.float64)
-    if spike_labels is not None:
-        spikes = _as_2d(spike_labels) > 0.5
-        if spikes.shape != soma.shape:
-            raise ValueError(
-                f"spike_labels shape must match target_soma_mv, got {spikes.shape} and {soma.shape}"
-            )
-        relevance = np.maximum(
-            relevance, _dilate_spikes(spikes, spike_radius_steps).astype(np.float64)
-        )
-
-    relevance = np.maximum(
-        relevance,
-        _tail_relevance(
-            soma, start_quantile=voltage_tail_start, stop_quantile=voltage_tail_stop
-        ),
-    )
-    relevance = np.maximum(
-        relevance,
-        _tail_relevance(
-            -soma,
-            start_quantile=hyperpolar_tail_start,
-            stop_quantile=hyperpolar_tail_stop,
-        ),
-    )
-    dvdt = np.diff(soma, axis=1, prepend=soma[:, :1])
-    relevance = np.maximum(
-        relevance,
-        _tail_relevance(
-            np.abs(dvdt), start_quantile=dvdt_tail_start, stop_quantile=dvdt_tail_stop
-        ),
-    )
-    max_relevance = float(np.max(relevance)) if relevance.size else 0.0
-    if max_relevance <= 0.0:
-        return np.ones_like(relevance, dtype=np.float64)
-    return np.clip(relevance / max_relevance, 0.0, 1.0)
-
-
-def sera(
-    error: np.ndarray,
-    relevance: np.ndarray,
-    *,
-    thresholds: np.ndarray | None = None,
-    return_curve: bool = False,
-) -> float | dict[str, Any]:
-    """Support-normalized squared-error relevance area.
-
-    For each relevance threshold, compute MSE on timesteps at or above that
-    threshold and integrate those values over the threshold interval. Support
-    normalization makes the value independent of dataset length. If relevance
-    is constant one, the result equals MSE.
-    """
-    err = np.asarray(error, dtype=np.float64)
-    rel = np.asarray(relevance, dtype=np.float64)
-    if err.shape != rel.shape:
-        raise ValueError(
-            f"error and relevance must have same shape, got {err.shape} and {rel.shape}"
-        )
-    if thresholds is None:
-        thresholds = np.linspace(0.0, 1.0, 101, dtype=np.float64)
-    thresholds = np.asarray(thresholds, dtype=np.float64)
-    if thresholds.ndim != 1 or thresholds.size == 0:
-        raise ValueError("thresholds must be a non-empty 1D array")
-    if np.any(np.diff(thresholds) < 0):
-        raise ValueError("thresholds must be sorted in ascending order")
-
-    squared_error = err**2
-    mse_values = []
-    support = []
-    for threshold in thresholds:
-        mask = rel >= float(threshold) - 1e-12
-        support.append(int(mask.sum()))
-        if mask.any():
-            mse_values.append(float(np.mean(squared_error[mask])))
-        else:
-            mse_values.append(float("nan"))
-    mse = np.asarray(mse_values, dtype=np.float64)
-    finite = np.isfinite(mse)
-    if not finite.any():
-        value = float("nan")
-    elif finite.sum() == 1:
-        value = float(mse[finite][0])
-    else:
-        integral = float(_trapezoid(mse[finite], thresholds[finite]))
-        span = float(thresholds[finite][-1] - thresholds[finite][0])
-        if span > 0.0:
-            integral /= span
-        value = float(max(0.0, integral))
-    if not return_curve:
-        return value
-    return {
-        "value": value,
-        "thresholds": [float(x) for x in thresholds],
-        "mse": [float(x) if np.isfinite(x) else None for x in mse],
-        "support": support,
-    }
-
-
-def root_sera(
-    error: np.ndarray,
-    relevance: np.ndarray,
-    *,
-    thresholds: np.ndarray | None = None,
-    return_curve: bool = False,
-) -> float | dict[str, Any]:
-    """Square root of support-normalized SERA for legacy mV reporting."""
-
-    result = sera(
-        error,
-        relevance,
-        thresholds=thresholds,
-        return_curve=return_curve,
-    )
-    if not return_curve:
-        return float(np.sqrt(result))
-    curve = dict(result)
-    curve["sera_value"] = float(curve["value"])
-    curve["value"] = float(np.sqrt(curve["value"]))
-    return curve
-
-
-def voltage_sera(
-    prediction: np.ndarray,
-    target: np.ndarray,
-    *,
-    raw_soma_mv: np.ndarray | None = None,
-    soma_scale: float = 0.1,
-    soma_bias_mv: float = -67.7,
-    ignore_start: int = 0,
-    relevance_kwargs: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Compute raw/teacher-relevance voltage SERA and companion RMSE."""
-    pred, tgt, raw = _prepare_prediction_target(
-        prediction, target, raw_soma_mv=raw_soma_mv, ignore_start=ignore_start
-    )
-    pred_soma_mv = pred[..., 1] / soma_scale + soma_bias_mv
-    target_soma_mv = raw if raw is not None else tgt[..., 1] / soma_scale + soma_bias_mv
-    target_spikes = tgt[..., 0] > 0.5
-    if pred_soma_mv.shape != target_soma_mv.shape:
-        raise ValueError(
-            f"prediction and target soma shapes must match, got {pred_soma_mv.shape} and {target_soma_mv.shape}"
-        )
-    relevance = voltage_relevance(
-        target_soma_mv, target_spikes, **(relevance_kwargs or {})
-    )
-    error = pred_soma_mv - target_soma_mv
-    sera_curve = sera(error, relevance, return_curve=True)
-    root_sera_mv = float(np.sqrt(sera_curve["value"]))
-    rmse = float(np.sqrt(np.mean(error**2)))
-    return {
-        "voltage_sera_mv2": float(sera_curve["value"]),
-        "voltage_root_sera_mv": root_sera_mv,
-        "voltage_rmse_mv": rmse,
-        "voltage_sera_over_rmse": float(root_sera_mv / rmse) if rmse > 0.0 else None,
-        "relevance_mean": float(np.mean(relevance)),
-        "relevance_support_ge_0_5": int((relevance >= 0.5).sum()),
-        "relevance_support_ge_0_9": int((relevance >= 0.9).sum()),
-        "sera_curve": sera_curve,
-    }
-
-
-def dynamics_sera(
-    prediction: np.ndarray,
-    target: np.ndarray,
-    *,
-    raw_soma_mv: np.ndarray | None = None,
-    soma_scale: float = 0.1,
-    soma_bias_mv: float = -67.7,
-    timestep_ms: float = 1.0,
-    ignore_start: int = 0,
-    relevance_kwargs: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Compute teacher-relevance SERA on soma-voltage transitions."""
-    if timestep_ms <= 0.0:
-        raise ValueError("timestep_ms must be positive")
-    pred, tgt, raw = _prepare_prediction_target(
-        prediction,
-        target,
-        raw_soma_mv=raw_soma_mv,
-        ignore_start=ignore_start,
-    )
-    if pred.shape[1] < 2:
-        raise ValueError("Dynamics SERA requires at least two scored timesteps")
-    pred_soma_mv = pred[..., 1] / soma_scale + soma_bias_mv
-    target_soma_mv = raw if raw is not None else tgt[..., 1] / soma_scale + soma_bias_mv
-    target_spikes = tgt[..., 0] > 0.5
-    relevance = voltage_relevance(
-        target_soma_mv, target_spikes, **(relevance_kwargs or {})
-    )
-    transition_relevance = np.maximum(relevance[:, :-1], relevance[:, 1:])
-    pred_rate = np.diff(pred_soma_mv, axis=1) / timestep_ms
-    target_rate = np.diff(target_soma_mv, axis=1) / timestep_ms
-    error = pred_rate - target_rate
-    sera_curve = sera(error, transition_relevance, return_curve=True)
-    root_sera_rate = float(np.sqrt(sera_curve["value"]))
-    return {
-        "dynamics_sera_mv2_per_ms2": float(sera_curve["value"]),
-        "dynamics_root_sera_mv_per_ms": root_sera_rate,
-        "relevance_mean": float(np.mean(transition_relevance)),
-        "relevance_support_ge_0_5": int((transition_relevance >= 0.5).sum()),
-        "relevance_support_ge_0_9": int((transition_relevance >= 0.9).sum()),
-        "sera_curve": sera_curve,
-    }
 
 
 def spike_event_peaks(scores: np.ndarray, *, refractory_steps: int = 2, min_score: float = -np.inf) -> np.ndarray:
@@ -481,7 +257,78 @@ def spike_f1_curve(
     }
 
 
-def response_sera(
+def iron_voltage_sera(
+    prediction: np.ndarray,
+    target: np.ndarray,
+    *,
+    raw_soma_mv: np.ndarray | None = None,
+    soma_scale: float = 0.1,
+    soma_bias_mv: float = -67.7,
+    ignore_start: int = 0,
+) -> dict[str, Any]:
+    """IRon-default voltage SERA per teacher spike.
+
+    Relevance is IRon's default ``phi`` on the teacher somatic voltage
+    (adjusted-boxplot extremes; :mod:`axobench.relevance`), derived from the
+    pooled scored voltages. SERA is IRon's threshold area of summed squared
+    errors (Ribeiro and Moniz, 2020), divided by the number of teacher spikes
+    in the scored region.
+    """
+    pred, tgt, raw = _prepare_prediction_target(
+        prediction, target, raw_soma_mv=raw_soma_mv, ignore_start=ignore_start
+    )
+    pred_mv = pred[..., 1] / soma_scale + soma_bias_mv
+    target_mv = raw if raw is not None else tgt[..., 1] / soma_scale + soma_bias_mv
+    spikes = int((tgt[..., 0] > 0.5).sum())
+    weights = iron_threshold_weights(iron_relevance(target_mv))
+    area = float(np.sum((pred_mv - target_mv) ** 2 * weights))
+    return {
+        "voltage_sera_iron_mv2": area,
+        "voltage_sera_iron_per_spike_mv2": area / spikes if spikes else None,
+        "teacher_spikes": spikes,
+        "relevance_mean": float(np.mean(weights)),
+    }
+
+
+def iron_dynamics_sera(
+    prediction: np.ndarray,
+    target: np.ndarray,
+    *,
+    raw_soma_mv: np.ndarray | None = None,
+    soma_scale: float = 0.1,
+    soma_bias_mv: float = -67.7,
+    timestep_ms: float = 1.0,
+    ignore_start: int = 0,
+) -> dict[str, Any]:
+    """IRon-default SERA of the voltage rate of change, per teacher spike.
+
+    Relevance is IRon's default ``phi`` on the teacher dV/dt; the summed
+    relevance-area of squared rate errors is divided by the number of teacher
+    spikes in the scored region.
+    """
+    if timestep_ms <= 0.0:
+        raise ValueError("timestep_ms must be positive")
+    pred, tgt, raw = _prepare_prediction_target(
+        prediction, target, raw_soma_mv=raw_soma_mv, ignore_start=ignore_start
+    )
+    if pred.shape[1] < 2:
+        raise ValueError("Dynamics SERA requires at least two scored timesteps")
+    pred_mv = pred[..., 1] / soma_scale + soma_bias_mv
+    target_mv = raw if raw is not None else tgt[..., 1] / soma_scale + soma_bias_mv
+    spikes = int((tgt[..., 0] > 0.5).sum())
+    pred_rate = np.diff(pred_mv, axis=1) / timestep_ms
+    target_rate = np.diff(target_mv, axis=1) / timestep_ms
+    weights = iron_threshold_weights(iron_relevance(target_rate))
+    area = float(np.sum((pred_rate - target_rate) ** 2 * weights))
+    return {
+        "dynamics_sera_iron_mv2_per_ms2": area,
+        "dynamics_sera_iron_per_spike_mv2_per_ms2": area / spikes if spikes else None,
+        "teacher_spikes": spikes,
+        "relevance_mean": float(np.mean(weights)),
+    }
+
+
+def response_sera_trace_terms(
     baseline_prediction: np.ndarray,
     intervention_prediction: np.ndarray,
     baseline_target: np.ndarray,
@@ -492,9 +339,18 @@ def response_sera(
     soma_scale: float = 0.1,
     soma_bias_mv: float = -67.7,
     ignore_start: int = 0,
-    relevance_kwargs: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Compute SERA on paired model-vs-teacher intervention response deltas."""
+) -> dict[str, np.ndarray]:
+    """Per-pair terms of the IRon-default Response SERA.
+
+    The error is the predicted voltage change minus the teacher voltage change
+    (intervention minus baseline, mV). Relevance is IRon's default ``phi`` fit
+    once on the pooled teacher change of all supplied pairs. For each pair the
+    result holds the summed relevance area ``sum(e**2 * A(phi))``, the same sum
+    for the zero-response control (predicted change zero), and the teacher
+    spike count of its baseline plus intervention traces. Ratios of sums of
+    these terms give Response SERA per spike for any subset of pairs with the
+    relevance held fixed.
+    """
     base_pred, base_tgt, base_raw = _prepare_prediction_target(
         baseline_prediction,
         baseline_target,
@@ -514,41 +370,68 @@ def response_sera(
     base_pred_mv = base_pred[..., 1] / soma_scale + soma_bias_mv
     int_pred_mv = int_pred[..., 1] / soma_scale + soma_bias_mv
     base_tgt_mv = (
-        base_raw
-        if base_raw is not None
-        else base_tgt[..., 1] / soma_scale + soma_bias_mv
+        base_raw if base_raw is not None else base_tgt[..., 1] / soma_scale + soma_bias_mv
     )
     int_tgt_mv = (
         int_raw if int_raw is not None else int_tgt[..., 1] / soma_scale + soma_bias_mv
     )
     teacher_delta = int_tgt_mv - base_tgt_mv
-    model_delta = int_pred_mv - base_pred_mv
-    error = model_delta - teacher_delta
-    base_rel = voltage_relevance(
-        base_tgt_mv, base_tgt[..., 0] > 0.5, **(relevance_kwargs or {})
-    )
-    int_rel = voltage_relevance(
-        int_tgt_mv, int_tgt[..., 0] > 0.5, **(relevance_kwargs or {})
-    )
-    delta_rel = _tail_relevance(
-        np.abs(teacher_delta), start_quantile=0.80, stop_quantile=0.995
-    )
-    relevance = np.maximum.reduce([base_rel, int_rel, delta_rel])
-    if float(np.max(relevance)) <= 0.0:
-        relevance = np.ones_like(relevance, dtype=np.float64)
-    sera_curve = sera(error, relevance, return_curve=True)
-    root_sera_mv = float(np.sqrt(sera_curve["value"]))
-    rmse = float(np.sqrt(np.mean(error**2)))
+    error = (int_pred_mv - base_pred_mv) - teacher_delta
+    weights = iron_threshold_weights(iron_relevance(teacher_delta))
+    spikes = (base_tgt[..., 0] > 0.5).sum(axis=1) + (int_tgt[..., 0] > 0.5).sum(axis=1)
     return {
-        "response_sera_mv2": float(sera_curve["value"]),
-        "response_root_sera_mv": root_sera_mv,
-        "response_rmse_mv": rmse,
-        "response_sera_over_rmse": float(root_sera_mv / rmse) if rmse > 0.0 else None,
-        "teacher_response_abs_mean_mv": float(np.mean(np.abs(teacher_delta))),
-        "relevance_mean": float(np.mean(relevance)),
-        "relevance_support_ge_0_5": int((relevance >= 0.5).sum()),
-        "relevance_support_ge_0_9": int((relevance >= 0.9).sum()),
-        "sera_curve": sera_curve,
+        "area": np.sum(error**2 * weights, axis=1),
+        "zero_response_area": np.sum(teacher_delta**2 * weights, axis=1),
+        "teacher_spikes": spikes.astype(np.int64),
+        "error": error,
+        "teacher_delta": teacher_delta,
+        "weights": weights,
+    }
+
+
+def response_sera(
+    baseline_prediction: np.ndarray,
+    intervention_prediction: np.ndarray,
+    baseline_target: np.ndarray,
+    intervention_target: np.ndarray,
+    *,
+    baseline_raw_soma_mv: np.ndarray | None = None,
+    intervention_raw_soma_mv: np.ndarray | None = None,
+    soma_scale: float = 0.1,
+    soma_bias_mv: float = -67.7,
+    ignore_start: int = 0,
+) -> dict[str, Any]:
+    """IRon-default SERA of paired intervention responses, per teacher spike.
+
+    See :func:`response_sera_trace_terms`. The value is the summed relevance
+    area of the response error divided by the number of teacher spikes in the
+    baseline plus intervention traces. The zero-response control scores a
+    model that predicts no change, with the same relevance and spike count.
+    """
+    terms = response_sera_trace_terms(
+        baseline_prediction,
+        intervention_prediction,
+        baseline_target,
+        intervention_target,
+        baseline_raw_soma_mv=baseline_raw_soma_mv,
+        intervention_raw_soma_mv=intervention_raw_soma_mv,
+        soma_scale=soma_scale,
+        soma_bias_mv=soma_bias_mv,
+        ignore_start=ignore_start,
+    )
+    area = float(np.sum(terms["area"]))
+    null_area = float(np.sum(terms["zero_response_area"]))
+    spikes = int(np.sum(terms["teacher_spikes"]))
+    error = terms["error"]
+    return {
+        "response_sera_iron_mv2": area,
+        "response_sera_iron_per_spike_mv2": area / spikes if spikes else None,
+        "zero_response_sera_iron_mv2": null_area,
+        "zero_response_sera_iron_per_spike_mv2": null_area / spikes if spikes else None,
+        "teacher_spikes": spikes,
+        "response_rmse_mv": float(np.sqrt(np.mean(error**2))),
+        "teacher_response_abs_mean_mv": float(np.mean(np.abs(terms["teacher_delta"]))),
+        "relevance_mean": float(np.mean(terms["weights"])),
     }
 
 
@@ -564,7 +447,6 @@ def compute_core_metric_set(
     spike_threshold_policy: str = "prevalence",
     spike_tolerances_steps: tuple[int, ...] | list[int] = (0, 1, 2, 3, 4, 5),
     spike_refractory_steps: int | None = 2,
-    relevance_kwargs: dict[str, Any] | None = None,
     timestep_ms: float = 1.0,
     intervention_prediction: np.ndarray | None = None,
     intervention_target: np.ndarray | None = None,
@@ -574,22 +456,20 @@ def compute_core_metric_set(
     pred, tgt, raw = _prepare_prediction_target(
         prediction, target, raw_soma_mv=raw_soma_mv, ignore_start=ignore_start
     )
-    voltage = voltage_sera(
+    voltage = iron_voltage_sera(
         pred,
         tgt,
         raw_soma_mv=raw,
         soma_scale=soma_scale,
         soma_bias_mv=soma_bias_mv,
-        relevance_kwargs=relevance_kwargs,
     )
-    dynamics = dynamics_sera(
+    dynamics = iron_dynamics_sera(
         pred,
         tgt,
         raw_soma_mv=raw,
         soma_scale=soma_scale,
         soma_bias_mv=soma_bias_mv,
         timestep_ms=timestep_ms,
-        relevance_kwargs=relevance_kwargs,
     )
     target_spikes = tgt[..., 0] > 0.5
     if spike_threshold is None:
@@ -617,10 +497,10 @@ def compute_core_metric_set(
         "voltage": voltage,
         "dynamics": dynamics,
         "spike": spike,
-        "voltage_sera_mv2": voltage["voltage_sera_mv2"],
-        "voltage_root_sera_mv": voltage["voltage_root_sera_mv"],
-        "dynamics_sera_mv2_per_ms2": dynamics["dynamics_sera_mv2_per_ms2"],
-        "dynamics_root_sera_mv_per_ms": dynamics["dynamics_root_sera_mv_per_ms"],
+        "voltage_sera_iron_per_spike_mv2": voltage["voltage_sera_iron_per_spike_mv2"],
+        "dynamics_sera_iron_per_spike_mv2_per_ms2": dynamics[
+            "dynamics_sera_iron_per_spike_mv2_per_ms2"
+        ],
         "spike_mean_f1": spike["mean_f1"],
         "spike_f1_area": spike["f1_area"],
         "spike_threshold": float(spike_threshold),
@@ -641,11 +521,11 @@ def compute_core_metric_set(
             soma_scale=soma_scale,
             soma_bias_mv=soma_bias_mv,
             ignore_start=ignore_start,
-            relevance_kwargs=relevance_kwargs,
         )
         result["response"] = response
-        result["response_sera_mv2"] = response["response_sera_mv2"]
-        result["response_root_sera_mv"] = response["response_root_sera_mv"]
+        result["response_sera_iron_per_spike_mv2"] = response[
+            "response_sera_iron_per_spike_mv2"
+        ]
     return result
 
 
@@ -704,104 +584,7 @@ def _as_2d(array: np.ndarray) -> np.ndarray:
     return array.reshape(leading, array.shape[-1])
 
 
-def _dilate_spikes(spikes: np.ndarray, radius: int) -> np.ndarray:
-    out = np.zeros_like(spikes, dtype=bool)
-    for trace_index in range(spikes.shape[0]):
-        for spike_index in np.flatnonzero(spikes[trace_index]):
-            start = max(0, int(spike_index) - radius)
-            stop = min(spikes.shape[1], int(spike_index) + radius + 1)
-            out[trace_index, start:stop] = True
-    return out
-
-
-def _tail_relevance(
-    values: np.ndarray,
-    *,
-    start_quantile: float,
-    stop_quantile: float,
-) -> np.ndarray:
-    if not 0.0 <= start_quantile <= stop_quantile <= 1.0:
-        raise ValueError("tail quantiles must satisfy 0 <= start <= stop <= 1")
-    arr = np.asarray(values, dtype=np.float64)
-    flat = arr.reshape(-1)
-    if flat.size == 0:
-        return np.zeros_like(arr, dtype=np.float64)
-    lo = float(np.quantile(flat, start_quantile))
-    hi = float(np.quantile(flat, stop_quantile))
-    if hi <= lo:
-        return (arr >= hi).astype(np.float64)
-    return np.clip((arr - lo) / (hi - lo), 0.0, 1.0)
-
-
 def _trapezoid(y: np.ndarray, x: np.ndarray) -> float:
     if hasattr(np, "trapezoid"):
         return float(np.trapezoid(y, x))
     return float(np.trapz(y, x))
-
-
-def iron_voltage_sera(
-    prediction: np.ndarray,
-    target: np.ndarray,
-    *,
-    raw_soma_mv: np.ndarray | None = None,
-    soma_scale: float = 0.1,
-    soma_bias_mv: float = -67.7,
-    ignore_start: int = 0,
-) -> dict[str, Any]:
-    """IRon-default voltage SERA per teacher spike.
-
-    Relevance is IRon's default ``phi`` on the teacher somatic voltage
-    (adjusted-boxplot extremes; :mod:`axobench.relevance`), derived from the
-    pooled scored voltages. SERA is IRon's threshold area of summed squared
-    errors, divided by the number of teacher spikes in the scored region.
-    """
-    from axobench.relevance import iron_relevance, iron_threshold_weights
-
-    pred, tgt, raw = _prepare_prediction_target(
-        prediction, target, raw_soma_mv=raw_soma_mv, ignore_start=ignore_start
-    )
-    pred_mv = pred[..., 1] / soma_scale + soma_bias_mv
-    target_mv = raw if raw is not None else tgt[..., 1] / soma_scale + soma_bias_mv
-    spikes = int((tgt[..., 0] > 0.5).sum())
-    weights = iron_threshold_weights(iron_relevance(target_mv))
-    area = float(np.sum((pred_mv - target_mv) ** 2 * weights))
-    return {
-        "voltage_sera_iron_mv2": area,
-        "voltage_sera_iron_per_spike_mv2": area / spikes if spikes else float("nan"),
-        "teacher_spikes": spikes,
-        "relevance_mean": float(np.mean(weights)),
-    }
-
-
-def iron_dynamics_sera(
-    prediction: np.ndarray,
-    target: np.ndarray,
-    *,
-    raw_soma_mv: np.ndarray | None = None,
-    soma_scale: float = 0.1,
-    soma_bias_mv: float = -67.7,
-    timestep_ms: float = 1.0,
-    ignore_start: int = 0,
-) -> dict[str, Any]:
-    """IRon-default SERA of the voltage rate of change, per teacher spike.
-
-    Relevance is IRon's default ``phi`` on the teacher dV/dt.
-    """
-    from axobench.relevance import iron_relevance, iron_threshold_weights
-
-    pred, tgt, raw = _prepare_prediction_target(
-        prediction, target, raw_soma_mv=raw_soma_mv, ignore_start=ignore_start
-    )
-    pred_mv = pred[..., 1] / soma_scale + soma_bias_mv
-    target_mv = raw if raw is not None else tgt[..., 1] / soma_scale + soma_bias_mv
-    spikes = int((tgt[..., 0] > 0.5).sum())
-    pred_rate = np.diff(pred_mv, axis=1) / timestep_ms
-    target_rate = np.diff(target_mv, axis=1) / timestep_ms
-    weights = iron_threshold_weights(iron_relevance(target_rate))
-    area = float(np.sum((pred_rate - target_rate) ** 2 * weights))
-    return {
-        "dynamics_sera_iron_mv2_per_ms2": area,
-        "dynamics_sera_iron_per_spike_mv2_per_ms2": area / spikes if spikes else float("nan"),
-        "teacher_spikes": spikes,
-        "relevance_mean": float(np.mean(weights)),
-    }

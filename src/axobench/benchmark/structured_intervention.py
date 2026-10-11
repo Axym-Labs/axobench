@@ -398,17 +398,10 @@ def _model_delta_summary(
     return {
         "soma_delta_rmse_mv": float(np.sqrt(np.mean(soma_delta_error**2))),
         "soma_delta_mae_mv": float(np.mean(np.abs(soma_delta_error))),
-        "response_sera_mv2": response_metrics["response_sera_mv2"],
-        "response_root_sera_mv": response_metrics["response_root_sera_mv"],
+        "response_sera_iron_per_spike_mv2": response_metrics[
+            "response_sera_iron_per_spike_mv2"
+        ],
         "response_rmse_mv": response_metrics["response_rmse_mv"],
-        "response_sera_over_rmse": response_metrics["response_sera_over_rmse"],
-        "response_relevance_mean": response_metrics["relevance_mean"],
-        "response_relevance_support_ge_0_5": response_metrics[
-            "relevance_support_ge_0_5"
-        ],
-        "response_relevance_support_ge_0_9": response_metrics[
-            "relevance_support_ge_0_9"
-        ],
         "soma_delta_rmse_per_trace": _mean_interval(per_trace_soma_rmse),
         "soma_delta_correlation": _safe_corr(
             model_soma_delta.reshape(-1), teacher_soma_delta.reshape(-1)

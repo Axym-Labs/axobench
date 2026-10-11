@@ -57,8 +57,9 @@ def core_metric_comparison_rows(
     The helper is intentionally model-agnostic: callers pass the new metric
     summaries produced by AxoBench and, when available, a mapping or list of
     old compatibility metrics keyed by ``model_id``.  Inflation factors are
-    computed as new error divided by old clipped RMSE for voltage metrics, and
-    old AUC divided by F1 for spike metrics.
+    computed as raw voltage RMSE divided by old clipped RMSE, and old AUC
+    divided by F1 for spike metrics. SERA values are IRon-default SERA per
+    teacher spike (squared units per spike) and carry no RMSE-based factor.
     """
     old_by_model = _old_metric_lookup(old_metric_set)
     rows = []
@@ -69,7 +70,6 @@ def core_metric_comparison_rows(
             old, "clipped_rmse_mv", "old_clipped_rmse_mv", "soma_RMSE", "soma_rmse_mv"
         )
         old_auc = _first_number(old, "spike_auc", "old_spike_auc", "AUC", "auc")
-        voltage_root_sera = _as_optional_float(model.get("voltage_root_sera_mv"))
         voltage_rmse = _as_optional_float(model.get("voltage_rmse_mv"))
         exact_f1 = _as_optional_float(
             model.get("exact_spike_f1", model.get("spike_f1_area"))
@@ -81,10 +81,8 @@ def core_metric_comparison_rows(
                 "n_parameters": model.get("n_parameters"),
                 "old_clipped_rmse_mv": old_rmse,
                 "old_spike_auc": old_auc,
-                "voltage_root_sera_mv": voltage_root_sera,
-                "voltage_root_sera_inflation": _ratio(
-                    voltage_root_sera,
-                    old_rmse,
+                "voltage_sera_iron_per_spike_mv2": _as_optional_float(
+                    model.get("voltage_sera_iron_per_spike_mv2")
                 ),
                 "raw_voltage_rmse_mv": voltage_rmse,
                 "raw_voltage_rmse_inflation": _ratio(voltage_rmse, old_rmse),
@@ -92,8 +90,8 @@ def core_metric_comparison_rows(
                 "auc_over_exact_f1": _ratio(old_auc, exact_f1),
                 "spike_f1_area_0_5ms": f1_area,
                 "auc_over_f1_area_0_5ms": _ratio(old_auc, f1_area),
-                "mean_response_root_sera_mv": _as_optional_float(
-                    model.get("mean_response_root_sera_mv")
+                "response_sera_iron_per_spike_mv2": _as_optional_float(
+                    model.get("response_sera_iron_per_spike_mv2")
                 ),
             }
         )
@@ -113,11 +111,11 @@ def write_core_metric_comparison_table(
         "model",
         "old clipped RMSE mV",
         "old spike AUC",
-        "Voltage Root-SERA mV (x old RMSE)",
+        "Voltage SERA mV²/spike",
         "raw RMSE mV (x old RMSE)",
         "exact F1 (AUC/F1)",
         "F1 area 0-5 ms (AUC/F1)",
-        "Response Root-SERA mV",
+        "Response SERA mV²/spike",
     )
     table_rows = []
     for row in rows:
@@ -126,10 +124,7 @@ def write_core_metric_comparison_table(
                 row["model_id"],
                 _format_optional(row["old_clipped_rmse_mv"]),
                 _format_optional(row["old_spike_auc"]),
-                _format_value_with_factor(
-                    row["voltage_root_sera_mv"],
-                    row["voltage_root_sera_inflation"],
-                ),
+                _format_optional(row["voltage_sera_iron_per_spike_mv2"]),
                 _format_value_with_factor(
                     row["raw_voltage_rmse_mv"], row["raw_voltage_rmse_inflation"]
                 ),
@@ -139,7 +134,7 @@ def write_core_metric_comparison_table(
                 _format_value_with_factor(
                     row["spike_f1_area_0_5ms"], row["auc_over_f1_area_0_5ms"]
                 ),
-                _format_optional(row["mean_response_root_sera_mv"]),
+                _format_optional(row["response_sera_iron_per_spike_mv2"]),
             )
         )
     _write_markdown_table(output, headers, table_rows)

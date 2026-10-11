@@ -70,20 +70,20 @@ def test_core_metric_comparison_rows_compute_inflation_factors(tmp_path):
     models = [
         {
             "model_id": "model-a",
-            "voltage_root_sera_mv": 20.0,
+            "voltage_sera_iron_per_spike_mv2": 20.0,
             "voltage_rmse_mv": 2.0,
             "spike_f1_area": 0.2,
             "spike_f1_area_0_5ms": 0.4,
-            "mean_response_root_sera_mv": 8.0,
+            "response_sera_iron_per_spike_mv2": 8.0,
         }
     ]
     old = {"model-a": {"clipped_rmse_mv": 0.5, "spike_auc": 0.9}}
 
     rows = core_metric_comparison_rows(models, old)
 
-    assert rows[0]["voltage_root_sera_mv"] == 20.0
-    assert "voltage_sera_mv" not in rows[0]
-    assert rows[0]["voltage_root_sera_inflation"] == 40.0
+    assert rows[0]["voltage_sera_iron_per_spike_mv2"] == 20.0
+    assert rows[0]["response_sera_iron_per_spike_mv2"] == 8.0
+    assert "voltage_root_sera_inflation" not in rows[0]
     assert rows[0]["raw_voltage_rmse_inflation"] == 4.0
     assert rows[0]["auc_over_exact_f1"] == 4.5
     assert rows[0]["auc_over_f1_area_0_5ms"] == 2.25
@@ -91,5 +91,5 @@ def test_core_metric_comparison_rows_compute_inflation_factors(tmp_path):
     table_path = tmp_path / "core.md"
     write_core_metric_comparison_table(models, table_path, old)
     table = table_path.read_text(encoding="utf-8")
-    assert "20 (40.0x)" in table
+    assert "| 20 |" in table
     assert "0.2 (4.5x)" in table

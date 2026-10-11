@@ -263,13 +263,8 @@ def paired_intervention_diagnostic_rows(
         for metric in (
             "soma_delta_rmse_mv",
             "soma_delta_mae_mv",
-            "response_sera_mv2",
-            "response_root_sera_mv",
+            "response_sera_iron_per_spike_mv2",
             "response_rmse_mv",
-            "response_sera_over_rmse",
-            "response_relevance_mean",
-            "response_relevance_support_ge_0_5",
-            "response_relevance_support_ge_0_9",
             "soma_delta_rmse_per_trace",
             "soma_delta_correlation",
             "soma_delta_gain",
@@ -488,12 +483,8 @@ def _trace_core_rows(
         "lag_tolerant_voltage_rmse_mv",
         "state_trace_shape_distance",
         "spike_train_distance",
-        "voltage_sera_mv2",
-        "voltage_root_sera_mv",
-        "voltage_sera_over_rmse",
-        "voltage_relevance_mean",
-        "voltage_relevance_support_ge_0_5",
-        "voltage_relevance_support_ge_0_9",
+        "voltage_sera_iron_per_spike_mv2",
+        "dynamics_sera_iron_per_spike_mv2_per_ms2",
         "spike_auc",
         "spike_mean_f1",
         "spike_f1_area",
@@ -952,6 +943,10 @@ def _unit_for_metric(metric: str) -> str:
         return "steps"
     if "jsd" in metric:
         return "bits"
+    if metric.endswith("_per_spike_mv2_per_ms2"):
+        return "mV^2/ms^2/spike"
+    if metric.endswith("_per_spike_mv2"):
+        return "mV^2/spike"
     if "dvdt" in metric:
         return "mV_per_step"
     if "_mv2" in metric:
@@ -969,11 +964,8 @@ def _unit_for_metric(metric: str) -> str:
         or metric in {"spike_auc", "spike_brier"}
         or metric.startswith(("precision_", "recall_", "f1_"))
         or metric.endswith(("_mean_f1", "_f1_area"))
-        or "relevance_mean" in metric
     ):
         return "fraction"
-    if "support_ge" in metric:
-        return "count"
     if metric.endswith("_steps"):
         return "steps"
     if "count" in metric:

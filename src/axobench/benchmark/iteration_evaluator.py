@@ -3,6 +3,14 @@
 The array-level API is intentionally independent of model frameworks and
 checkpoint formats. Model repositories supply predictions; AxoBench owns the
 measurement protocol and terminal report.
+
+All SERA metrics are IRon-default SERA per teacher spike: relevance ``phi``
+is IRon's default (adjusted-boxplot extremes) on the teacher signal, the
+squared-error relevance area follows Ribeiro and Moniz (2020), and the summed
+area is divided by the teacher spike count of the scored traces. The teacher
+signal is the soma voltage (Voltage SERA), its rate of change (Dynamics
+SERA), or the paired intervention-minus-baseline voltage change (Response
+SERA, pooled over interventions as summed area per summed spike count).
 """
 
 from __future__ import annotations
@@ -22,17 +30,15 @@ import numpy as np
 
 from axobench.data import ShardedNeuronIODataset
 from axobench.metrics import (
-    _tail_relevance,
-    dynamics_sera,
     iron_dynamics_sera,
     iron_voltage_sera,
     prevalence_matched_threshold,
     response_sera,
+    response_sera_trace_terms,
     spike_event_confusion,
     spike_f1_curve,
-    voltage_relevance,
-    voltage_sera,
 )
+from axobench.relevance import iron_relevance, iron_threshold_weights
 
 DEFAULT_SINGLE_MORPHOLOGY_STANDARD_SAMPLES = 120
 DEFAULT_SINGLE_MORPHOLOGY_INTERVENTION_SAMPLES = 40
@@ -656,22 +662,6 @@ def evaluate_predictions(
     f1_by_step = {int(row["tolerance_steps"]): row for row in f1["rows"]}
     exact_step, tolerant_step = cfg.selected_f1_steps
 
-    voltage = voltage_sera(
-        pred_score,
-        tgt_score,
-        raw_soma_mv=raw_score,
-        soma_scale=cfg.soma_scale,
-        soma_bias_mv=cfg.soma_bias_mv,
-    )
-    dynamics = dynamics_sera(
-        pred_score,
-        tgt_score,
-        raw_soma_mv=raw_score,
-        soma_scale=cfg.soma_scale,
-        soma_bias_mv=cfg.soma_bias_mv,
-        timestep_ms=cfg.timestep_ms,
-    )
-
     iron_voltage = iron_voltage_sera(
         pred_score,
         tgt_score,
@@ -689,49 +679,20 @@ def evaluate_predictions(
     )
 
     intervention_reports = [_evaluate_intervention(item, cfg) for item in interventions]
-    response_sera_value = _root_mean_square(
-        [item["response_root_sera_mv"] for item in intervention_reports]
-    )
-    response_sera_value2 = _finite_mean(
-        [item["response_sera_mv2"] for item in intervention_reports]
-    )
+    response_sera_value = _pooled_response_sera(intervention_reports)
 
     metrics = [
         _metric(
             "voltage_sera_iron_per_spike_mv2",
             iron_voltage["voltage_sera_iron_per_spike_mv2"],
-            "mV^2 per spike",
-            "IRon-default SERA (adjusted-boxplot relevance on teacher voltage) per teacher spike",
+            "mV^2/spike",
+            "IRon SERA/spike, phi(teacher V)",
         ),
         _metric(
             "dynamics_sera_iron_per_spike_mv2_per_ms2",
             iron_dynamics["dynamics_sera_iron_per_spike_mv2_per_ms2"],
-            "mV^2/ms^2 per spike",
-            "IRon-default SERA (adjusted-boxplot relevance on teacher dV/dt) per teacher spike",
-        ),
-        _metric(
-            "voltage_sera_mv2",
-            voltage["voltage_sera_mv2"],
-            "mV^2",
-            "legacy: support-normalized squared teacher-relevance voltage error",
-        ),
-        _metric(
-            "voltage_root_sera_mv",
-            voltage["voltage_root_sera_mv"],
-            "mV",
-            "root teacher-relevance voltage error",
-        ),
-        _metric(
-            "dynamics_sera_mv2_per_ms2",
-            dynamics["dynamics_sera_mv2_per_ms2"],
-            "mV^2/ms^2",
-            "legacy: support-normalized squared voltage-transition error",
-        ),
-        _metric(
-            "dynamics_root_sera_mv_per_ms",
-            dynamics["dynamics_root_sera_mv_per_ms"],
-            "mV/ms",
-            "root teacher-relevance voltage-transition error",
+            "mV^2/ms^2/spike",
+            "IRon SERA/spike, phi(teacher dV/dt)",
         ),
         _metric(
             "spike_mean_f1_0_5ms",
@@ -758,16 +719,10 @@ def evaluate_predictions(
             f"F1 at {tolerant_step * cfg.timestep_ms:g} ms",
         ),
         _metric(
-            "response_sera_mv2",
-            response_sera_value2,
-            "mV^2",
-            "support-normalized squared paired intervention-response error",
-        ),
-        _metric(
-            "response_root_sera_mv",
+            "response_sera_iron_per_spike_mv2",
             response_sera_value,
-            "mV",
-            "root paired intervention-response error",
+            "mV^2/spike",
+            "IRon SERA/spike, phi(teacher resp)",
         ),
     ]
 
@@ -796,8 +751,6 @@ def evaluate_predictions(
         "scored_samples": int(pred_score.shape[0]),
         "spike_threshold": float(threshold),
         "spike_f1_curve": f1["rows"],
-        "voltage_sera_curve": voltage["sera_curve"],
-        "dynamics_sera_curve": dynamics["sera_curve"],
         "metrics": metrics,
         "diagnostics": diagnostics,
         "interventions": intervention_reports,
@@ -1126,7 +1079,7 @@ def format_model_comparison(comparison: dict[str, Any]) -> str:
         _ascii_table(
             ["metric", "candidate", "baseline", "delta", "95% CI", "evidence"],
             rows,
-            widths=(27, 14, 14, 14, 23, 10),
+            widths=(40, 24, 24, 24, 23, 10),
         )
     )
     return "\n".join(lines)
@@ -1202,7 +1155,7 @@ def format_evaluation_report(report: dict[str, Any]) -> str:
         for row in report["metrics"]
     ]
     lines.extend(
-        _ascii_table(["metric", "value", "role"], metric_rows, widths=(27, 14, 35))
+        _ascii_table(["metric", "value", "role"], metric_rows, widths=(40, 24, 35))
     )
     lines.extend(
         [
@@ -1323,8 +1276,8 @@ def _report_csv_rows(report: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
     intervention_units = {
-        "response_root_sera_mv": "mV",
-        "zero_response_root_sera_mv": "mV",
+        "response_sera_iron_per_spike_mv2": "mV^2/spike",
+        "zero_response_sera_iron_per_spike_mv2": "mV^2/spike",
         "response_skill": "skill",
         "direction_agreement": "fraction",
         "response_gain": "ratio",
@@ -1373,9 +1326,6 @@ def _diagnostic_condition(primary: Any) -> str:
     return text.rsplit("[", 1)[1][:-1]
 
 
-_BOOTSTRAP_SERA_THRESHOLDS = np.linspace(0.0, 1.0, 101, dtype=np.float64)
-
-
 def _paired_metric_bootstrap(
     candidate: np.ndarray,
     baseline: np.ndarray,
@@ -1415,21 +1365,7 @@ def _paired_metric_bootstrap(
     )
     candidate_mv = candidate_score[..., 1] / config.soma_scale + config.soma_bias_mv
     baseline_mv = baseline_score[..., 1] / config.soma_scale + config.soma_bias_mv
-    relevance = voltage_relevance(target_mv, target_score[..., 0] > 0.5)
-    candidate_voltage = _sera_trace_statistics(candidate_mv - target_mv, relevance)
-    baseline_voltage = _sera_trace_statistics(baseline_mv - target_mv, relevance)
-    transition_relevance = np.maximum(relevance[:, :-1], relevance[:, 1:])
     target_rate = np.diff(target_mv, axis=1) / config.timestep_ms
-    candidate_dynamics = _sera_trace_statistics(
-        np.diff(candidate_mv, axis=1) / config.timestep_ms - target_rate,
-        transition_relevance,
-    )
-    baseline_dynamics = _sera_trace_statistics(
-        np.diff(baseline_mv, axis=1) / config.timestep_ms - target_rate,
-        transition_relevance,
-    )
-    from axobench.relevance import iron_relevance, iron_threshold_weights
-
     iron_voltage_weights = iron_threshold_weights(iron_relevance(target_mv))
     iron_rate_weights = iron_threshold_weights(iron_relevance(target_rate))
     trace_spikes = (target_score[..., 0] > 0.5).sum(axis=1).astype(np.float64)
@@ -1468,16 +1404,11 @@ def _paired_metric_bootstrap(
     values = {
         "voltage_sera_iron_per_spike_mv2": [],
         "dynamics_sera_iron_per_spike_mv2_per_ms2": [],
-        "voltage_sera_mv2": [],
-        "voltage_root_sera_mv": [],
-        "dynamics_sera_mv2_per_ms2": [],
-        "dynamics_root_sera_mv_per_ms": [],
         "spike_mean_f1_0_5ms": [],
         "spike_f1_area_0_5ms": [],
         "spike_f1_exact": [],
         "spike_f1_5ms": [],
-        "response_sera_mv2": [],
-        "response_root_sera_mv": [],
+        "response_sera_iron_per_spike_mv2": [],
     }
     rng = np.random.default_rng(seed)
     exact_step, tolerant_step = config.selected_f1_steps
@@ -1488,22 +1419,6 @@ def _paired_metric_bootstrap(
         )
         values["dynamics_sera_iron_per_spike_mv2_per_ms2"].append(
             _per_spike(candidate_iron_dynamics, indices) - _per_spike(baseline_iron_dynamics, indices)
-        )
-        values["voltage_sera_mv2"].append(
-            _sera_from_trace_statistics(*candidate_voltage, indices)
-            - _sera_from_trace_statistics(*baseline_voltage, indices)
-        )
-        values["voltage_root_sera_mv"].append(
-            _root_sera_from_trace_statistics(*candidate_voltage, indices)
-            - _root_sera_from_trace_statistics(*baseline_voltage, indices)
-        )
-        values["dynamics_sera_mv2_per_ms2"].append(
-            _sera_from_trace_statistics(*candidate_dynamics, indices)
-            - _sera_from_trace_statistics(*baseline_dynamics, indices)
-        )
-        values["dynamics_root_sera_mv_per_ms"].append(
-            _root_sera_from_trace_statistics(*candidate_dynamics, indices)
-            - _root_sera_from_trace_statistics(*baseline_dynamics, indices)
         )
         candidate_spike = _f1_metrics_from_trace_statistics(
             candidate_f1,
@@ -1527,68 +1442,10 @@ def _paired_metric_bootstrap(
         values["spike_f1_5ms"].append(
             candidate_spike[tolerant_step] - baseline_spike[tolerant_step]
         )
-        response_deltas = _bootstrap_response_deltas(response_stats, rng)
-        values["response_sera_mv2"].append(response_deltas["sera"])
-        values["response_root_sera_mv"].append(response_deltas["root_sera"])
+        values["response_sera_iron_per_spike_mv2"].append(
+            _bootstrap_response_delta(response_stats, rng)
+        )
     return values
-
-
-def _sera_trace_statistics(
-    error: np.ndarray, relevance: np.ndarray
-) -> tuple[np.ndarray, np.ndarray]:
-    squared_error = np.square(np.asarray(error, dtype=np.float64))
-    rel = np.asarray(relevance, dtype=np.float64)
-    if squared_error.shape != rel.shape:
-        raise ValueError("error and relevance arrays must have matching shapes")
-    bin_count = len(_BOOTSTRAP_SERA_THRESHOLDS)
-    bins = np.floor(np.clip(rel, 0.0, 1.0) * (bin_count - 1) + 1e-10).astype(np.int64)
-    sums = np.empty((squared_error.shape[0], bin_count), dtype=np.float64)
-    counts = np.empty((squared_error.shape[0], bin_count), dtype=np.int64)
-    for trace_index in range(squared_error.shape[0]):
-        count_histogram = np.bincount(bins[trace_index], minlength=bin_count)
-        error_histogram = np.bincount(
-            bins[trace_index],
-            weights=squared_error[trace_index],
-            minlength=bin_count,
-        )
-        counts[trace_index] = np.cumsum(count_histogram[::-1])[::-1]
-        sums[trace_index] = np.cumsum(error_histogram[::-1])[::-1]
-    return sums, counts
-
-
-def _root_sera_from_trace_statistics(
-    sums: np.ndarray,
-    counts: np.ndarray,
-    indices: np.ndarray,
-) -> float:
-    return float(
-        np.sqrt(
-            _sera_from_trace_statistics(
-                sums,
-                counts,
-                indices,
-            )
-        )
-    )
-
-
-def _sera_from_trace_statistics(
-    sums: np.ndarray,
-    counts: np.ndarray,
-    indices: np.ndarray,
-) -> float:
-    aggregate_counts = np.sum(counts[indices], axis=0)
-    aggregate_sums = np.sum(sums[indices], axis=0)
-    finite = aggregate_counts > 0
-    if not finite.any():
-        return float("nan")
-    mse = aggregate_sums[finite] / aggregate_counts[finite]
-    thresholds = _BOOTSTRAP_SERA_THRESHOLDS[finite]
-    if len(thresholds) == 1:
-        return float(mse[0])
-    integral = float(np.sum(0.5 * (mse[:-1] + mse[1:]) * np.diff(thresholds)))
-    span = float(thresholds[-1] - thresholds[0])
-    return float(max(0.0, integral / span if span > 0.0 else mse[0]))
 
 
 def _f1_trace_statistics(
@@ -1686,21 +1543,18 @@ def _paired_response_statistics(
             raise ValueError(
                 f"intervention {candidate.name!r} candidate and baseline must share teacher targets"
             )
-        candidate_stats, candidate_groups = _response_trace_statistics(
-            candidate, config
-        )
-        baseline_stats, baseline_groups = _response_trace_statistics(baseline, config)
-        if [len(group) for group in candidate_groups] != [
-            len(group) for group in baseline_groups
-        ]:
+        candidate_terms, groups = _response_trace_statistics(candidate, config)
+        baseline_terms, baseline_groups = _response_trace_statistics(baseline, config)
+        if [len(group) for group in groups] != [len(group) for group in baseline_groups]:
             raise ValueError(
                 f"intervention {candidate.name!r} morphology groups do not match"
             )
         rows.append(
             {
-                "candidate": candidate_stats,
-                "baseline": baseline_stats,
-                "groups": candidate_groups,
+                "candidate_area": candidate_terms["area"],
+                "baseline_area": baseline_terms["area"],
+                "teacher_spikes": candidate_terms["teacher_spikes"],
+                "groups": groups,
             }
         )
     return rows
@@ -1709,49 +1563,20 @@ def _paired_response_statistics(
 def _response_trace_statistics(
     item: PairedInterventionPredictions,
     config: EvaluationConfig,
-) -> tuple[tuple[np.ndarray, np.ndarray], list[np.ndarray]]:
-    base_pred = _as_traces(item.baseline_prediction, "baseline_prediction")[
-        :, config.ignore_start :, :
-    ]
-    int_pred = _as_traces(item.intervention_prediction, "intervention_prediction")[
-        :, config.ignore_start :, :
-    ]
-    base_tgt = _as_traces(item.baseline_target, "baseline_target")[
-        :, config.ignore_start :, :
-    ]
-    int_tgt = _as_traces(item.intervention_target, "intervention_target")[
-        :, config.ignore_start :, :
-    ]
-    if not (base_pred.shape == int_pred.shape == base_tgt.shape == int_tgt.shape):
-        raise ValueError(f"intervention {item.name!r} arrays must have matching shapes")
-    base_raw = _crop_intervention_raw(
-        item.baseline_raw_soma_mv, config.ignore_start, base_pred.shape[:2]
+) -> tuple[dict[str, np.ndarray], list[np.ndarray]]:
+    """Per-pair Response SERA terms with relevance fit on the full sample."""
+    base_pred, int_pred, base_tgt, int_tgt, base_raw, int_raw = _cropped_intervention(
+        item, config
     )
-    int_raw = _crop_intervention_raw(
-        item.intervention_raw_soma_mv, config.ignore_start, base_pred.shape[:2]
-    )
-    teacher_base = (
-        base_raw
-        if base_raw is not None
-        else base_tgt[..., 1] / config.soma_scale + config.soma_bias_mv
-    )
-    teacher_int = (
-        int_raw
-        if int_raw is not None
-        else int_tgt[..., 1] / config.soma_scale + config.soma_bias_mv
-    )
-    model_base = base_pred[..., 1] / config.soma_scale + config.soma_bias_mv
-    model_int = int_pred[..., 1] / config.soma_scale + config.soma_bias_mv
-    teacher_delta = teacher_int - teacher_base
-    error = (model_int - model_base) - teacher_delta
-    relevance = np.maximum.reduce(
-        [
-            voltage_relevance(teacher_base, base_tgt[..., 0] > 0.5),
-            voltage_relevance(teacher_int, int_tgt[..., 0] > 0.5),
-            _tail_relevance(
-                np.abs(teacher_delta), start_quantile=0.80, stop_quantile=0.995
-            ),
-        ]
+    terms = response_sera_trace_terms(
+        base_pred,
+        int_pred,
+        base_tgt,
+        int_tgt,
+        baseline_raw_soma_mv=base_raw,
+        intervention_raw_soma_mv=int_raw,
+        soma_scale=config.soma_scale,
+        soma_bias_mv=config.soma_bias_mv,
     )
     labels = (
         [str(value) for value in item.morphology_ids]
@@ -1762,27 +1587,31 @@ def _response_trace_statistics(
         raise ValueError(
             f"intervention {item.name!r} morphology_ids length does not match traces"
         )
-    return _sera_trace_statistics(error, relevance), _bootstrap_groups(labels)
+    return terms, _bootstrap_groups(labels)
 
 
-def _bootstrap_response_deltas(
+def _bootstrap_response_delta(
     rows: list[dict[str, Any]],
     rng: np.random.Generator,
-) -> dict[str, float]:
+) -> float:
+    """Candidate minus baseline Response SERA per spike on resampled pairs.
+
+    Pairs are resampled within each intervention and morphology; the
+    relevance stays at the full-sample fit, and each model's value is the
+    ratio of summed relevance area to summed teacher spikes over all
+    interventions.
+    """
     if not rows:
-        return {"sera": float("nan"), "root_sera": float("nan")}
-    candidate_values = []
-    baseline_values = []
+        return float("nan")
+    candidate_area = baseline_area = spikes = 0.0
     for row in rows:
         indices = _draw_stratified_bootstrap(row["groups"], rng)
-        candidate_values.append(_sera_from_trace_statistics(*row["candidate"], indices))
-        baseline_values.append(_sera_from_trace_statistics(*row["baseline"], indices))
-    candidate_sera = float(np.mean(candidate_values))
-    baseline_sera = float(np.mean(baseline_values))
-    return {
-        "sera": candidate_sera - baseline_sera,
-        "root_sera": float(np.sqrt(candidate_sera) - np.sqrt(baseline_sera)),
-    }
+        candidate_area += float(np.sum(row["candidate_area"][indices]))
+        baseline_area += float(np.sum(row["baseline_area"][indices]))
+        spikes += float(np.sum(row["teacher_spikes"][indices]))
+    if spikes <= 0.0:
+        return float("nan")
+    return (candidate_area - baseline_area) / spikes
 
 
 def _delta_assessment(
@@ -2364,9 +2193,9 @@ def _ordinary_attention_rows(
     ]
 
 
-def _evaluate_intervention(
+def _cropped_intervention(
     item: PairedInterventionPredictions, config: EvaluationConfig
-) -> dict[str, Any]:
+) -> tuple[np.ndarray, ...]:
     base_pred = _as_traces(item.baseline_prediction, "baseline_prediction")[
         :, config.ignore_start :, :
     ]
@@ -2387,19 +2216,18 @@ def _evaluate_intervention(
     int_raw = _crop_intervention_raw(
         item.intervention_raw_soma_mv, config.ignore_start, base_pred.shape[:2]
     )
+    return base_pred, int_pred, base_tgt, int_tgt, base_raw, int_raw
+
+
+def _evaluate_intervention(
+    item: PairedInterventionPredictions, config: EvaluationConfig
+) -> dict[str, Any]:
+    base_pred, int_pred, base_tgt, int_tgt, base_raw, int_raw = _cropped_intervention(
+        item, config
+    )
     measured = response_sera(
         base_pred,
         int_pred,
-        base_tgt,
-        int_tgt,
-        baseline_raw_soma_mv=base_raw,
-        intervention_raw_soma_mv=int_raw,
-        soma_scale=config.soma_scale,
-        soma_bias_mv=config.soma_bias_mv,
-    )
-    zero_response = response_sera(
-        base_tgt,
-        base_tgt,
         base_tgt,
         int_tgt,
         baseline_raw_soma_mv=base_raw,
@@ -2421,10 +2249,11 @@ def _evaluate_intervention(
     model_int_mv = int_pred[..., 1] / config.soma_scale + config.soma_bias_mv
     teacher_delta = teacher_int_mv - teacher_base_mv
     model_delta = model_int_mv - model_base_mv
-    null_sera = float(zero_response["response_sera_mv2"])
+    # Zero-response control: same relevance and spike count, predicted change 0.
+    null_area = float(measured["zero_response_sera_iron_mv2"])
     skill = (
-        1.0 - float(measured["response_sera_mv2"]) / null_sera
-        if null_sera > 0.0
+        1.0 - float(measured["response_sera_iron_mv2"]) / null_area
+        if null_area > 0.0
         else float("nan")
     )
     direction = _response_direction_agreement(teacher_delta, model_delta)
@@ -2432,14 +2261,26 @@ def _evaluate_intervention(
     return {
         "name": item.name,
         "samples": int(base_pred.shape[0]),
-        "response_sera_mv2": float(measured["response_sera_mv2"]),
-        "response_root_sera_mv": float(measured["response_root_sera_mv"]),
-        "zero_response_sera_mv2": null_sera,
-        "zero_response_root_sera_mv": float(zero_response["response_root_sera_mv"]),
+        "teacher_spikes": int(measured["teacher_spikes"]),
+        "response_sera_iron_mv2": float(measured["response_sera_iron_mv2"]),
+        "response_sera_iron_per_spike_mv2": measured["response_sera_iron_per_spike_mv2"],
+        "zero_response_sera_iron_mv2": null_area,
+        "zero_response_sera_iron_per_spike_mv2": measured[
+            "zero_response_sera_iron_per_spike_mv2"
+        ],
         "response_skill": skill,
         "direction_agreement": direction,
         "response_gain": gain,
     }
+
+
+def _pooled_response_sera(reports: list[dict[str, Any]]) -> float | None:
+    """Summed Response SERA area over interventions per summed teacher spike."""
+    rows = [row for row in reports if np.isfinite(row["response_sera_iron_mv2"])]
+    spikes = sum(int(row["teacher_spikes"]) for row in rows)
+    if not spikes:
+        return None
+    return float(sum(row["response_sera_iron_mv2"] for row in rows) / spikes)
 
 
 def _intervention_attention_rows(reports: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2822,19 +2663,6 @@ def _morphology_id(trace_id: str) -> str:
 def _fraction(mask: np.ndarray, valid: np.ndarray) -> float:
     valid_count = int(np.sum(valid))
     return float(np.sum(mask & valid) / valid_count) if valid_count else float("nan")
-
-
-def _root_mean_square(values: list[float]) -> float | None:
-    finite = np.asarray([value for value in values if np.isfinite(value)], dtype=float)
-    return float(np.sqrt(np.mean(np.square(finite)))) if finite.size else None
-
-
-def _finite_mean(values: list[float]) -> float | None:
-    finite = np.asarray(
-        [value for value in values if np.isfinite(value)],
-        dtype=float,
-    )
-    return float(np.mean(finite)) if finite.size else None
 
 
 def _numeric(value: Any) -> float:

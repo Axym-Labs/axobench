@@ -364,16 +364,16 @@ def default_diagnostic_specs() -> tuple[DiagnosticSpec, ...]:
                     name="voltage_sera_pareto",
                     kind="atomic",
                     consumes=("trace_core",),
-                    description="Model-size versus Voltage SERA view with Root-SERA retained for interpretation.",
+                    description="Model-size versus Voltage SERA (IRon-default, per teacher spike) view.",
                 ),
                 PlotterSpec(
                     name="dynamics_sera_pareto",
                     kind="atomic",
                     consumes=("trace_core",),
-                    description="Model-size versus Dynamics SERA view for voltage-transition fidelity.",
+                    description="Model-size versus Dynamics SERA (IRon-default on dV/dt, per teacher spike) view.",
                 ),
             ),
-            description="Trace fidelity, Voltage SERA, Dynamics SERA, Root-SERA, spike discrimination, count, and timing basics.",
+            description="Trace fidelity, Voltage SERA, Dynamics SERA, spike discrimination, count, and timing basics.",
         ),
         DiagnosticSpec(
             name="state_dynamics",
@@ -526,7 +526,7 @@ def default_diagnostic_specs() -> tuple[DiagnosticSpec, ...]:
                     name="response_sera_pareto",
                     kind="atomic",
                     consumes=("intervention_response",),
-                    description="Model-size versus Response SERA view for paired intervention-delta fidelity.",
+                    description="Model-size versus Response SERA (IRon-default on the teacher response, per teacher spike) view.",
                 ),
                 PlotterSpec(
                     name="neuronio_matched_intervention_response",
