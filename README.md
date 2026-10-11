@@ -124,3 +124,15 @@ Dynamics SERA, Response SERA, and Mean F1 should be reported with the
 tolerance grid, trace selection, calibration split, and uncertainty procedure.
 Ordinary trapezoidal F1 area and Root-SERA remain compatibility views rather
 than headline metrics.
+
+## License
+
+The code is licensed under Apache-2.0 (`LICENSE`). The three NMODL synapse
+mechanisms derive from NEURON's `exp2syn.mod` and are BSD-3-Clause
+(`LICENSES/`); the bundled Allen morphology is under the Allen Terms of Use.
+`NOTICE` lists these files. The released
+datasets are CC BY-NC 4.0: every trace is simulated on Allen Cell Types
+Database reconstructions, and the Allen Institute Terms of Use permit derived
+works for noncommercial purposes only. Data you generate with this code on
+Allen reconstructions or models fall under the same restriction; the Apache
+License covers the code, not its output.

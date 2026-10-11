@@ -122,3 +122,28 @@ def test_source_site_routing_preserves_every_contact() -> None:
     assert summary["used_sites_per_sign"] == 3
     assert summary["unused_source_sites_per_sign"] == 0
     assert summary["cross_compartment_fallback_contacts"] == 1
+
+
+def test_merging_sites_sums_event_counts_per_segment() -> None:
+    from axobench.generation.allen_all_active import _event_times, merge_sites_per_segment
+
+    class Sec:
+        def __init__(self, name):
+            self._name = name
+
+        def name(self):
+            return self._name
+
+    class Seg:
+        def __init__(self, sec, x):
+            self.sec, self.x = sec, x
+
+    a, b = Sec("dend[0]"), Sec("apic[3]")
+    segments = [Seg(a, 0.5), Seg(b, 0.25), Seg(a, 0.5), Seg(b, 0.75)]
+    exc = np.array([[1, 0, 1], [0, 1, 0], [1, 1, 0], [0, 0, 1]], dtype=bool)
+    inh = np.zeros_like(exc)
+    unique, merged_exc, merged_inh = merge_sites_per_segment(segments, exc, inh)
+    assert [(s.sec.name(), s.x) for s in unique] == [("dend[0]", 0.5), ("apic[3]", 0.25), ("apic[3]", 0.75)]
+    np.testing.assert_array_equal(merged_exc, [[2, 1, 1], [0, 1, 0], [0, 0, 1]])
+    assert merged_inh.sum() == 0
+    np.testing.assert_array_equal(_event_times(merged_exc[0]), [0.0, 0.0, 1.0, 2.0])

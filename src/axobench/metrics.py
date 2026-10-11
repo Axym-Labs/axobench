@@ -281,6 +281,62 @@ def dynamics_sera(
     }
 
 
+def spike_event_peaks(scores: np.ndarray, *, refractory_steps: int = 2, min_score: float = -np.inf) -> np.ndarray:
+    """Candidate spike events: local maxima of each trace's score, one per refractory window.
+
+    A timestep is a candidate if its score exceeds the previous one and is not
+    below the next one (the first step of a plateau). Candidates are then kept
+    greedily from the highest score down, dropping any within
+    `refractory_steps` of a kept one. Candidates below `min_score` are dropped
+    first; since lower peaks never suppress higher ones, this does not change
+    which peaks at or above `min_score` are kept. Returns a boolean
+    (traces, time) array.
+    """
+    if refractory_steps < 0:
+        raise ValueError("refractory_steps must be non-negative")
+    s = _as_2d(scores)
+    left = np.concatenate([np.full((s.shape[0], 1), -np.inf), s[:, :-1]], axis=1)
+    right = np.concatenate([s[:, 1:], np.full((s.shape[0], 1), -np.inf)], axis=1)
+    candidate = (s > left) & (s >= right) & (s >= min_score)
+    if refractory_steps == 0:
+        return candidate
+    kept = np.zeros_like(candidate)
+    for i in range(s.shape[0]):
+        idx = np.flatnonzero(candidate[i])
+        blocked = np.zeros(s.shape[1], dtype=bool)
+        for t in idx[np.argsort(-s[i, idx], kind="stable")]:
+            if not blocked[t]:
+                kept[i, t] = True
+                blocked[max(0, t - refractory_steps) : t + refractory_steps + 1] = True
+    return kept
+
+
+def spike_events(scores: np.ndarray, threshold: float, *, refractory_steps: int | None = 2) -> np.ndarray:
+    """Binary spike events from a spike score.
+
+    With `refractory_steps` set, events are the score peaks of `spike_event_peaks`
+    at or above `threshold`, so a run of supra-threshold timesteps is one event.
+    With `refractory_steps=None`, every timestep at or above threshold is an event.
+    """
+    s = _as_2d(scores)
+    if refractory_steps is None:
+        return s >= threshold
+    return spike_event_peaks(s, refractory_steps=refractory_steps, min_score=threshold)
+
+
+def event_count_matched_threshold(scores: np.ndarray, positive_count: int, *, refractory_steps: int | None = 2) -> float:
+    """Threshold at which `spike_events` yields `positive_count` events."""
+    if refractory_steps is None:
+        return prevalence_matched_threshold(scores, positive_count)
+    s = _as_2d(scores)
+    heights = s[spike_event_peaks(s, refractory_steps=refractory_steps)]
+    if positive_count <= 0:
+        return float("inf")
+    if positive_count >= heights.size:
+        return float("-inf")
+    return float(np.sort(heights)[::-1][positive_count - 1])
+
+
 def spike_event_confusion(
     predicted_spikes: np.ndarray,
     target_spikes: np.ndarray,
@@ -316,14 +372,57 @@ def spike_event_confusion(
     return {"tp": tp, "fp": pred_total - tp, "fn": target_total - tp}
 
 
+def coincidence_factor(
+    predicted_spikes: np.ndarray,
+    target_spikes: np.ndarray,
+    *,
+    delta_steps: int = 2,
+) -> dict[str, float | int]:
+    """Coincidence factor Gamma (Kistler et al. 1997; Jolivet et al. 2008).
+
+    Gamma = (N_coinc - <N_coinc>) / (0.5 (N_pred + N_target) (1 - 2 nu delta)),
+    where coincidences are one-to-one within +-delta_steps and <N_coinc> =
+    2 nu delta N_target is the count expected from a Poisson train at the
+    predicted rate nu. Terms are pooled over traces, each with its own rate.
+    Gamma is 1 for a perfect prediction and about 0 for chance.
+    """
+    if delta_steps < 0:
+        raise ValueError("delta_steps must be non-negative")
+    pred = _as_2d(predicted_spikes) > 0.5
+    tgt = _as_2d(target_spikes) > 0.5
+    if pred.shape != tgt.shape:
+        raise ValueError(f"predicted_spikes and target_spikes must match, got {pred.shape} and {tgt.shape}")
+    coincidences = spike_event_confusion(pred, tgt, tolerance_steps=delta_steps)["tp"]
+    n_pred = pred.sum(axis=1).astype(np.float64)
+    n_target = tgt.sum(axis=1).astype(np.float64)
+    rate = n_pred / pred.shape[1]
+    expected = float(np.sum(2.0 * rate * delta_steps * n_target))
+    norm = float(np.sum((1.0 - 2.0 * rate * delta_steps) * 0.5 * (n_pred + n_target)))
+    value = (coincidences - expected) / norm if norm > 0.0 else float("nan")
+    return {
+        "gamma": float(value),
+        "coincidences": int(coincidences),
+        "expected_coincidences": expected,
+        "predicted_spikes": int(n_pred.sum()),
+        "target_spikes": int(n_target.sum()),
+        "delta_steps": int(delta_steps),
+    }
+
+
 def spike_f1_curve(
     spike_scores: np.ndarray,
     target_spikes: np.ndarray,
     *,
     threshold: float = 0.0,
     tolerances_steps: tuple[int, ...] | list[int] = (0, 1, 2, 3, 4, 5),
+    refractory_steps: int | None = 2,
 ) -> dict[str, Any]:
-    """Discrete spike-event F1 over a timing-tolerance interval."""
+    """Discrete spike-event F1 over a timing-tolerance interval.
+
+    Predicted events come from `spike_events`: score peaks at or above
+    `threshold`, at most one per `refractory_steps` window (or every
+    supra-threshold timestep with `refractory_steps=None`).
+    """
     if len(tolerances_steps) == 0:
         raise ValueError("tolerances_steps must contain at least one tolerance")
     tolerances = tuple(int(tolerance) for tolerance in tolerances_steps)
@@ -334,10 +433,8 @@ def spike_f1_curve(
     scores = _as_2d(spike_scores)
     target = _as_2d(target_spikes) > 0.5
     if scores.shape != target.shape:
-        raise ValueError(
-            f"spike_scores and target_spikes must match, got {scores.shape} and {target.shape}"
-        )
-    predicted = scores >= threshold
+        raise ValueError(f"spike_scores and target_spikes must match, got {scores.shape} and {target.shape}")
+    predicted = spike_events(scores, threshold, refractory_steps=refractory_steps)
     rows = []
     for tolerance in tolerances:
         confusion = spike_event_confusion(predicted, target, tolerance_steps=tolerance)
@@ -375,6 +472,7 @@ def spike_f1_curve(
         )
     return {
         "threshold": float(threshold),
+        "refractory_steps": refractory_steps,
         "t_min_steps": int(tolerances[0]),
         "t_max_steps": int(tolerances[-1]),
         "mean_f1": mean_f1,
@@ -465,6 +563,7 @@ def compute_core_metric_set(
     spike_threshold: float | None = None,
     spike_threshold_policy: str = "prevalence",
     spike_tolerances_steps: tuple[int, ...] | list[int] = (0, 1, 2, 3, 4, 5),
+    spike_refractory_steps: int | None = 2,
     relevance_kwargs: dict[str, Any] | None = None,
     timestep_ms: float = 1.0,
     intervention_prediction: np.ndarray | None = None,
@@ -495,8 +594,8 @@ def compute_core_metric_set(
     target_spikes = tgt[..., 0] > 0.5
     if spike_threshold is None:
         if spike_threshold_policy == "prevalence":
-            spike_threshold = prevalence_matched_threshold(
-                pred[..., 0], int(target_spikes.sum())
+            spike_threshold = event_count_matched_threshold(
+                pred[..., 0], int(target_spikes.sum()), refractory_steps=spike_refractory_steps
             )
             threshold_kind = "prevalence_matched"
         elif spike_threshold_policy == "zero":
@@ -511,6 +610,7 @@ def compute_core_metric_set(
         target_spikes,
         threshold=float(spike_threshold),
         tolerances_steps=spike_tolerances_steps,
+        refractory_steps=spike_refractory_steps,
     )
     spike["threshold_kind"] = threshold_kind
     result = {

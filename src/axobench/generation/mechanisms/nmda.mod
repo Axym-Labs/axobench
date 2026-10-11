@@ -10,6 +10,15 @@ COMMENT
       - voltage dependence is from Jahr & Stevens 1990
       - time constants were Q10-corrected for 34 Celsius
       - pf separates calcium current from nonspecific current
+
+    The source is NEURON's exp2syn.mod, modified by T. Branco (2012) to
+    separate ica from i and by S. Saray (2019) for the time constants; the Mg
+    block is the Jahr & Stevens (1990) equation.
+
+    SPDX-License-Identifier: BSD-3-Clause
+    Copyright (c) 2018, Michael Hines (NEURON exp2syn.mod)
+    Copyright (c) 2026, Axym Labs (modifications)
+    Licence text: LICENSES/NEURON-BSD-3-Clause.txt in the axobench repository.
 ENDCOMMENT
 
 NEURON {

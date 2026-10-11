@@ -233,6 +233,8 @@ def simulate_intervention_targets(
     exc_gmax_scale: float,
     inh_gmax_scale: float,
     input_routing: str,
+    synapse_delay_ms: float = 1.0,
+    nseg_policy: str = "hay40",
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     from neuron import coreneuron, h
 
@@ -273,6 +275,8 @@ def simulate_intervention_targets(
         inh_gmax_scale=inh_gmax_scale,
         input_routing=input_routing,
         source_route=source_route,
+        synapse_delay_ms=synapse_delay_ms,
+        nseg_policy=nseg_policy,
     )
     targets = np.stack([trace["targets"] for trace in traces]).astype(np.float32, copy=False)
     soma_mv = np.stack([trace["soma_mv"] for trace in traces]).astype(np.float32, copy=False)
@@ -292,22 +296,14 @@ def simulate_one_signed_trace(
     inh_gmax_scale: float,
     input_routing: str,
     source_route: dict[str, Any],
+    synapse_delay_ms: float = 1.0,
+    nseg_policy: str = "hay40",
 ) -> dict[str, np.ndarray]:
     duration_ms = int(signed_inputs.shape[0])
-    cell = h.L5PCtemplate(str(morphology_path))
     h.CVode().active(0)
     h.v_init = v_init_mv
-    segments, segment_types, segment_lengths = collect_segments(cell)
-    for section in list(cell.dend) + list(cell.apic):
-        section.vshift_Ih = 0
-    cell.soma[0].vshift_Ih = 0
-
-    inputs_exc, inputs_inh, input_routing_summary = _route_inputs_to_segments(
-        signed_inputs,
-        segment_types,
-        segment_lengths,
-        routing=input_routing,
-        source_route=source_route,
+    cell, segments, inputs_exc, inputs_inh, input_routing_summary = _build_cell_and_inputs(
+        h, morphology_path, signed_inputs, input_routing=input_routing, source_route=source_route, nseg_policy=nseg_policy
     )
     pc = h.ParallelContext()
     netcons, synapses, stim_refs = attach_deterministic_synapses(
@@ -318,6 +314,7 @@ def simulate_one_signed_trace(
         inputs_inh,
         exc_gmax_scale=exc_gmax_scale,
         inh_gmax_scale=inh_gmax_scale,
+        delay_ms=synapse_delay_ms,
     )
     t_vec = h.Vector()
     soma_vec = h.Vector()
@@ -357,7 +354,16 @@ def simulate_signed_trace_batch(
     inh_gmax_scale: float,
     input_routing: str,
     source_route: dict[str, Any],
+    synapse_delay_ms: float = 1.0,
+    nseg_policy: str = "hay40",
+    soma_samples_per_ms: int | None = None,
 ) -> list[dict[str, np.ndarray]]:
+    """Simulate a batch of signed input traces on one morphology.
+
+    Each trace dict holds `targets` (spike labels and normalised clipped soma
+    at 1 ms), `soma_mv` (raw soma at 1 ms), `input_routing`, and, when
+    `soma_samples_per_ms` is given, `soma_mv_hr` (raw soma at that rate).
+    """
     if signed_inputs_batch.ndim != 3:
         raise ValueError(f"signed_inputs_batch must have shape (samples, time, channels), got {signed_inputs_batch.shape}")
     duration_ms = int(signed_inputs_batch.shape[1])
@@ -374,17 +380,8 @@ def simulate_signed_trace_batch(
     event_sink: list[tuple[float, int]] = []
     next_gid = 1
     for signed_inputs in signed_inputs_batch:
-        cell = h.L5PCtemplate(str(morphology_path))
-        segments, segment_types, segment_lengths = collect_segments(cell)
-        for section in list(cell.dend) + list(cell.apic):
-            section.vshift_Ih = 0
-        cell.soma[0].vshift_Ih = 0
-        inputs_exc, inputs_inh, input_routing_summary = _route_inputs_to_segments(
-            signed_inputs,
-            segment_types,
-            segment_lengths,
-            routing=input_routing,
-            source_route=source_route,
+        cell, segments, inputs_exc, inputs_inh, input_routing_summary = _build_cell_and_inputs(
+            h, morphology_path, signed_inputs, input_routing=input_routing, source_route=source_route, nseg_policy=nseg_policy
         )
         netcons, synapses, stim_refs = attach_deterministic_synapses(
             h,
@@ -396,6 +393,7 @@ def simulate_signed_trace_batch(
             inh_gmax_scale=inh_gmax_scale,
             gid_start=next_gid,
             event_sink=event_sink,
+            delay_ms=synapse_delay_ms,
         )
         next_gid += 2 * len(segments)
         t_vec = h.Vector()
@@ -436,10 +434,63 @@ def simulate_signed_trace_batch(
         clipped_soma = np.minimum(low_soma, SOMA_CLIP_THRESHOLD_MV)
         normalized_soma = ((clipped_soma - SOMA_BIAS_MV) * SOMA_SCALE).astype(np.float32)
         targets = np.stack([spike_labels, normalized_soma], axis=1).astype(np.float32)
-        traces.append({"targets": targets, "soma_mv": low_soma, "input_routing": record["input_routing"]})
+        trace = {"targets": targets, "soma_mv": low_soma, "input_routing": record["input_routing"]}
+        if soma_samples_per_ms:
+            hr_time = np.arange(0, duration_ms, 1.0 / soma_samples_per_ms, dtype=np.float64)
+            trace["soma_mv_hr"] = np.interp(hr_time, t, soma).astype(np.float32)
+        traces.append(trace)
 
     del refs
     return traces
+
+
+NSEG_POLICIES = ("hay40", "d_lambda")
+
+
+def _build_cell_and_inputs(h, morphology_path: Path, signed_inputs: np.ndarray, *, input_routing: str,
+                           source_route: dict[str, Any], nseg_policy: str = "hay40"):
+    """Instantiate the Hay template on a morphology and route one signed input trace onto it.
+
+    Returns (cell, segments, inputs_exc, inputs_inh, routing_summary); `segments`
+    has one entry per routed input site, so a segment may appear several times.
+    """
+    if nseg_policy not in NSEG_POLICIES:
+        raise ValueError(f"nseg_policy must be one of {NSEG_POLICIES}, got {nseg_policy!r}")
+    cell = h.L5PCtemplate(str(morphology_path))
+    if nseg_policy == "d_lambda":
+        apply_d_lambda_nseg(h, cell)
+    segments, segment_types, segment_lengths = collect_segments(cell)
+    for section in list(cell.dend) + list(cell.apic):
+        section.vshift_Ih = 0
+    cell.soma[0].vshift_Ih = 0
+    inputs_exc, inputs_inh, summary = _route_inputs_to_segments(
+        signed_inputs, segment_types, segment_lengths, routing=input_routing, source_route=source_route
+    )
+    if "site_segment_indices" in summary:
+        segments = [segments[int(j)] for j in summary.pop("site_segment_indices")]
+    summary["nseg_policy"] = nseg_policy
+    return cell, segments, inputs_exc, inputs_inh, summary
+
+
+def apply_d_lambda_nseg(h, cell, *, d_lambda: float = 0.1, frequency_hz: float = 100.0) -> dict[str, int]:
+    """Set nseg of every section by the d_lambda rule, then redistribute the Hay biophysics.
+
+    nseg = 2 * int((L / (d_lambda * lambda_f) + 0.9) / 2) + 1, with the AC length
+    constant lambda_f = 1e5 * sqrt(diam / (4 pi f Ra cm)) in um (Hines and
+    Carnevale). The Hay template distributes distance-dependent conductances
+    per segment, so the biophysics are redistributed after nseg changes, as the
+    template's own `biophys` procedure does (minus its one-time axon replacement).
+    """
+    before = after = 0
+    for section in cell.all:
+        diam = float(np.mean([seg.diam for seg in section]))
+        lam = 1e5 * np.sqrt(diam / (4 * np.pi * frequency_hz * float(section.Ra) * float(section.cm)))
+        before += int(section.nseg)
+        section.nseg = int((float(section.L) / (d_lambda * lam) + 0.9) / 2) * 2 + 1
+        after += int(section.nseg)
+    h.distance(0, 0.5, sec=cell.soma[0])
+    h.L5PCbiophys().biophys(cell)
+    return {"segments_before": before, "segments_after": after}
 
 
 def _build_source_site_route(h, source_root: Path) -> dict[str, Any]:
@@ -496,6 +547,30 @@ def _route_inputs_to_segments(
             "source route metadata does not match signed input sites; "
             f"source_route_sites={source_route['types'].shape[0]}, input_sites={source_sites}"
         )
+    if routing == "all_sites_by_type":
+        target_route = _segment_route(segment_types, segment_lengths)
+        site_segments = _nearest_target_segments(source_route, target_route)
+        inputs_exc = (signed_inputs[:, :source_sites] > 0).T
+        inputs_inh = (signed_inputs[:, source_sites:] < 0).T
+        occupied = int(np.unique(site_segments).size)
+        return inputs_exc, inputs_inh, {
+            "policy": "all_sites_by_type_arclength",
+            "source_sites_per_sign": int(source_sites),
+            "morphology_segments": int(segment_count),
+            "used_sites_per_sign": int(source_sites),
+            "unique_source_sites_per_sign": int(source_sites),
+            "duplicated_source_sites_per_sign": 0,
+            "unused_source_sites_per_sign": 0,
+            "segments_with_synapses": occupied,
+            "max_sites_per_segment": int(np.bincount(site_segments).max()),
+            "target_count_by_type": _count_by_type(segment_types),
+            "source_count_by_type": source_route["count_by_type"],
+            "site_segment_indices": site_segments,
+            "defensibility_note": (
+                "Every source site is connected: each basal/apical source site is placed on the target segment of "
+                "the same compartment type nearest in normalized arclength, so several sites can share a segment."
+            ),
+        }
     if routing == "ordered_truncate" and segment_count > source_sites:
         raise ValueError(
             "morphology has more segments than available source input sites; "
@@ -548,6 +623,17 @@ def _normalized_source_indices(
         nearest = candidates[np.argmin(np.abs(source_positions[candidates] - position))]
         indices[index] = int(nearest)
     return indices
+
+
+def _nearest_target_segments(source_route: dict[str, Any], target_route: dict[str, Any]) -> np.ndarray:
+    """For each source site, the target segment of the same type nearest in normalized arclength."""
+    out = np.zeros(source_route["types"].shape[0], dtype=np.int64)
+    for index, (label, position) in enumerate(zip(source_route["types"], source_route["positions"])):
+        candidates = np.flatnonzero(target_route["types"] == label)
+        if candidates.size == 0:
+            candidates = np.arange(target_route["types"].shape[0], dtype=np.int64)
+        out[index] = int(candidates[np.argmin(np.abs(target_route["positions"][candidates] - position))])
+    return out
 
 
 def _count_by_type(segment_types: np.ndarray) -> dict[str, int]:
