@@ -1540,7 +1540,8 @@ def _f1_trace_statistics(
     threshold: float,
     tolerances: tuple[int, ...],
 ) -> np.ndarray:
-    predicted = np.where(np.isfinite(scores), scores, -np.inf) >= threshold
+    # Same predicted events as the point estimate (spike_f1_curve).
+    predicted = spike_events(np.where(np.isfinite(scores), scores, -np.inf), threshold)
     stats = np.empty((scores.shape[0], len(tolerances), 3), dtype=np.int64)
     for trace_index in range(scores.shape[0]):
         for tolerance_index, tolerance in enumerate(tolerances):

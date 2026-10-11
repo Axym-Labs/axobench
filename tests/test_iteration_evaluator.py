@@ -10,6 +10,7 @@ import numpy as np
 
 from axobench import benchmark
 from axobench.benchmark import iteration_evaluator
+from axobench.metrics import spike_f1_curve
 from axobench.benchmark.iteration_evaluator import (
     DEFAULT_BATCH_SIZE,
     DEFAULT_INTERVENTION_SAMPLES,
@@ -1057,3 +1058,16 @@ def test_context_aware_model_receives_per_sample_morphology_ids(tmp_path) -> Non
 
     assert report["morphology_ids"] == ["specimen_100", "specimen_200"]
     assert seen == ["specimen_100", "specimen_100", "specimen_200", "specimen_200"]
+
+
+def test_f1_bootstrap_statistics_match_point_estimate_events() -> None:
+    rng = np.random.default_rng(3)
+    labels = rng.random((6, 400)) < 0.02
+    # Multi-step supra-threshold runs: per-timestep thresholding would count each step.
+    scores = np.convolve(labels.ravel().astype(float), np.ones(3), mode="same").reshape(labels.shape)
+    scores = scores + 0.3 * rng.random(labels.shape)
+    tolerances = (0, 2, 5)
+    stats = iteration_evaluator._f1_trace_statistics(scores, labels, threshold=0.8, tolerances=tolerances)
+    curve = spike_f1_curve(scores, labels, threshold=0.8, tolerances_steps=tolerances)
+    expected = [[row["tp"], row["fp"], row["fn"]] for row in curve["rows"]]
+    np.testing.assert_array_equal(stats.sum(axis=0), expected)
