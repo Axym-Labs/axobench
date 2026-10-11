@@ -6,7 +6,7 @@ with one defect at a given dose, and `defect_dose_rows` scores the corrupted
 traces against the teacher with the historical NeuronIO scores (timestep AUC,
 clipped and rescaled RMSE) and the AxoBench scores (event F1, Mean F1, the
 coincidence factor, IRon-default Voltage SERA and Dynamics SERA per teacher
-spike).
+spike, and the subthreshold voltage RMSE and skill).
 
 Spike-timing defects move the action-potential waveform together with the
 spike, so the voltage stays consistent with the spike train. Voltage defects
@@ -21,16 +21,17 @@ from typing import Any, Iterable, Mapping
 import numpy as np
 
 from axobench.metrics import (
+    AP_POST_STEPS,
+    AP_PRE_STEPS,
+    SOMA_CLIP_MV,
+    ap_window_mask,
     binary_auc,
     coincidence_factor,
     iron_dynamics_sera,
     iron_voltage_sera,
     spike_f1_curve,
+    subthreshold_voltage_error,
 )
-
-AP_PRE_STEPS = 2
-AP_POST_STEPS = 4
-SOMA_CLIP_MV = -55.0
 
 DEFECTS: dict[str, str] = {
     "spike_jitter": "Gaussian spike-time jitter, standard deviation in steps",
@@ -94,7 +95,7 @@ def inject_defect(
         level = SOMA_CLIP_MV + (1.0 - float(dose)) * max(float(v.max()) - SOMA_CLIP_MV, 0.0)
         return spk.copy(), np.minimum(v, level)
     if defect == "ap_smoothing":
-        window = _ap_window_mask(spk)
+        window = ap_window_mask(spk)
         smooth = _gaussian_filter(v, float(dose))
         return spk.copy(), np.where(window, smooth, v)
     if defect == "voltage_lowpass":
@@ -147,7 +148,8 @@ def axobench_scores(
 
     Voltage and Dynamics SERA are the IRon-default SERA per teacher spike.
     Their skill is 1 - SERA / SERA of the per-trace mean of the teacher
-    voltage (same relevance and spike count).
+    voltage (same relevance and spike count). Subthreshold RMSE and skill
+    exclude the action-potential windows of teacher and predicted spikes.
     """
     bias, scale = -67.7, 0.1
     stack = lambda s, x: np.stack([s, (x - bias) * scale], axis=-1)  # noqa: E731
@@ -170,6 +172,11 @@ def axobench_scores(
         value = model[value_key]
         out[f"{name}_sera"] = float("nan") if value is None else float(value)
         out[f"{name}_skill"] = float(1.0 - model[area_key] / reference[area_key])
+    subthreshold = subthreshold_voltage_error(
+        pred, target, predicted_spikes=pred_spikes, raw_soma_mv=target_soma_mv
+    )
+    out["subthreshold_rmse_mv"] = subthreshold["subthreshold_rmse_mv"]
+    out["subthreshold_skill"] = subthreshold["subthreshold_skill"]
     curve = spike_f1_curve(pred_spikes, target_spikes, threshold=0.5, tolerances_steps=(0, 1, 2, 3, 4, 5), refractory_steps=None)
     out["f1_curve"] = [0.0 if r["f1"] is None else float(r["f1"]) for r in curve["rows"]]
     out["mean_f1"] = curve["mean_f1"]
@@ -207,13 +214,6 @@ def defect_dose_rows(
                 }
             )
     return rows
-
-
-def _ap_window_mask(spikes: np.ndarray) -> np.ndarray:
-    mask = np.zeros(spikes.shape, dtype=bool)
-    for i, t in zip(*np.nonzero(spikes > 0.5)):
-        mask[i, max(0, t - AP_PRE_STEPS) : t + AP_POST_STEPS + 1] = True
-    return mask
 
 
 def _cut_ap(trace: np.ndarray, t: int) -> tuple[int, int, np.ndarray]:

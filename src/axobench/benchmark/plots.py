@@ -1041,11 +1041,7 @@ def _plot_core_sera_pareto(
     legend_handles: dict[str, Any] = {}
     panels = (
         (axes[0], "voltage_sera_iron_per_spike_mv2", "Voltage SERA (mV²/spike)"),
-        (
-            axes[1],
-            "dynamics_sera_iron_per_spike_mv2_per_ms2",
-            "Dynamics SERA (mV²/ms²/spike)",
-        ),
+        (axes[1], "subthreshold_rmse_mv", "Subthreshold RMSE (mV)"),
         (
             axes[2],
             "response_sera_iron_per_spike_mv2",
@@ -1283,7 +1279,7 @@ def _write_core_metric_table(models: list[dict[str, Any]], output: Path) -> str:
         "model",
         "params",
         "Voltage SERA (mV²/spike)",
-        "Dynamics SERA (mV²/ms²/spike)",
+        "Subthreshold RMSE (mV)",
         "Response SERA (mV²/spike)",
         "Mean F1 (0-5 ms)",
         "trapezoidal F1 area",
@@ -1295,7 +1291,7 @@ def _write_core_metric_table(models: list[dict[str, Any]], output: Path) -> str:
                 model.get("model_id"),
                 model.get("n_parameters"),
                 _fmt_table(model.get("voltage_sera_iron_per_spike_mv2")),
-                _fmt_table(model.get("dynamics_sera_iron_per_spike_mv2_per_ms2")),
+                _fmt_table(model.get("subthreshold_rmse_mv")),
                 _fmt_table(model.get("response_sera_iron_per_spike_mv2")),
                 _fmt_table(model.get("spike_mean_f1")),
                 _fmt_table(model.get("spike_f1_area")),

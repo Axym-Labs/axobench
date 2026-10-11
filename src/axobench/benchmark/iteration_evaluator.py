@@ -11,6 +11,10 @@ area is divided by the teacher spike count of the scored traces. The teacher
 signal is the soma voltage (Voltage SERA), its rate of change (Dynamics
 SERA), or the paired intervention-minus-baseline voltage change (Response
 SERA, pooled over interventions as summed area per summed spike count).
+
+The core metrics are Voltage SERA, subthreshold voltage RMSE (outside the
+action-potential windows of teacher and predicted spikes), spike F1, and
+Response SERA. Subthreshold skill and Dynamics SERA are secondary rows.
 """
 
 from __future__ import annotations
@@ -36,7 +40,10 @@ from axobench.metrics import (
     response_sera,
     response_sera_trace_terms,
     spike_event_confusion,
+    spike_events,
     spike_f1_curve,
+    subthreshold_voltage_error,
+    subthreshold_voltage_trace_terms,
 )
 from axobench.relevance import iron_relevance, iron_threshold_weights
 
@@ -677,6 +684,17 @@ def evaluate_predictions(
         soma_bias_mv=cfg.soma_bias_mv,
         timestep_ms=cfg.timestep_ms,
     )
+    subthreshold = subthreshold_voltage_error(
+        pred[score_slice],
+        tgt[score_slice],
+        predicted_spikes=spike_events(safe_spike_scores, threshold),
+        raw_soma_mv=_slice_optional_2d(
+            raw_soma_mv, score_slice, 0, pred.shape[:2], "raw_soma_mv"
+        ),
+        soma_scale=cfg.soma_scale,
+        soma_bias_mv=cfg.soma_bias_mv,
+        ignore_start=cfg.ignore_start,
+    )
 
     intervention_reports = [_evaluate_intervention(item, cfg) for item in interventions]
     response_sera_value = _pooled_response_sera(intervention_reports)
@@ -689,10 +707,10 @@ def evaluate_predictions(
             "IRon SERA/spike, phi(teacher V)",
         ),
         _metric(
-            "dynamics_sera_iron_per_spike_mv2_per_ms2",
-            iron_dynamics["dynamics_sera_iron_per_spike_mv2_per_ms2"],
-            "mV^2/ms^2/spike",
-            "IRon SERA/spike, phi(teacher dV/dt)",
+            "subthreshold_rmse_mv",
+            subthreshold["subthreshold_rmse_mv"],
+            "mV",
+            "RMSE excl. teacher+pred AP windows",
         ),
         _metric(
             "spike_mean_f1_0_5ms",
@@ -723,6 +741,20 @@ def evaluate_predictions(
             response_sera_value,
             "mV^2/spike",
             "IRon SERA/spike, phi(teacher resp)",
+        ),
+        _metric(
+            "subthreshold_skill",
+            subthreshold["subthreshold_skill"],
+            "skill",
+            "1-RMSE/RMSE(per-trace teacher mean)",
+            core=False,
+        ),
+        _metric(
+            "dynamics_sera_iron_per_spike_mv2_per_ms2",
+            iron_dynamics["dynamics_sera_iron_per_spike_mv2_per_ms2"],
+            "mV^2/ms^2/spike",
+            "IRon SERA/spike, phi(teacher dV/dt)",
+            core=False,
         ),
     ]
 
@@ -798,7 +830,12 @@ def compare_predictions(
         config=cfg,
         model_id=candidate_id,
     )
-    if baseline_report is None:
+    if baseline_report is not None and baseline_report.get("model_id") != baseline_id:
+        raise ValueError("cached baseline report model_id does not match baseline_id")
+    if baseline_report is None or {
+        row["id"] for row in baseline_report["metrics"]
+    } != {row["id"] for row in candidate_report["metrics"]}:
+        # A missing or stale cached report (older metric set) is recomputed.
         baseline_report = evaluate_predictions(
             baseline,
             tgt,
@@ -809,8 +846,6 @@ def compare_predictions(
             config=cfg,
             model_id=baseline_id,
         )
-    elif baseline_report.get("model_id") != baseline_id:
-        raise ValueError("cached baseline report model_id does not match baseline_id")
     bootstrap_values = _paired_metric_bootstrap(
         candidate,
         baseline,
@@ -834,7 +869,9 @@ def compare_predictions(
     rows = []
     for identifier, candidate_metric in candidate_metrics.items():
         baseline_metric = baseline_metrics[identifier]
-        higher_is_better = identifier.startswith(("spike_f1", "spike_mean_f1"))
+        higher_is_better = identifier.startswith(
+            ("spike_f1", "spike_mean_f1")
+        ) or identifier == "subthreshold_skill"
         candidate_value = candidate_metric["value"]
         baseline_value = baseline_metric["value"]
         delta = (
@@ -861,6 +898,7 @@ def compare_predictions(
                 "ci95_low": ci_low,
                 "ci95_high": ci_high,
                 "unit": candidate_metric["unit"],
+                "core": candidate_metric.get("core", True),
                 "preferred_direction": "higher" if higher_is_better else "lower",
                 "assessment": assessment,
             }
@@ -1114,6 +1152,7 @@ def write_model_comparison(comparison: dict[str, Any], path: str | Path) -> Path
         "ci95_low",
         "ci95_high",
         "unit",
+        "core",
         "preferred_direction",
         "assessment",
     )
@@ -1150,13 +1189,17 @@ def format_evaluation_report(report: dict[str, Any]) -> str:
         "",
         "CORE METRICS",
     ]
-    metric_rows = [
-        [row["id"], _format_value(row["value"], row["unit"]), row["meaning"]]
-        for row in report["metrics"]
-    ]
-    lines.extend(
-        _ascii_table(["metric", "value", "role"], metric_rows, widths=(40, 24, 35))
-    )
+    for core in (True, False):
+        metric_rows = [
+            [row["id"], _format_value(row["value"], row["unit"]), row["meaning"]]
+            for row in report["metrics"]
+            if row.get("core", True) is core
+        ]
+        if not core:
+            lines.extend(["", "SECONDARY METRICS"])
+        lines.extend(
+            _ascii_table(["metric", "value", "role"], metric_rows, widths=(40, 24, 35))
+        )
     lines.extend(
         [
             "",
@@ -1220,6 +1263,7 @@ def write_evaluation_report(report: dict[str, Any], path: str | Path) -> Path:
         "id",
         "value",
         "unit",
+        "core",
         "attention",
         "condition",
         "trigger",
@@ -1258,6 +1302,7 @@ def _report_csv_rows(report: dict[str, Any]) -> list[dict[str, Any]]:
                 "id": metric.get("id"),
                 "value": _csv_value(metric.get("value")),
                 "unit": metric.get("unit"),
+                "core": metric.get("core", True),
                 "meaning": metric.get("meaning"),
             }
         )
@@ -1382,6 +1427,41 @@ def _paired_metric_bootstrap(
         spikes = float(trace_spikes[indices].sum())
         return float(values[indices].sum() / spikes) if spikes else float("nan")
 
+    raw_full = _slice_optional_2d(
+        raw_soma_mv,
+        slice(calibration_count, None),
+        0,
+        candidate.shape[:2],
+        "raw_soma_mv",
+    )
+    subthreshold_terms = [
+        subthreshold_voltage_trace_terms(
+            prediction[calibration_count:],
+            target[calibration_count:],
+            predicted_spikes=spike_events(
+                np.where(np.isfinite(scores), scores, -np.inf), threshold
+            ),
+            raw_soma_mv=raw_full,
+            soma_scale=config.soma_scale,
+            soma_bias_mv=config.soma_bias_mv,
+            ignore_start=config.ignore_start,
+        )
+        for prediction, scores, threshold in (
+            (candidate, candidate_score[..., 0], candidate_threshold),
+            (baseline, baseline_score[..., 0], baseline_threshold),
+        )
+    ]
+
+    def _subthreshold(indices: np.ndarray) -> tuple[float, float]:
+        rmse, skill = [], []
+        for terms in subthreshold_terms:
+            error = float(terms["squared_error"][indices].sum())
+            null_error = float(terms["null_squared_error"][indices].sum())
+            points = float(terms["retained_points"][indices].sum())
+            rmse.append(np.sqrt(error / points) if points else float("nan"))
+            skill.append(1.0 - np.sqrt(error / null_error) if null_error else float("nan"))
+        return float(rmse[0] - rmse[1]), float(skill[0] - skill[1])
+
     candidate_f1 = _f1_trace_statistics(
         candidate_score[..., 0],
         target_score[..., 0] > 0.5,
@@ -1403,12 +1483,14 @@ def _paired_metric_bootstrap(
     )
     values = {
         "voltage_sera_iron_per_spike_mv2": [],
-        "dynamics_sera_iron_per_spike_mv2_per_ms2": [],
+        "subthreshold_rmse_mv": [],
         "spike_mean_f1_0_5ms": [],
         "spike_f1_area_0_5ms": [],
         "spike_f1_exact": [],
         "spike_f1_5ms": [],
         "response_sera_iron_per_spike_mv2": [],
+        "subthreshold_skill": [],
+        "dynamics_sera_iron_per_spike_mv2_per_ms2": [],
     }
     rng = np.random.default_rng(seed)
     exact_step, tolerant_step = config.selected_f1_steps
@@ -1420,6 +1502,9 @@ def _paired_metric_bootstrap(
         values["dynamics_sera_iron_per_spike_mv2_per_ms2"].append(
             _per_spike(candidate_iron_dynamics, indices) - _per_spike(baseline_iron_dynamics, indices)
         )
+        rmse_delta, skill_delta = _subthreshold(indices)
+        values["subthreshold_rmse_mv"].append(rmse_delta)
+        values["subthreshold_skill"].append(skill_delta)
         candidate_spike = _f1_metrics_from_trace_statistics(
             candidate_f1,
             indices,
@@ -2459,9 +2544,9 @@ def _attention_or_na(
 
 
 def _metric(
-    identifier: str, value: float | None, unit: str, meaning: str
+    identifier: str, value: float | None, unit: str, meaning: str, *, core: bool = True
 ) -> dict[str, Any]:
-    return {"id": identifier, "value": value, "unit": unit, "meaning": meaning}
+    return {"id": identifier, "value": value, "unit": unit, "meaning": meaning, "core": core}
 
 
 def _as_traces(array: np.ndarray, name: str) -> np.ndarray:
@@ -2677,7 +2762,7 @@ def _format_value(value: float | None, unit: str) -> str:
     if value is None or not np.isfinite(value):
         return "NA"
     rendered = _format_number(value)
-    if unit not in {"fraction", "ratio"}:
+    if unit not in {"fraction", "ratio", "skill"}:
         return f"{rendered} {unit}"
     return rendered
 

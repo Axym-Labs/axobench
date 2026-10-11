@@ -16,6 +16,8 @@ from axobench.metrics import (
     event_count_matched_threshold,
     spike_event_peaks,
     spike_events,
+    subthreshold_voltage_error,
+    subthreshold_voltage_trace_terms,
 )
 
 
@@ -153,6 +155,7 @@ def test_compute_core_metric_set_returns_promoted_metrics():
 
     assert result["voltage_sera_iron_per_spike_mv2"] == 0.0
     assert result["dynamics_sera_iron_per_spike_mv2_per_ms2"] == 0.0
+    assert result["subthreshold_rmse_mv"] == 0.0
     assert result["spike_mean_f1"] == 1.0
     assert result["spike_f1_area"] == 1.0
     assert "spike_squared_f1_deficit_area" not in result
@@ -271,3 +274,112 @@ def test_spike_f1_curve_scores_a_plateau_prediction_as_one_event():
     target = np.array([[0.0, 1.0, 0.0, 0.0, 0.0, 0.0]])
     curve = spike_f1_curve(predicted, target, threshold=1.0, tolerances_steps=(0,))
     assert curve["rows"][0]["f1"] == 1.0
+
+
+def _subthreshold_case(steps: int = 60):
+    rng = np.random.default_rng(3)
+    raw = -70.0 + rng.normal(size=(2, steps))
+    raw[0, 20:22] = (-20.0, -40.0)  # action potential
+    raw[1, 35] = -25.0
+    target = np.zeros((2, steps, 2))
+    target[0, 20, 0] = 1.0
+    target[1, 35, 0] = 1.0
+    target[..., 1] = (raw + 67.7) * 0.1
+    return target, raw
+
+
+def _with_voltage(target: np.ndarray, voltage_mv: np.ndarray) -> np.ndarray:
+    prediction = target.copy()
+    prediction[..., 1] = (voltage_mv + 67.7) * 0.1
+    return prediction
+
+
+def test_subthreshold_error_is_zero_for_perfect_prediction():
+    target, raw = _subthreshold_case()
+    result = subthreshold_voltage_error(
+        target, target, predicted_spikes=target[..., 0], raw_soma_mv=raw
+    )
+    assert result["subthreshold_rmse_mv"] == pytest.approx(0.0, abs=1e-12)
+    assert result["subthreshold_skill"] == pytest.approx(1.0)
+    assert result["retained_points"] == 2 * (60 - 7)
+
+
+def test_subthreshold_skill_is_zero_for_per_trace_mean_prediction():
+    target, raw = _subthreshold_case()
+    keep = np.ones(raw.shape, dtype=bool)
+    keep[0, 18:25] = keep[1, 33:40] = False
+    mean = np.array([raw[i, keep[i]].mean() for i in range(2)])
+    prediction = _with_voltage(target, np.repeat(mean[:, None], raw.shape[1], axis=1))
+    result = subthreshold_voltage_error(
+        prediction, target, predicted_spikes=target[..., 0], raw_soma_mv=raw
+    )
+    assert result["subthreshold_skill"] == pytest.approx(0.0, abs=1e-9)
+    assert result["subthreshold_rmse_mv"] == pytest.approx(
+        np.sqrt(np.mean((raw - mean[:, None])[keep] ** 2))
+    )
+
+
+def test_subthreshold_rmse_equals_constant_offset():
+    target, raw = _subthreshold_case()
+    prediction = _with_voltage(target, raw + 2.5)
+    result = subthreshold_voltage_error(
+        prediction, target, predicted_spikes=target[..., 0], raw_soma_mv=raw
+    )
+    assert result["subthreshold_rmse_mv"] == pytest.approx(2.5)
+
+
+def test_subthreshold_error_ignores_teacher_and_predicted_ap_windows():
+    target, raw = _subthreshold_case()
+    predicted_spikes = target[..., 0].copy()
+    predicted_spikes[0, 45] = 1.0  # spurious predicted spike
+    voltage = raw.copy()
+    voltage[0, 18:25] += 30.0  # teacher AP window [t-2, t+4]
+    voltage[0, 43:50] -= 30.0  # predicted AP window
+    voltage[1, 33:40] -= 30.0
+    prediction = _with_voltage(target, voltage)
+    result = subthreshold_voltage_error(
+        prediction, target, predicted_spikes=predicted_spikes, raw_soma_mv=raw
+    )
+    assert result["subthreshold_rmse_mv"] == pytest.approx(0.0, abs=1e-9)
+    assert result["retained_points"] == 2 * (60 - 7) - 7
+
+    voltage[0, 50] -= 3.0  # first step after the predicted window counts
+    prediction = _with_voltage(target, voltage)
+    terms = subthreshold_voltage_trace_terms(
+        prediction, target, predicted_spikes=predicted_spikes, raw_soma_mv=raw
+    )
+    assert terms["squared_error"][0] == pytest.approx(9.0)
+    assert terms["squared_error"][1] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_subthreshold_error_masks_teacher_spikes_before_ignore_start():
+    target, raw = _subthreshold_case()
+    voltage = raw.copy()
+    voltage[0, 22:25] += 5.0  # after ignore_start but inside the teacher AP window
+    prediction = _with_voltage(target, voltage)
+    result = subthreshold_voltage_error(
+        prediction,
+        target,
+        predicted_spikes=target[:, 22:, 0],
+        raw_soma_mv=raw,
+        ignore_start=22,
+    )
+    assert result["subthreshold_rmse_mv"] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_subthreshold_error_clips_both_voltages_at_minus_55_mv():
+    target, raw = _subthreshold_case()
+    raw[0, 10] = -50.0
+    target[0, 10, 1] = (-50.0 + 67.7) * 0.1
+    voltage = raw.copy()
+    voltage[0, 10] = -30.0
+    voltage[1, 10] = -55.0 + (-55.0 - raw[1, 10])  # above the clip
+    voltage[1, 12] = raw[1, 12] - 4.0  # below the clip, error kept
+    prediction = _with_voltage(target, voltage)
+    terms = subthreshold_voltage_trace_terms(
+        prediction, target, predicted_spikes=target[..., 0], raw_soma_mv=raw
+    )
+    assert terms["squared_error"][0] == pytest.approx(0.0, abs=1e-9)
+    assert terms["squared_error"][1] == pytest.approx(
+        (-55.0 - raw[1, 10]) ** 2 + 16.0
+    )

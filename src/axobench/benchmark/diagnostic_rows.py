@@ -484,6 +484,8 @@ def _trace_core_rows(
         "state_trace_shape_distance",
         "spike_train_distance",
         "voltage_sera_iron_per_spike_mv2",
+        "subthreshold_rmse_mv",
+        "subthreshold_skill",
         "dynamics_sera_iron_per_spike_mv2_per_ms2",
         "spike_auc",
         "spike_mean_f1",

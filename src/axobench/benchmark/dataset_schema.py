@@ -367,13 +367,16 @@ def default_diagnostic_specs() -> tuple[DiagnosticSpec, ...]:
                     description="Model-size versus Voltage SERA (IRon-default, per teacher spike) view.",
                 ),
                 PlotterSpec(
-                    name="dynamics_sera_pareto",
+                    name="subthreshold_rmse_pareto",
                     kind="atomic",
                     consumes=("trace_core",),
-                    description="Model-size versus Dynamics SERA (IRon-default on dV/dt, per teacher spike) view.",
+                    description="Model-size versus subthreshold voltage RMSE (outside teacher and predicted AP windows) view.",
                 ),
             ),
-            description="Trace fidelity, Voltage SERA, Dynamics SERA, spike discrimination, count, and timing basics.",
+            description=(
+                "Trace fidelity, Voltage SERA, subthreshold RMSE, Dynamics SERA, "
+                "spike discrimination, count, and timing basics."
+            ),
         ),
         DiagnosticSpec(
             name="state_dynamics",

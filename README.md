@@ -3,10 +3,10 @@
 AxoBench is the extracted benchmark and dataset-generation workbench for
 single-neuron surrogate evaluation. It owns dataset generation, data/schema
 utilities, diagnostic suites, and benchmark reporting. Its publication
-contract reports Voltage SERA for voltage fidelity, Dynamics SERA for
-voltage-transition fidelity, Response SERA for intervention-response fidelity
-(all IRon-default SERA per teacher spike), and the arithmetic Mean F1 at
-integer spike tolerances from 0 through 5 ms.
+contract reports Voltage SERA for voltage fidelity, subthreshold voltage RMSE
+outside action potentials, Response SERA for intervention-response fidelity
+(both SERA metrics are IRon-default SERA per teacher spike), and the
+arithmetic Mean F1 at integer spike tolerances from 0 through 5 ms.
 
 ## Install and verify
 
@@ -94,10 +94,11 @@ from axobench.benchmark import write_evaluation_report
 write_evaluation_report(report, "runs/candidate-17.csv")
 ```
 
-The terminal report is bounded to seven metric rows and 24 diagnostic rows.
-The primary metrics are Voltage SERA, Dynamics SERA, Response SERA, and Mean
-F1 over the declared integer timing tolerances. SERA is the squared error-
-relevance area of Ribeiro and Moniz (2020) with the IRon default relevance:
+The terminal report is bounded to seven core metric rows, two secondary metric
+rows, and 24 diagnostic rows. The primary metrics are Voltage SERA,
+subthreshold RMSE, Response SERA, and Mean F1 over the declared integer timing
+tolerances. SERA is the squared error-relevance area of Ribeiro and Moniz
+(2020) with the IRon default relevance:
 `phi` is 1 at the adjusted-boxplot fences of the teacher signal, 0 at its
 median, and interpolated by IRon's monotone cubic in between, so extreme
 teacher values carry the weight. SERA integrates the summed squared error over
@@ -110,6 +111,15 @@ teacher voltage change (intervention minus baseline) for Response SERA
 (`response_sera_iron_per_spike_mv2`), whose error is the predicted minus the
 teacher voltage change and whose spike count covers baseline and intervention
 traces. Response skill compares Response SERA with a zero-response control.
+Subthreshold RMSE (`subthreshold_rmse_mv`) is the soma voltage RMSE pooled
+over scored steps outside the action-potential windows (2 steps before to 4
+steps after) of every teacher and every predicted spike, with both voltages
+clipped at -55 mV. It measures voltage offset, gain, and post-spike errors that
+Voltage SERA, dominated by spike timing near action potentials, and spike F1
+miss; excluding predicted-spike windows avoids counting spike-timing errors
+twice. Its companion `subthreshold_skill` is `1 - RMSE / RMSE(null)` for the
+per-trace mean clipped teacher voltage on the same steps. Subthreshold skill
+and Dynamics SERA are secondary rows.
 The default spike score is the arithmetic mean of event F1 at
 `0, 1, 2, 3, 4, 5 ms`, so it is higher-is-better and each declared tolerance
 has equal weight. The report also includes ordinary trapezoidal F1 area, exact
@@ -130,7 +140,7 @@ intervals without rerunning the baseline. The corresponding `improved`,
 
 AxoBench defines evaluation and generation contracts; it does not claim that
 one scalar metric captures every biologically relevant error. Voltage SERA,
-Dynamics SERA, Response SERA, and Mean F1 should be reported with the
+subthreshold RMSE, Response SERA, and Mean F1 should be reported with the
 tolerance grid, trace selection, calibration split, and uncertainty procedure.
 Ordinary trapezoidal F1 area remains a compatibility view rather than a
 headline metric.

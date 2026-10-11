@@ -7,14 +7,14 @@ from axobench.benchmark.plots import (
 )
 
 
-def test_core_metric_artifact_promotes_dynamics_sera(tmp_path):
+def test_core_metric_artifact_promotes_subthreshold_rmse(tmp_path):
     summary = {
         "models": [
             {
                 "model_id": "branch_elm_m5",
                 "n_parameters": 10_000,
                 "voltage_sera_iron_per_spike_mv2": 16.0,
-                "dynamics_sera_iron_per_spike_mv2_per_ms2": 4.0,
+                "subthreshold_rmse_mv": 4.0,
                 "response_sera_iron_per_spike_mv2": 9.0,
                 "spike_f1_area": 0.4,
                 "spike_f1_curve": [
@@ -26,7 +26,7 @@ def test_core_metric_artifact_promotes_dynamics_sera(tmp_path):
                 "model_id": "axosim",
                 "n_parameters": 20_000,
                 "voltage_sera_iron_per_spike_mv2": 9.0,
-                "dynamics_sera_iron_per_spike_mv2_per_ms2": 1.0,
+                "subthreshold_rmse_mv": 1.0,
                 "response_sera_iron_per_spike_mv2": 4.0,
                 "spike_f1_area": 0.7,
                 "spike_f1_curve": [
@@ -45,8 +45,8 @@ def test_core_metric_artifact_promotes_dynamics_sera(tmp_path):
 
     table = (tmp_path / "table01_core_metric_set.md").read_text()
     pareto = (tmp_path / "fig02_sera_model_size_pareto.svg").read_text()
-    assert "Dynamics SERA (mV²/ms²/spike)" in table
-    assert "Dynamics SERA (mV²/ms²/spike)" in pareto
+    assert "Subthreshold RMSE (mV)" in table
+    assert "Subthreshold RMSE (mV)" in pareto
     assert "| branch_elm_m5 | 10000 | 16 | 4 | 9 |" in table
     assert len(artifacts["figures"]) == 3
 

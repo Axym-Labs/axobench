@@ -292,6 +292,8 @@ class BenchmarkSuite:
                 "voltage_sera_iron_per_spike_mv2": m1.get(
                     "voltage_sera_iron_per_spike_mv2"
                 ),
+                "subthreshold_rmse_mv": m1.get("subthreshold_rmse_mv"),
+                "subthreshold_skill": m1.get("subthreshold_skill"),
                 "dynamics_sera_iron_per_spike_mv2_per_ms2": m1.get(
                     "dynamics_sera_iron_per_spike_mv2_per_ms2"
                 ),
@@ -595,6 +597,8 @@ def _compute_m1_trace_fidelity(
         "voltage_sera_iron_per_spike_mv2": core_metrics[
             "voltage_sera_iron_per_spike_mv2"
         ],
+        "subthreshold_rmse_mv": core_metrics["subthreshold_rmse_mv"],
+        "subthreshold_skill": core_metrics["subthreshold_skill"],
         "dynamics_sera_iron_per_spike_mv2_per_ms2": core_metrics[
             "dynamics_sera_iron_per_spike_mv2_per_ms2"
         ],

@@ -63,6 +63,8 @@ def test_perfect_prediction_scores_one():
     assert scores["gamma_2"] == pytest.approx(1.0)
     assert scores["voltage_skill"] == pytest.approx(1.0)
     assert scores["dynamics_skill"] == pytest.approx(1.0)
+    assert scores["subthreshold_rmse_mv"] == 0.0
+    assert scores["subthreshold_skill"] == pytest.approx(1.0)
 
 
 def test_spike_defects_change_counts_and_move_action_potentials():
@@ -89,6 +91,9 @@ def test_spike_defects_change_counts_and_move_action_potentials():
         ("voltage_lowpass", "dynamics_skill"),
         ("voltage_offset", "voltage_skill"),
         ("voltage_gain", "voltage_skill"),
+        ("voltage_offset", "subthreshold_skill"),
+        ("voltage_gain", "subthreshold_skill"),
+        ("post_spike", "subthreshold_skill"),
     ],
 )
 def test_axobench_scores_fall_with_dose(defect, score):

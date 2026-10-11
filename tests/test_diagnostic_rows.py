@@ -61,6 +61,12 @@ def test_model_diagnostics_emit_dataframe_rows_for_overlapping_suites():
         and row["unit"] == "mV^2/ms^2/spike"
         for row in rows
     )
+    assert any(
+        row["diagnostic"] == "trace_core"
+        and row["metric"] == "subthreshold_rmse_mv"
+        and row["unit"] == "mV"
+        for row in rows
+    )
     assert not any(
         row["metric"] in {"voltage_sera_mv2", "voltage_root_sera_mv"} for row in rows
     )

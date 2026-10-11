@@ -60,6 +60,7 @@ def test_benchmark_suite_reports_mvp_schema_and_masked_m1(tmp_path):
     assert report["m1_trace_fidelity"]["soma_rmse_mv"] == 0.0
     assert report["m1_trace_fidelity"]["voltage_sera_iron_per_spike_mv2"] == 0.0
     assert report["m1_trace_fidelity"]["dynamics_sera_iron_per_spike_mv2_per_ms2"] == 0.0
+    assert report["m1_trace_fidelity"]["subthreshold_rmse_mv"] == 0.0
     assert "voltage_sera_mv2" not in report["m1_trace_fidelity"]
     assert report["m1_trace_fidelity"]["spike_mean_f1"] == 1.0
     assert "state_weighted_trace_distance_mv" in report["m1_trace_fidelity"]

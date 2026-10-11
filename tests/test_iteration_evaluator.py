@@ -126,15 +126,23 @@ def test_perfect_predictions_clear_available_attention_rows() -> None:
     assert metrics["spike_f1_area_0_5ms"]["value"] == 1.0
     assert metrics["voltage_sera_iron_per_spike_mv2"]["value"] == 0.0
     assert metrics["dynamics_sera_iron_per_spike_mv2_per_ms2"]["value"] == 0.0
+    assert metrics["subthreshold_rmse_mv"]["value"] == 0.0
+    assert metrics["subthreshold_skill"]["value"] == 1.0
     assert metrics["response_sera_iron_per_spike_mv2"]["value"] == 0.0
     assert set(metrics) == {
         "voltage_sera_iron_per_spike_mv2",
-        "dynamics_sera_iron_per_spike_mv2_per_ms2",
+        "subthreshold_rmse_mv",
         "spike_mean_f1_0_5ms",
         "spike_f1_area_0_5ms",
         "spike_f1_exact",
         "spike_f1_5ms",
         "response_sera_iron_per_spike_mv2",
+        "subthreshold_skill",
+        "dynamics_sera_iron_per_spike_mv2_per_ms2",
+    }
+    assert {row["id"] for row in report["metrics"] if not row["core"]} == {
+        "subthreshold_skill",
+        "dynamics_sera_iron_per_spike_mv2_per_ms2",
     }
     (intervention,) = report["interventions"]
     assert intervention["response_sera_iron_per_spike_mv2"] == 0.0
@@ -200,12 +208,14 @@ def test_paired_comparison_identifies_consistent_candidate_improvement() -> None
     rows = {row["id"]: row for row in comparison["comparison"]}
     assert set(rows) == {
         "voltage_sera_iron_per_spike_mv2",
-        "dynamics_sera_iron_per_spike_mv2_per_ms2",
+        "subthreshold_rmse_mv",
         "spike_mean_f1_0_5ms",
         "spike_f1_area_0_5ms",
         "spike_f1_exact",
         "spike_f1_5ms",
         "response_sera_iron_per_spike_mv2",
+        "subthreshold_skill",
+        "dynamics_sera_iron_per_spike_mv2_per_ms2",
     }
     assert all(
         row["assessment"] == "improved"
@@ -216,6 +226,10 @@ def test_paired_comparison_identifies_consistent_candidate_improvement() -> None
     assert rows["voltage_sera_iron_per_spike_mv2"]["delta"] < 0.0
     assert rows["response_sera_iron_per_spike_mv2"]["delta"] < 0.0
     assert rows["spike_f1_exact"]["delta"] > 0.0
+    assert rows["subthreshold_rmse_mv"]["delta"] < 0.0
+    assert rows["subthreshold_rmse_mv"]["preferred_direction"] == "lower"
+    assert rows["subthreshold_skill"]["delta"] > 0.0
+    assert rows["subthreshold_skill"]["preferred_direction"] == "higher"
     rendered = format_model_comparison(comparison)
     assert "PAIRED COMPARISON" in rendered
     assert "95% CI" in rendered
@@ -262,7 +276,8 @@ def test_paired_comparison_writes_json_and_tidy_csv(tmp_path) -> None:
     )
     with csv_path.open(newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
-    assert len(rows) == 7
+    assert len(rows) == 9
+    assert sum(row["core"] == "True" for row in rows) == 7
     assert {row["assessment"] for row in rows} == {"uncertain"}
 
 
@@ -350,8 +365,12 @@ def test_report_format_is_deterministic_and_bounded() -> None:
     assert "ATTENTION PANEL" in rendered
     assert "spike_f1_exact" in rendered
     assert "mV^2/ms^2/spike" in rendered
+    core, secondary = rendered.split("SECONDARY METRICS")
+    assert "subthreshold_rmse_mv" in core.split("CORE METRICS")[1]
+    assert "dynamics_sera_iron_per_spike_mv2_per_ms2" in secondary
+    assert "subthreshold_skill" in secondary
     assert "YES = early watch" in rendered
-    assert len(rendered.splitlines()) <= 42
+    assert len(rendered.splitlines()) <= 48
     assert rendered == format_evaluation_report(report)
 
 
@@ -598,7 +617,7 @@ def test_machine_readable_report_writes_json_or_tidy_csv_only_when_called(
     with csv_path.open(newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
     assert {row["row_type"] for row in rows} == {"metric", "diagnostic", "intervention"}
-    assert len([row for row in rows if row["row_type"] == "metric"]) == 7
+    assert len([row for row in rows if row["row_type"] == "metric"]) == 9
     assert len([row for row in rows if row["row_type"] == "diagnostic"]) == 24
     intervention_ids = [row["id"] for row in rows if row["row_type"] == "intervention"]
     assert intervention_ids == [

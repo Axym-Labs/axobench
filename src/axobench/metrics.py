@@ -7,6 +7,10 @@ import numpy as np
 
 from axobench.relevance import iron_relevance, iron_threshold_weights
 
+AP_PRE_STEPS = 2
+AP_POST_STEPS = 4
+SOMA_CLIP_MV = -55.0
+
 
 def soma_rmse(prediction: np.ndarray, target: np.ndarray) -> float:
     pred_soma = np.asarray(prediction, dtype=np.float64)[..., 1]
@@ -328,6 +332,117 @@ def iron_dynamics_sera(
     }
 
 
+def ap_window_mask(spikes: np.ndarray) -> np.ndarray:
+    """Steps from `AP_PRE_STEPS` before to `AP_POST_STEPS` after each spike (inclusive)."""
+    spk = _as_2d(spikes) > 0.5
+    mask = np.zeros_like(spk)
+    steps = spk.shape[1]
+    for offset in range(-AP_PRE_STEPS, AP_POST_STEPS + 1):
+        if abs(offset) >= steps:
+            continue
+        if offset >= 0:
+            mask[:, offset:] |= spk[:, : steps - offset]
+        else:
+            mask[:, :offset] |= spk[:, -offset:]
+    return mask
+
+
+def subthreshold_voltage_trace_terms(
+    prediction: np.ndarray,
+    target: np.ndarray,
+    *,
+    predicted_spikes: np.ndarray,
+    raw_soma_mv: np.ndarray | None = None,
+    soma_scale: float = 0.1,
+    soma_bias_mv: float = -67.7,
+    ignore_start: int = 0,
+) -> dict[str, np.ndarray]:
+    """Per-trace terms of the subthreshold voltage error.
+
+    `prediction` and `target` cover the whole trace; `predicted_spikes` are the
+    predicted spike events of the scored steps (``>= ignore_start``). Scored
+    steps inside the action-potential window (:func:`ap_window_mask`) of a
+    teacher or a predicted spike are excluded. Both voltages are clipped from
+    above at `SOMA_CLIP_MV`. For each trace the result holds the summed squared
+    error, the same sum for the null prediction (the trace's mean clipped
+    teacher voltage over its retained steps), and the retained step count.
+    """
+    pred, tgt, raw = _prepare_prediction_target(
+        prediction, target, raw_soma_mv=raw_soma_mv, ignore_start=0
+    )
+    if not 0 <= ignore_start < pred.shape[1]:
+        raise ValueError("ignore_start leaves no timesteps to evaluate")
+    predicted = _as_2d(predicted_spikes)
+    if predicted.shape != (pred.shape[0], pred.shape[1] - ignore_start):
+        raise ValueError(
+            "predicted_spikes must cover the scored steps, got "
+            f"{predicted.shape} for {(pred.shape[0], pred.shape[1] - ignore_start)}"
+        )
+    excluded = ap_window_mask(tgt[..., 0])[:, ignore_start:] | ap_window_mask(predicted)
+    keep = ~excluded
+    pred_mv = pred[:, ignore_start:, 1] / soma_scale + soma_bias_mv
+    target_mv = (
+        raw[:, ignore_start:]
+        if raw is not None
+        else tgt[:, ignore_start:, 1] / soma_scale + soma_bias_mv
+    )
+    pred_mv = np.minimum(pred_mv, SOMA_CLIP_MV)
+    target_mv = np.minimum(target_mv, SOMA_CLIP_MV)
+    count = keep.sum(axis=1)
+    null_mv = np.where(keep, target_mv, 0.0).sum(axis=1) / np.maximum(count, 1)
+    return {
+        "squared_error": np.where(keep, (pred_mv - target_mv) ** 2, 0.0).sum(axis=1),
+        "null_squared_error": np.where(keep, (target_mv - null_mv[:, None]) ** 2, 0.0).sum(
+            axis=1
+        ),
+        "retained_points": count.astype(np.int64),
+    }
+
+
+def subthreshold_voltage_error(
+    prediction: np.ndarray,
+    target: np.ndarray,
+    *,
+    predicted_spikes: np.ndarray,
+    raw_soma_mv: np.ndarray | None = None,
+    soma_scale: float = 0.1,
+    soma_bias_mv: float = -67.7,
+    ignore_start: int = 0,
+) -> dict[str, Any]:
+    """RMSE of the somatic voltage outside action-potential windows.
+
+    Voltage SERA is dominated by spike-timing errors near action potentials,
+    and spike F1 scores only event times. This metric covers what both miss:
+    voltage offset, gain, and post-spike (afterhyperpolarization or
+    afterdepolarization) errors. Steps within 2 steps before to 4 steps after
+    any teacher or predicted spike are excluded, so spike-timing errors are
+    not counted twice, and both voltages are clipped at `SOMA_CLIP_MV`. The
+    RMSE pools squared errors over the retained steps of all traces; skill is
+    ``1 - RMSE / RMSE(null)`` for the per-trace mean clipped teacher voltage
+    on the same steps. See :func:`subthreshold_voltage_trace_terms`.
+    """
+    terms = subthreshold_voltage_trace_terms(
+        prediction,
+        target,
+        predicted_spikes=predicted_spikes,
+        raw_soma_mv=raw_soma_mv,
+        soma_scale=soma_scale,
+        soma_bias_mv=soma_bias_mv,
+        ignore_start=ignore_start,
+    )
+    error = float(np.sum(terms["squared_error"]))
+    null_error = float(np.sum(terms["null_squared_error"]))
+    points = int(np.sum(terms["retained_points"]))
+    return {
+        "subthreshold_rmse_mv": float(np.sqrt(error / points)) if points else None,
+        "subthreshold_skill": (
+            float(1.0 - np.sqrt(error / null_error)) if null_error > 0.0 else None
+        ),
+        "null_subthreshold_rmse_mv": float(np.sqrt(null_error / points)) if points else None,
+        "retained_points": points,
+    }
+
+
 def response_sera_trace_terms(
     baseline_prediction: np.ndarray,
     intervention_prediction: np.ndarray,
@@ -452,7 +567,12 @@ def compute_core_metric_set(
     intervention_target: np.ndarray | None = None,
     intervention_raw_soma_mv: np.ndarray | None = None,
 ) -> dict[str, Any]:
-    """Easy entrypoint for the recommended AxoBench core metrics."""
+    """Easy entrypoint for the recommended AxoBench core metrics.
+
+    The core set is Voltage SERA, subthreshold voltage RMSE, spike F1, and
+    (with an intervention pair) Response SERA. Dynamics SERA is returned as a
+    secondary metric.
+    """
     pred, tgt, raw = _prepare_prediction_target(
         prediction, target, raw_soma_mv=raw_soma_mv, ignore_start=ignore_start
     )
@@ -493,11 +613,25 @@ def compute_core_metric_set(
         refractory_steps=spike_refractory_steps,
     )
     spike["threshold_kind"] = threshold_kind
+    subthreshold = subthreshold_voltage_error(
+        prediction,
+        target,
+        predicted_spikes=spike_events(
+            pred[..., 0], float(spike_threshold), refractory_steps=spike_refractory_steps
+        ),
+        raw_soma_mv=raw_soma_mv,
+        soma_scale=soma_scale,
+        soma_bias_mv=soma_bias_mv,
+        ignore_start=ignore_start,
+    )
     result = {
         "voltage": voltage,
         "dynamics": dynamics,
+        "subthreshold": subthreshold,
         "spike": spike,
         "voltage_sera_iron_per_spike_mv2": voltage["voltage_sera_iron_per_spike_mv2"],
+        "subthreshold_rmse_mv": subthreshold["subthreshold_rmse_mv"],
+        "subthreshold_skill": subthreshold["subthreshold_skill"],
         "dynamics_sera_iron_per_spike_mv2_per_ms2": dynamics[
             "dynamics_sera_iron_per_spike_mv2_per_ms2"
         ],
