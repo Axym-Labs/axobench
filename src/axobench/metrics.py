@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 from typing import Any
 
 import numpy as np
@@ -15,7 +16,9 @@ def binary_auc(scores: np.ndarray, labels: np.ndarray) -> float:
     scores = np.asarray(scores, dtype=np.float64).reshape(-1)
     labels = np.asarray(labels, dtype=np.float64).reshape(-1)
     if scores.shape != labels.shape:
-        raise ValueError(f"scores and labels must have same shape, got {scores.shape} and {labels.shape}")
+        raise ValueError(
+            f"scores and labels must have same shape, got {scores.shape} and {labels.shape}"
+        )
 
     positive = labels > 0.5
     negative = ~positive
@@ -47,7 +50,9 @@ def prevalence_matched_threshold(scores: np.ndarray, positive_count: int) -> flo
         return float("inf")
     if positive_count >= flat.size:
         return float("-inf")
-    return float(np.partition(flat, flat.size - positive_count)[flat.size - positive_count])
+    return float(
+        np.partition(flat, flat.size - positive_count)[flat.size - positive_count]
+    )
 
 
 def voltage_relevance(
@@ -75,21 +80,33 @@ def voltage_relevance(
     if spike_labels is not None:
         spikes = _as_2d(spike_labels) > 0.5
         if spikes.shape != soma.shape:
-            raise ValueError(f"spike_labels shape must match target_soma_mv, got {spikes.shape} and {soma.shape}")
-        relevance = np.maximum(relevance, _dilate_spikes(spikes, spike_radius_steps).astype(np.float64))
+            raise ValueError(
+                f"spike_labels shape must match target_soma_mv, got {spikes.shape} and {soma.shape}"
+            )
+        relevance = np.maximum(
+            relevance, _dilate_spikes(spikes, spike_radius_steps).astype(np.float64)
+        )
 
     relevance = np.maximum(
         relevance,
-        _tail_relevance(soma, start_quantile=voltage_tail_start, stop_quantile=voltage_tail_stop),
+        _tail_relevance(
+            soma, start_quantile=voltage_tail_start, stop_quantile=voltage_tail_stop
+        ),
     )
     relevance = np.maximum(
         relevance,
-        _tail_relevance(-soma, start_quantile=hyperpolar_tail_start, stop_quantile=hyperpolar_tail_stop),
+        _tail_relevance(
+            -soma,
+            start_quantile=hyperpolar_tail_start,
+            stop_quantile=hyperpolar_tail_stop,
+        ),
     )
     dvdt = np.diff(soma, axis=1, prepend=soma[:, :1])
     relevance = np.maximum(
         relevance,
-        _tail_relevance(np.abs(dvdt), start_quantile=dvdt_tail_start, stop_quantile=dvdt_tail_stop),
+        _tail_relevance(
+            np.abs(dvdt), start_quantile=dvdt_tail_start, stop_quantile=dvdt_tail_stop
+        ),
     )
     max_relevance = float(np.max(relevance)) if relevance.size else 0.0
     if max_relevance <= 0.0:
@@ -114,7 +131,9 @@ def sera(
     err = np.asarray(error, dtype=np.float64)
     rel = np.asarray(relevance, dtype=np.float64)
     if err.shape != rel.shape:
-        raise ValueError(f"error and relevance must have same shape, got {err.shape} and {rel.shape}")
+        raise ValueError(
+            f"error and relevance must have same shape, got {err.shape} and {rel.shape}"
+        )
     if thresholds is None:
         thresholds = np.linspace(0.0, 1.0, 101, dtype=np.float64)
     thresholds = np.asarray(thresholds, dtype=np.float64)
@@ -123,7 +142,7 @@ def sera(
     if np.any(np.diff(thresholds) < 0):
         raise ValueError("thresholds must be sorted in ascending order")
 
-    squared_error = err ** 2
+    squared_error = err**2
     mse_values = []
     support = []
     for threshold in thresholds:
@@ -189,21 +208,26 @@ def voltage_sera(
     relevance_kwargs: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Compute raw/teacher-relevance voltage SERA and companion RMSE."""
-    pred, tgt, raw = _prepare_prediction_target(prediction, target, raw_soma_mv=raw_soma_mv, ignore_start=ignore_start)
+    pred, tgt, raw = _prepare_prediction_target(
+        prediction, target, raw_soma_mv=raw_soma_mv, ignore_start=ignore_start
+    )
     pred_soma_mv = pred[..., 1] / soma_scale + soma_bias_mv
     target_soma_mv = raw if raw is not None else tgt[..., 1] / soma_scale + soma_bias_mv
     target_spikes = tgt[..., 0] > 0.5
     if pred_soma_mv.shape != target_soma_mv.shape:
-        raise ValueError(f"prediction and target soma shapes must match, got {pred_soma_mv.shape} and {target_soma_mv.shape}")
-    relevance = voltage_relevance(target_soma_mv, target_spikes, **(relevance_kwargs or {}))
+        raise ValueError(
+            f"prediction and target soma shapes must match, got {pred_soma_mv.shape} and {target_soma_mv.shape}"
+        )
+    relevance = voltage_relevance(
+        target_soma_mv, target_spikes, **(relevance_kwargs or {})
+    )
     error = pred_soma_mv - target_soma_mv
     sera_curve = sera(error, relevance, return_curve=True)
     root_sera_mv = float(np.sqrt(sera_curve["value"]))
-    rmse = float(np.sqrt(np.mean(error ** 2)))
+    rmse = float(np.sqrt(np.mean(error**2)))
     return {
         "voltage_sera_mv2": float(sera_curve["value"]),
         "voltage_root_sera_mv": root_sera_mv,
-        "voltage_sera_mv": root_sera_mv,
         "voltage_rmse_mv": rmse,
         "voltage_sera_over_rmse": float(root_sera_mv / rmse) if rmse > 0.0 else None,
         "relevance_mean": float(np.mean(relevance)),
@@ -238,7 +262,9 @@ def dynamics_sera(
     pred_soma_mv = pred[..., 1] / soma_scale + soma_bias_mv
     target_soma_mv = raw if raw is not None else tgt[..., 1] / soma_scale + soma_bias_mv
     target_spikes = tgt[..., 0] > 0.5
-    relevance = voltage_relevance(target_soma_mv, target_spikes, **(relevance_kwargs or {}))
+    relevance = voltage_relevance(
+        target_soma_mv, target_spikes, **(relevance_kwargs or {})
+    )
     transition_relevance = np.maximum(relevance[:, :-1], relevance[:, 1:])
     pred_rate = np.diff(pred_soma_mv, axis=1) / timestep_ms
     target_rate = np.diff(target_soma_mv, axis=1) / timestep_ms
@@ -248,7 +274,6 @@ def dynamics_sera(
     return {
         "dynamics_sera_mv2_per_ms2": float(sera_curve["value"]),
         "dynamics_root_sera_mv_per_ms": root_sera_rate,
-        "dynamics_sera_mv_per_ms": root_sera_rate,
         "relevance_mean": float(np.mean(transition_relevance)),
         "relevance_support_ge_0_5": int((transition_relevance >= 0.5).sum()),
         "relevance_support_ge_0_9": int((transition_relevance >= 0.9).sum()),
@@ -268,7 +293,9 @@ def spike_event_confusion(
     pred = _as_2d(predicted_spikes) > 0.5
     tgt = _as_2d(target_spikes) > 0.5
     if pred.shape != tgt.shape:
-        raise ValueError(f"predicted_spikes and target_spikes must match, got {pred.shape} and {tgt.shape}")
+        raise ValueError(
+            f"predicted_spikes and target_spikes must match, got {pred.shape} and {tgt.shape}"
+        )
     tp = 0
     pred_total = int(pred.sum())
     target_total = int(tgt.sum())
@@ -302,15 +329,14 @@ def spike_f1_curve(
     tolerances = tuple(int(tolerance) for tolerance in tolerances_steps)
     if any(tolerance < 0 for tolerance in tolerances):
         raise ValueError("tolerances_steps must be non-negative")
-    if any(
-        right <= left
-        for left, right in zip(tolerances, tolerances[1:])
-    ):
+    if any(right <= left for left, right in itertools.pairwise(tolerances)):
         raise ValueError("tolerances_steps must be strictly increasing")
     scores = _as_2d(spike_scores)
     target = _as_2d(target_spikes) > 0.5
     if scores.shape != target.shape:
-        raise ValueError(f"spike_scores and target_spikes must match, got {scores.shape} and {target.shape}")
+        raise ValueError(
+            f"spike_scores and target_spikes must match, got {scores.shape} and {target.shape}"
+        )
     predicted = scores >= threshold
     rows = []
     for tolerance in tolerances:
@@ -333,13 +359,20 @@ def spike_f1_curve(
                 **confusion,
             }
         )
-    f1_values = np.asarray([0.0 if row["f1"] is None else float(row["f1"]) for row in rows], dtype=np.float64)
+    f1_values = np.asarray(
+        [0.0 if row["f1"] is None else float(row["f1"]) for row in rows],
+        dtype=np.float64,
+    )
     mean_f1 = float(np.mean(f1_values))
     if len(tolerances) == 1:
         area = float(f1_values[0])
     else:
         span = float(tolerances[-1] - tolerances[0])
-        area = float(_trapezoid(f1_values, tolerances) / span) if span > 0 else float(np.mean(f1_values))
+        area = (
+            float(_trapezoid(f1_values, tolerances) / span)
+            if span > 0
+            else float(np.mean(f1_values))
+        )
     return {
         "threshold": float(threshold),
         "t_min_steps": int(tolerances[0]),
@@ -377,27 +410,40 @@ def response_sera(
         ignore_start=ignore_start,
     )
     if base_pred.shape != int_pred.shape or base_tgt.shape != int_tgt.shape:
-        raise ValueError("baseline and intervention arrays must have matching prediction/target shapes")
+        raise ValueError(
+            "baseline and intervention arrays must have matching prediction/target shapes"
+        )
     base_pred_mv = base_pred[..., 1] / soma_scale + soma_bias_mv
     int_pred_mv = int_pred[..., 1] / soma_scale + soma_bias_mv
-    base_tgt_mv = base_raw if base_raw is not None else base_tgt[..., 1] / soma_scale + soma_bias_mv
-    int_tgt_mv = int_raw if int_raw is not None else int_tgt[..., 1] / soma_scale + soma_bias_mv
+    base_tgt_mv = (
+        base_raw
+        if base_raw is not None
+        else base_tgt[..., 1] / soma_scale + soma_bias_mv
+    )
+    int_tgt_mv = (
+        int_raw if int_raw is not None else int_tgt[..., 1] / soma_scale + soma_bias_mv
+    )
     teacher_delta = int_tgt_mv - base_tgt_mv
     model_delta = int_pred_mv - base_pred_mv
     error = model_delta - teacher_delta
-    base_rel = voltage_relevance(base_tgt_mv, base_tgt[..., 0] > 0.5, **(relevance_kwargs or {}))
-    int_rel = voltage_relevance(int_tgt_mv, int_tgt[..., 0] > 0.5, **(relevance_kwargs or {}))
-    delta_rel = _tail_relevance(np.abs(teacher_delta), start_quantile=0.80, stop_quantile=0.995)
+    base_rel = voltage_relevance(
+        base_tgt_mv, base_tgt[..., 0] > 0.5, **(relevance_kwargs or {})
+    )
+    int_rel = voltage_relevance(
+        int_tgt_mv, int_tgt[..., 0] > 0.5, **(relevance_kwargs or {})
+    )
+    delta_rel = _tail_relevance(
+        np.abs(teacher_delta), start_quantile=0.80, stop_quantile=0.995
+    )
     relevance = np.maximum.reduce([base_rel, int_rel, delta_rel])
     if float(np.max(relevance)) <= 0.0:
         relevance = np.ones_like(relevance, dtype=np.float64)
     sera_curve = sera(error, relevance, return_curve=True)
     root_sera_mv = float(np.sqrt(sera_curve["value"]))
-    rmse = float(np.sqrt(np.mean(error ** 2)))
+    rmse = float(np.sqrt(np.mean(error**2)))
     return {
         "response_sera_mv2": float(sera_curve["value"]),
         "response_root_sera_mv": root_sera_mv,
-        "response_sera_mv": root_sera_mv,
         "response_rmse_mv": rmse,
         "response_sera_over_rmse": float(root_sera_mv / rmse) if rmse > 0.0 else None,
         "teacher_response_abs_mean_mv": float(np.mean(np.abs(teacher_delta))),
@@ -426,7 +472,9 @@ def compute_core_metric_set(
     intervention_raw_soma_mv: np.ndarray | None = None,
 ) -> dict[str, Any]:
     """Easy entrypoint for the recommended AxoBench core metrics."""
-    pred, tgt, raw = _prepare_prediction_target(prediction, target, raw_soma_mv=raw_soma_mv, ignore_start=ignore_start)
+    pred, tgt, raw = _prepare_prediction_target(
+        prediction, target, raw_soma_mv=raw_soma_mv, ignore_start=ignore_start
+    )
     voltage = voltage_sera(
         pred,
         tgt,
@@ -447,7 +495,9 @@ def compute_core_metric_set(
     target_spikes = tgt[..., 0] > 0.5
     if spike_threshold is None:
         if spike_threshold_policy == "prevalence":
-            spike_threshold = prevalence_matched_threshold(pred[..., 0], int(target_spikes.sum()))
+            spike_threshold = prevalence_matched_threshold(
+                pred[..., 0], int(target_spikes.sum())
+            )
             threshold_kind = "prevalence_matched"
         elif spike_threshold_policy == "zero":
             spike_threshold = 0.0
@@ -468,16 +518,18 @@ def compute_core_metric_set(
         "dynamics": dynamics,
         "spike": spike,
         "voltage_sera_mv2": voltage["voltage_sera_mv2"],
-        "voltage_sera_mv": voltage["voltage_sera_mv"],
+        "voltage_root_sera_mv": voltage["voltage_root_sera_mv"],
         "dynamics_sera_mv2_per_ms2": dynamics["dynamics_sera_mv2_per_ms2"],
-        "dynamics_sera_mv_per_ms": dynamics["dynamics_sera_mv_per_ms"],
+        "dynamics_root_sera_mv_per_ms": dynamics["dynamics_root_sera_mv_per_ms"],
         "spike_mean_f1": spike["mean_f1"],
         "spike_f1_area": spike["f1_area"],
         "spike_threshold": float(spike_threshold),
         "spike_threshold_kind": threshold_kind,
     }
     if (intervention_prediction is None) != (intervention_target is None):
-        raise ValueError("intervention_prediction and intervention_target must be supplied together")
+        raise ValueError(
+            "intervention_prediction and intervention_target must be supplied together"
+        )
     if intervention_prediction is not None and intervention_target is not None:
         response = response_sera(
             prediction,
@@ -493,7 +545,7 @@ def compute_core_metric_set(
         )
         result["response"] = response
         result["response_sera_mv2"] = response["response_sera_mv2"]
-        result["response_sera_mv"] = response["response_sera_mv"]
+        result["response_root_sera_mv"] = response["response_root_sera_mv"]
     return result
 
 
@@ -507,7 +559,9 @@ def _prepare_prediction_target(
     pred = _as_trace_array(np.asarray(prediction, dtype=np.float64))
     tgt = _as_trace_array(np.asarray(target, dtype=np.float64))
     if pred.shape != tgt.shape:
-        raise ValueError(f"prediction and target shapes must match, got {pred.shape} and {tgt.shape}")
+        raise ValueError(
+            f"prediction and target shapes must match, got {pred.shape} and {tgt.shape}"
+        )
     if ignore_start < 0:
         raise ValueError("ignore_start must be non-negative")
     if ignore_start > 0:
@@ -521,7 +575,9 @@ def _prepare_prediction_target(
         if ignore_start > 0:
             raw = raw[:, ignore_start:]
         if raw.shape != pred.shape[:2]:
-            raise ValueError(f"raw_soma_mv must match trace/time shape after mask, got {raw.shape} and {pred.shape[:2]}")
+            raise ValueError(
+                f"raw_soma_mv must match trace/time shape after mask, got {raw.shape} and {pred.shape[:2]}"
+            )
     return pred, tgt, raw
 
 

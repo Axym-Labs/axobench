@@ -8,6 +8,7 @@ from axobench.benchmark.dataset_schema import (
     build_v1_dataset_manifest_template,
     default_diagnostic_specs,
     provisional_v1_morphologies,
+    v1_morphologies,
     validate_v1_manifest_template,
 )
 
@@ -30,8 +31,8 @@ def test_v1_dataset_manifest_encodes_deep_lean_layout():
     assert set(manifest["intervention_conditions"]) == set(INTERVENTION_CONDITIONS)
 
 
-def test_provisional_v1_morphologies_cover_control_and_sane_shifts():
-    morphologies = provisional_v1_morphologies()
+def test_v1_morphologies_cover_control_and_sane_shifts():
+    morphologies = v1_morphologies()
     roles = {entry.role for entry in morphologies}
 
     assert len(morphologies) == V1_MORPHOLOGY_COUNT
@@ -47,6 +48,10 @@ def test_provisional_v1_morphologies_cover_control_and_sane_shifts():
     assert "stronger_sane_length_shift" in roles
     assert all(entry.routing_shape_match for entry in morphologies)
     assert max(entry.total_length_ratio_vs_reference for entry in morphologies) > 1.3
+
+
+def test_provisional_v1_morphologies_remains_a_compatibility_alias():
+    assert provisional_v1_morphologies() == v1_morphologies()
 
 
 def test_v1_manifest_requires_raw_and_clipped_target_views():

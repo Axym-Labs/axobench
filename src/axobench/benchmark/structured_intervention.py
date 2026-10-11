@@ -7,7 +7,8 @@ not make global smoothness claims.
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 
@@ -44,7 +45,9 @@ def make_selective_event_dropout_inputs(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Drop only excitatory (`event_sign=1`) or inhibitory (`event_sign=-1`) events."""
     if event_sign not in {-1, 1}:
-        raise ValueError("event_sign must be 1 for excitatory or -1 for inhibitory events")
+        raise ValueError(
+            "event_sign must be 1 for excitatory or -1 for inhibitory events"
+        )
     if not 0.0 <= dropout_probability <= 1.0:
         raise ValueError("dropout_probability must be in [0, 1]")
     rng = np.random.default_rng(seed)
@@ -71,12 +74,16 @@ def make_temporal_jitter_inputs(
     rng = np.random.default_rng(seed)
     jittered = np.zeros_like(inputs)
     event_locations = np.argwhere(inputs != 0)
-    shifts = rng.integers(-max_jitter_steps, max_jitter_steps + 1, size=event_locations.shape[0])
+    shifts = rng.integers(
+        -max_jitter_steps, max_jitter_steps + 1, size=event_locations.shape[0]
+    )
     changed = np.zeros_like(inputs, dtype=bool)
     for (trace, time, channel), shift in zip(event_locations, shifts):
         new_time = int(np.clip(time + shift, 0, inputs.shape[1] - 1))
         jittered[trace, new_time, channel] = inputs[trace, time, channel]
-        changed[trace, time, channel] = changed[trace, time, channel] or new_time != time
+        changed[trace, time, channel] = (
+            changed[trace, time, channel] or new_time != time
+        )
     return jittered, changed
 
 
@@ -98,8 +105,8 @@ def make_site_silence_inputs(
         raise ValueError("site_fraction must be in [0, 1]")
     inputs = _as_trace_array(np.asarray(inputs))
     n_sites = inputs.shape[-1] // 2
-    start = min(n_sites, int(round(start_fraction * n_sites)))
-    stop = min(n_sites, max(start + 1, start + int(round(site_fraction * n_sites))))
+    start = min(n_sites, round(start_fraction * n_sites))
+    stop = min(n_sites, max(start + 1, start + round(site_fraction * n_sites)))
     channels = np.r_[np.arange(start, stop), np.arange(start + n_sites, stop + n_sites)]
     intervened = inputs.copy()
     silence_mask = np.zeros_like(inputs, dtype=bool)
@@ -120,28 +127,42 @@ def make_structured_intervention_inputs(
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     """Create one of the publishable structured input interventions."""
     if intervention == "event_dropout":
-        out, changed = make_event_dropout_inputs(inputs, dropout_probability=dropout_probability, seed=seed)
+        out, changed = make_event_dropout_inputs(
+            inputs, dropout_probability=dropout_probability, seed=seed
+        )
     elif intervention == "exc_dropout":
-        out, changed = make_selective_event_dropout_inputs(inputs, dropout_probability=dropout_probability, event_sign=1, seed=seed)
+        out, changed = make_selective_event_dropout_inputs(
+            inputs, dropout_probability=dropout_probability, event_sign=1, seed=seed
+        )
     elif intervention == "inh_dropout":
-        out, changed = make_selective_event_dropout_inputs(inputs, dropout_probability=dropout_probability, event_sign=-1, seed=seed)
+        out, changed = make_selective_event_dropout_inputs(
+            inputs, dropout_probability=dropout_probability, event_sign=-1, seed=seed
+        )
     elif intervention == "temporal_jitter":
-        out, changed = make_temporal_jitter_inputs(inputs, max_jitter_steps=jitter_steps, seed=seed)
+        out, changed = make_temporal_jitter_inputs(
+            inputs, max_jitter_steps=jitter_steps, seed=seed
+        )
     elif intervention == "site_silence":
-        out, changed = make_site_silence_inputs(inputs, start_fraction=site_start_fraction, site_fraction=site_fraction)
+        out, changed = make_site_silence_inputs(
+            inputs, start_fraction=site_start_fraction, site_fraction=site_fraction
+        )
     else:
         raise ValueError(f"unknown structured intervention {intervention!r}")
-    return out, changed, {
-        "intervention": intervention,
-        "seed": seed,
-        "dropout_probability": dropout_probability,
-        "jitter_steps": jitter_steps,
-        "site_start_fraction": site_start_fraction,
-        "site_fraction": site_fraction,
-        "changed_events": int(changed.sum()),
-        "baseline_events": int(np.count_nonzero(inputs)),
-        "intervention_events": int(np.count_nonzero(out)),
-    }
+    return (
+        out,
+        changed,
+        {
+            "intervention": intervention,
+            "seed": seed,
+            "dropout_probability": dropout_probability,
+            "jitter_steps": jitter_steps,
+            "site_start_fraction": site_start_fraction,
+            "site_fraction": site_fraction,
+            "changed_events": int(changed.sum()),
+            "baseline_events": int(np.count_nonzero(inputs)),
+            "intervention_events": int(np.count_nonzero(out)),
+        },
+    )
 
 
 def compute_paired_event_intervention_metrics(
@@ -242,7 +263,9 @@ def _as_trace_array(array: np.ndarray) -> np.ndarray:
 def _check_pair_shapes(name: str, *arrays: np.ndarray) -> None:
     shapes = {array.shape for array in arrays}
     if len(shapes) != 1:
-        raise ValueError(f"paired intervention {name} arrays must have matching shapes, got {sorted(shapes)}")
+        raise ValueError(
+            f"paired intervention {name} arrays must have matching shapes, got {sorted(shapes)}"
+        )
 
 
 def _check_prediction_shapes(
@@ -282,7 +305,9 @@ def _teacher_response_summary(
     intervention_events = _event_fraction(intervention_inputs)
     soma_delta = intervention_soma_mv - baseline_soma_mv
     soma_trace_delta = np.mean(soma_delta, axis=1)
-    spike_trace_delta = (intervention_targets[..., 0] > 0.5).sum(axis=1) - (baseline_targets[..., 0] > 0.5).sum(axis=1)
+    spike_trace_delta = (intervention_targets[..., 0] > 0.5).sum(axis=1) - (
+        baseline_targets[..., 0] > 0.5
+    ).sum(axis=1)
     spike_delta = intervention_rate - baseline_rate
     event_delta = intervention_events - baseline_events
     return {
@@ -290,7 +315,9 @@ def _teacher_response_summary(
         "baseline_event_fraction": baseline_events,
         "intervention_event_fraction": intervention_events,
         "event_fraction_delta": event_delta,
-        "event_fraction_ratio": float(intervention_events / baseline_events) if baseline_events > 0 else None,
+        "event_fraction_ratio": float(intervention_events / baseline_events)
+        if baseline_events > 0
+        else None,
         "baseline_spike_rate_per_1000_steps": baseline_rate,
         "intervention_spike_rate_per_1000_steps": intervention_rate,
         "delta_spike_rate_per_1000_steps": spike_delta,
@@ -300,15 +327,37 @@ def _teacher_response_summary(
         "delta_soma_abs_mean_mv": float(np.mean(np.abs(soma_delta))),
         "delta_soma_trace_mean_mv": _mean_interval(soma_trace_delta),
         "delta_spike_count_trace_mean": _mean_interval(spike_trace_delta),
-        "response_detected": bool(abs(spike_delta) >= 0.1 or np.mean(np.abs(soma_delta)) >= 0.1),
-        "teacher_direction": _direction_label(event_delta, spike_delta, float(np.mean(soma_delta))),
+        "response_detected": bool(
+            abs(spike_delta) >= 0.1 or np.mean(np.abs(soma_delta)) >= 0.1
+        ),
+        "teacher_direction": _direction_label(
+            event_delta, spike_delta, float(np.mean(soma_delta))
+        ),
     }
 
 
 def _direction_label(event_delta: float, spike_delta: float, soma_delta: float) -> str:
-    event = "higher_event_drive" if event_delta > 0 else "lower_event_drive" if event_delta < 0 else "same_event_drive"
-    spike = "higher_spiking" if spike_delta > 0 else "lower_spiking" if spike_delta < 0 else "same_spiking"
-    soma = "depolarized" if soma_delta > 0 else "hyperpolarized" if soma_delta < 0 else "same_soma_mean"
+    event = (
+        "higher_event_drive"
+        if event_delta > 0
+        else "lower_event_drive"
+        if event_delta < 0
+        else "same_event_drive"
+    )
+    spike = (
+        "higher_spiking"
+        if spike_delta > 0
+        else "lower_spiking"
+        if spike_delta < 0
+        else "same_spiking"
+    )
+    soma = (
+        "depolarized"
+        if soma_delta > 0
+        else "hyperpolarized"
+        if soma_delta < 0
+        else "same_soma_mean"
+    )
     return f"{event}/{spike}/{soma}"
 
 
@@ -321,13 +370,16 @@ def _model_delta_summary(
     soma_scale: float,
     model_spike_threshold: float,
 ) -> dict[str, Any]:
-    teacher_soma_delta = (intervention_targets[..., 1] - baseline_targets[..., 1]) / soma_scale
+    teacher_soma_delta = (
+        intervention_targets[..., 1] - baseline_targets[..., 1]
+    ) / soma_scale
     model_soma_delta = (intervention_pred[..., 1] - baseline_pred[..., 1]) / soma_scale
-    teacher_spike_delta = (intervention_targets[..., 0] > 0.5).sum(axis=1) - (baseline_targets[..., 0] > 0.5).sum(axis=1)
-    model_spike_delta = (
-        (intervention_pred[..., 0] >= model_spike_threshold).sum(axis=1)
-        - (baseline_pred[..., 0] >= model_spike_threshold).sum(axis=1)
-    )
+    teacher_spike_delta = (intervention_targets[..., 0] > 0.5).sum(axis=1) - (
+        baseline_targets[..., 0] > 0.5
+    ).sum(axis=1)
+    model_spike_delta = (intervention_pred[..., 0] >= model_spike_threshold).sum(
+        axis=1
+    ) - (baseline_pred[..., 0] >= model_spike_threshold).sum(axis=1)
     soma_delta_error = model_soma_delta - teacher_soma_delta
     response_metrics = response_sera(
         baseline_pred,
@@ -337,37 +389,49 @@ def _model_delta_summary(
         soma_scale=soma_scale,
         ignore_start=0,
     )
-    per_trace_soma_rmse = np.sqrt(np.mean(soma_delta_error ** 2, axis=1))
+    per_trace_soma_rmse = np.sqrt(np.mean(soma_delta_error**2, axis=1))
     per_trace_spike_abs_error = np.abs(model_spike_delta - teacher_spike_delta)
     teacher_soma_mean = float(np.mean(teacher_soma_delta))
     model_soma_mean = float(np.mean(model_soma_delta))
     teacher_spike_mean = float(np.mean(teacher_spike_delta))
     model_spike_mean = float(np.mean(model_spike_delta))
     return {
-        "soma_delta_rmse_mv": float(np.sqrt(np.mean(soma_delta_error ** 2))),
+        "soma_delta_rmse_mv": float(np.sqrt(np.mean(soma_delta_error**2))),
         "soma_delta_mae_mv": float(np.mean(np.abs(soma_delta_error))),
         "response_sera_mv2": response_metrics["response_sera_mv2"],
-        "response_sera_mv": response_metrics["response_sera_mv"],
+        "response_root_sera_mv": response_metrics["response_root_sera_mv"],
         "response_rmse_mv": response_metrics["response_rmse_mv"],
         "response_sera_over_rmse": response_metrics["response_sera_over_rmse"],
         "response_relevance_mean": response_metrics["relevance_mean"],
-        "response_relevance_support_ge_0_5": response_metrics["relevance_support_ge_0_5"],
-        "response_relevance_support_ge_0_9": response_metrics["relevance_support_ge_0_9"],
+        "response_relevance_support_ge_0_5": response_metrics[
+            "relevance_support_ge_0_5"
+        ],
+        "response_relevance_support_ge_0_9": response_metrics[
+            "relevance_support_ge_0_9"
+        ],
         "soma_delta_rmse_per_trace": _mean_interval(per_trace_soma_rmse),
-        "soma_delta_correlation": _safe_corr(model_soma_delta.reshape(-1), teacher_soma_delta.reshape(-1)),
+        "soma_delta_correlation": _safe_corr(
+            model_soma_delta.reshape(-1), teacher_soma_delta.reshape(-1)
+        ),
         "soma_delta_gain": _safe_gain(model_soma_mean, teacher_soma_mean),
         "soma_mean_delta_teacher_mv": teacher_soma_mean,
         "soma_mean_delta_model_mv": model_soma_mean,
         "soma_mean_delta_error_mv": model_soma_mean - teacher_soma_mean,
-        "spike_count_delta_mae_per_trace": float(np.mean(np.abs(model_spike_delta - teacher_spike_delta))),
-        "spike_count_delta_abs_error_per_trace": _mean_interval(per_trace_spike_abs_error),
+        "spike_count_delta_mae_per_trace": float(
+            np.mean(np.abs(model_spike_delta - teacher_spike_delta))
+        ),
+        "spike_count_delta_abs_error_per_trace": _mean_interval(
+            per_trace_spike_abs_error
+        ),
         "spike_count_delta_gain": _safe_gain(model_spike_mean, teacher_spike_mean),
         "spike_count_delta_teacher_mean": teacher_spike_mean,
         "spike_count_delta_model_mean": model_spike_mean,
         "model_spike_threshold": float(model_spike_threshold),
         "direction_agreement": {
             "soma_mean": bool(np.sign(model_soma_mean) == np.sign(teacher_soma_mean)),
-            "spike_count": bool(np.sign(model_spike_mean) == np.sign(teacher_spike_mean)),
+            "spike_count": bool(
+                np.sign(model_spike_mean) == np.sign(teacher_spike_mean)
+            ),
         },
     }
 
@@ -389,10 +453,24 @@ def _mean_interval(values: np.ndarray) -> dict[str, float | int | None]:
     arr = arr[np.isfinite(arr)]
     n = int(arr.size)
     if n == 0:
-        return {"n": 0, "mean": None, "std": None, "sem": None, "ci95_low": None, "ci95_high": None}
+        return {
+            "n": 0,
+            "mean": None,
+            "std": None,
+            "sem": None,
+            "ci95_low": None,
+            "ci95_high": None,
+        }
     mean = float(np.mean(arr))
     if n == 1:
-        return {"n": 1, "mean": mean, "std": 0.0, "sem": None, "ci95_low": None, "ci95_high": None}
+        return {
+            "n": 1,
+            "mean": mean,
+            "std": 0.0,
+            "sem": None,
+            "ci95_low": None,
+            "ci95_high": None,
+        }
     std = float(np.std(arr, ddof=1))
     sem = float(std / np.sqrt(n))
     half_width = 1.96 * sem

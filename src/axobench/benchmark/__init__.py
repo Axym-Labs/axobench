@@ -67,6 +67,7 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "default_diagnostic_specs": ("axobench.benchmark.dataset_schema", "default_diagnostic_specs"),
     "default_target_views": ("axobench.benchmark.dataset_schema", "default_target_views"),
     "provisional_v1_morphologies": ("axobench.benchmark.dataset_schema", "provisional_v1_morphologies"),
+    "v1_morphologies": ("axobench.benchmark.dataset_schema", "v1_morphologies"),
     "validate_v1_manifest_template": ("axobench.benchmark.dataset_schema", "validate_v1_manifest_template"),
     "DiagnosticContext": ("axobench.benchmark.diagnostic_rows", "DiagnosticContext"),
     "evaluate_model_diagnostic_rows": ("axobench.benchmark.diagnostic_rows", "evaluate_model_diagnostic_rows"),

@@ -15,15 +15,18 @@ Usage:
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 
+from axobench.benchmark.perturbation_stability import compute_perturbation_stability
 from axobench.benchmark.regime_stratified import compute_regime_stratified_metrics
 from axobench.benchmark.state_metrics import compute_state_conditioned_metrics
-from axobench.benchmark.perturbation_stability import compute_perturbation_stability
-from axobench.benchmark.structured_intervention import compute_paired_event_intervention_metrics
+from axobench.benchmark.structured_intervention import (
+    compute_paired_event_intervention_metrics,
+)
 from axobench.benchmark.trace_shape import compute_trace_shape_metrics
 from axobench.metrics import compute_core_metric_set
 from axobench.neuronio_raw import DEFAULT_Y_TRAIN_SOMA_BIAS
@@ -97,7 +100,9 @@ class BenchmarkSuite:
 
         # M2: Regime-stratified errors
         m2 = compute_regime_stratified_metrics(
-            predictions, targets, inputs,
+            predictions,
+            targets,
+            inputs,
             soma_scale=soma_scale,
             soma_bias_mv=soma_bias_mv,
             ignore_start=ignore_start,
@@ -113,7 +118,9 @@ class BenchmarkSuite:
             ignore_start=ignore_start,
             calibrated_spike_threshold=calibrated_spike_threshold,
         )
-        m1["state_weighted_trace_distance_mv"] = state_metrics["state_weighted_trace_distance_mv"]
+        m1["state_weighted_trace_distance_mv"] = state_metrics[
+            "state_weighted_trace_distance_mv"
+        ]
         m1["dynamic_distance"] = state_metrics["dynamic_distance"]
         m1["dynamic_distance_components"] = state_metrics["dynamic_distance_components"]
         trace_shape = compute_trace_shape_metrics(
@@ -126,9 +133,15 @@ class BenchmarkSuite:
             calibrated_spike_threshold=calibrated_spike_threshold,
         )
         m1["trace_shape_distance"] = trace_shape["trace_shape_distance"]
-        m1["lag_tolerant_voltage_rmse_mv"] = trace_shape["lag_tolerant_voltage"]["symmetric_rmse_mv"]
-        m1["state_trace_shape_distance"] = trace_shape["state_conditioned_trace_shape"]["state_trace_shape_distance"]
-        m1["spike_train_distance"] = trace_shape["spike_train_distance"]["mean_normalized_van_rossum_distance"]
+        m1["lag_tolerant_voltage_rmse_mv"] = trace_shape["lag_tolerant_voltage"][
+            "symmetric_rmse_mv"
+        ]
+        m1["state_trace_shape_distance"] = trace_shape["state_conditioned_trace_shape"][
+            "state_trace_shape_distance"
+        ]
+        m1["spike_train_distance"] = trace_shape["spike_train_distance"][
+            "mean_normalized_van_rossum_distance"
+        ]
 
         # M4: Perturbation stability
         m4 = {}
@@ -148,20 +161,26 @@ class BenchmarkSuite:
                 m4_paired_intervention["baseline_targets"],
                 m4_paired_intervention["intervention_inputs"],
                 m4_paired_intervention["intervention_targets"],
-                intervention_name=m4_paired_intervention.get("intervention_name", "event_intervention"),
+                intervention_name=m4_paired_intervention.get(
+                    "intervention_name", "event_intervention"
+                ),
                 soma_scale=soma_scale,
                 soma_bias_mv=soma_bias_mv,
                 ignore_start=m4_paired_intervention.get("ignore_start", ignore_start),
                 trace_ids=m4_paired_intervention.get("trace_ids", trace_ids),
                 model_spike_threshold=m4_paired_intervention.get(
                     "model_spike_threshold",
-                    calibrated_spike_threshold if calibrated_spike_threshold is not None else 0.0,
+                    calibrated_spike_threshold
+                    if calibrated_spike_threshold is not None
+                    else 0.0,
                 ),
             )
         else:
             m4_intervention = {
                 "status": "debug_only" if run_perturbation else "not_run",
-                "kind": "gaussian_perturbation_sanity_check" if run_perturbation else None,
+                "kind": "gaussian_perturbation_sanity_check"
+                if run_perturbation
+                else None,
                 "what_failure_means": (
                     "This is only a numerical brittleness smoke test. It is not "
                     "evidence of biological robustness or global smoothness."
@@ -191,7 +210,9 @@ class BenchmarkSuite:
             "Gaussian perturbation output is debug-only when present.",
         ]
         if m4_paired_intervention is None:
-            limitations.append("M4 structured intervention was not run for this report.")
+            limitations.append(
+                "M4 structured intervention was not run for this report."
+            )
         else:
             limitations.append(
                 "M4 structured intervention results are limited to the supplied paired traces and should be expanded before robustness claims."
@@ -259,7 +280,9 @@ class BenchmarkSuite:
             comparison["m1_fidelity"][name] = {
                 "soma_rmse_mv": m1.get("soma_rmse_mv"),
                 "soma_mae_mv": m1.get("soma_mae_mv"),
-                "state_weighted_trace_distance_mv": m1.get("state_weighted_trace_distance_mv"),
+                "state_weighted_trace_distance_mv": m1.get(
+                    "state_weighted_trace_distance_mv"
+                ),
                 "dynamic_distance": m1.get("dynamic_distance"),
                 "trace_shape_distance": m1.get("trace_shape_distance"),
                 "lag_tolerant_voltage_rmse_mv": m1.get("lag_tolerant_voltage_rmse_mv"),
@@ -267,7 +290,7 @@ class BenchmarkSuite:
                 "spike_train_distance": m1.get("spike_train_distance"),
                 "spike_auc": m1.get("spike_auc"),
                 "voltage_sera_mv2": m1.get("voltage_sera_mv2"),
-                "voltage_sera_mv": m1.get("voltage_sera_mv"),
+                "voltage_root_sera_mv": m1.get("voltage_root_sera_mv"),
                 "spike_mean_f1": m1.get("spike_mean_f1"),
                 "spike_f1_area": m1.get("spike_f1_area"),
                 "spike_brier": m1.get("spike_brier"),
@@ -287,29 +310,49 @@ class BenchmarkSuite:
             )
             comparison["m1b_feature_fidelity"][name] = {
                 "spike_count_mae": _feature_mae(feature_block, "spike_count"),
-                "firing_rate_mae_per_1000_steps": _feature_mae(feature_block, "firing_rate_per_1000_steps"),
+                "firing_rate_mae_per_1000_steps": _feature_mae(
+                    feature_block, "firing_rate_per_1000_steps"
+                ),
                 "peak_voltage_mae_mv": _feature_mae(feature_block, "peak_voltage_mv"),
-                "trough_voltage_mae_mv": _feature_mae(feature_block, "trough_voltage_mv"),
+                "trough_voltage_mae_mv": _feature_mae(
+                    feature_block, "trough_voltage_mv"
+                ),
                 "non_spiking_mae": _feature_mae(feature_block, "non_spiking"),
             }
 
             state_metrics = results.get("state_conditioned_fidelity", {})
             comparison["state_conditioned_fidelity"][name] = {
-                "state_weighted_trace_distance_mv": state_metrics.get("state_weighted_trace_distance_mv"),
+                "state_weighted_trace_distance_mv": state_metrics.get(
+                    "state_weighted_trace_distance_mv"
+                ),
                 "dynamic_distance": state_metrics.get("dynamic_distance"),
-                "dynamic_distance_components": state_metrics.get("dynamic_distance_components"),
-                "spike_timing_f1_at_2steps": state_metrics.get("spike_timing", {}).get("f1_at_2steps"),
-                "spike_count_mae_per_trace": state_metrics.get("spike_count_mae_per_trace"),
-                "per_state_voltage_rmse_mv": _state_metric_map(state_metrics, "voltage_rmse_mv"),
+                "dynamic_distance_components": state_metrics.get(
+                    "dynamic_distance_components"
+                ),
+                "spike_timing_f1_at_2steps": state_metrics.get("spike_timing", {}).get(
+                    "f1_at_2steps"
+                ),
+                "spike_count_mae_per_trace": state_metrics.get(
+                    "spike_count_mae_per_trace"
+                ),
+                "per_state_voltage_rmse_mv": _state_metric_map(
+                    state_metrics, "voltage_rmse_mv"
+                ),
                 "per_state_fraction": _state_metric_map(state_metrics, "fraction"),
             }
             trace_shape = results.get("trace_shape_fidelity", {})
             comparison["trace_shape_fidelity"][name] = {
                 "trace_shape_distance": trace_shape.get("trace_shape_distance"),
-                "trace_shape_distance_components": trace_shape.get("trace_shape_distance_components"),
+                "trace_shape_distance_components": trace_shape.get(
+                    "trace_shape_distance_components"
+                ),
                 "state_trace_shape_distance": (
-                    trace_shape.get("state_conditioned_trace_shape", {}).get("state_trace_shape_distance")
-                    if isinstance(trace_shape.get("state_conditioned_trace_shape"), dict)
+                    trace_shape.get("state_conditioned_trace_shape", {}).get(
+                        "state_trace_shape_distance"
+                    )
+                    if isinstance(
+                        trace_shape.get("state_conditioned_trace_shape"), dict
+                    )
                     else None
                 ),
                 "per_state_trace_shape_distance": _state_metric_map(
@@ -326,24 +369,34 @@ class BenchmarkSuite:
                     for row in trace_shape.get("multiscale_lowpass", [])
                     if isinstance(row, dict)
                 },
-                "dvdt_mae_mv_per_step": trace_shape.get("pointwise", {}).get("dvdt_mae_mv_per_step"),
+                "dvdt_mae_mv_per_step": trace_shape.get("pointwise", {}).get(
+                    "dvdt_mae_mv_per_step"
+                ),
                 "voltage_quantile_mae_mv": (
-                    trace_shape.get("voltage_quantile_distance", {}).get("mean_abs_quantile_error_mv")
+                    trace_shape.get("voltage_quantile_distance", {}).get(
+                        "mean_abs_quantile_error_mv"
+                    )
                     if isinstance(trace_shape.get("voltage_quantile_distance"), dict)
                     else None
                 ),
                 "spike_waveform_rmse_mv": (
-                    trace_shape.get("spike_triggered_waveform", {}).get("waveform_rmse_mv")
+                    trace_shape.get("spike_triggered_waveform", {}).get(
+                        "waveform_rmse_mv"
+                    )
                     if isinstance(trace_shape.get("spike_triggered_waveform"), dict)
                     else None
                 ),
                 "spike_waveform_match_fraction": (
-                    trace_shape.get("spike_triggered_waveform", {}).get("match_fraction")
+                    trace_shape.get("spike_triggered_waveform", {}).get(
+                        "match_fraction"
+                    )
                     if isinstance(trace_shape.get("spike_triggered_waveform"), dict)
                     else None
                 ),
                 "spike_train_distance": (
-                    trace_shape.get("spike_train_distance", {}).get("mean_normalized_van_rossum_distance")
+                    trace_shape.get("spike_train_distance", {}).get(
+                        "mean_normalized_van_rossum_distance"
+                    )
                     if isinstance(trace_shape.get("spike_train_distance"), dict)
                     else None
                 ),
@@ -352,13 +405,21 @@ class BenchmarkSuite:
             m2 = results.get("m2_regimes") or results.get("m2_regime_stratified", {})
             comparison["m2_regime_summary"][name] = {
                 "near_spike_rmse": _regime_rmse(m2, "spike_proximity", "near_spike"),
-                "far_from_spike_rmse": _regime_rmse(m2, "spike_proximity", "far_from_spike"),
-                "post_spike_refractory_rmse": _regime_rmse(m2, "mvp_regimes", "post_spike_refractory"),
-                "post_input_event_rmse": _regime_rmse(m2, "mvp_regimes", "post_input_event"),
+                "far_from_spike_rmse": _regime_rmse(
+                    m2, "spike_proximity", "far_from_spike"
+                ),
+                "post_spike_refractory_rmse": _regime_rmse(
+                    m2, "mvp_regimes", "post_spike_refractory"
+                ),
+                "post_input_event_rmse": _regime_rmse(
+                    m2, "mvp_regimes", "post_input_event"
+                ),
                 "high_dvdt_rmse": _regime_rmse(m2, "slope_regime", "spike_rise"),
             }
 
-            comparison["m4_intervention"][name] = _m4_intervention_summary(results.get("m4_intervention", {}))
+            comparison["m4_intervention"][name] = _m4_intervention_summary(
+                results.get("m4_intervention", {})
+            )
             m4 = results.get("m4_perturbation_stability", {})
             sc = m4.get("stability_coefficient", {})
             comparison["m4_stability"][name] = {
@@ -399,14 +460,22 @@ def _m4_intervention_summary(m4: dict[str, Any]) -> dict[str, Any]:
     direction = model.get("direction_agreement", {}) if isinstance(model, dict) else {}
     return {
         "status": m4.get("status") if isinstance(m4, dict) else None,
-        "intervention_name": m4.get("intervention_name") if isinstance(m4, dict) else None,
+        "intervention_name": m4.get("intervention_name")
+        if isinstance(m4, dict)
+        else None,
         "teacher_response_detected": teacher.get("response_detected"),
         "teacher_direction": teacher.get("teacher_direction"),
         "teacher_delta_soma_mean_mv": teacher.get("delta_soma_mean_mv"),
-        "teacher_delta_spike_rate_per_1000_steps": teacher.get("delta_spike_rate_per_1000_steps"),
-        "soma_delta_rmse_mv": model.get("soma_delta_rmse_mv") if isinstance(model, dict) else None,
+        "teacher_delta_spike_rate_per_1000_steps": teacher.get(
+            "delta_spike_rate_per_1000_steps"
+        ),
+        "soma_delta_rmse_mv": model.get("soma_delta_rmse_mv")
+        if isinstance(model, dict)
+        else None,
         "spike_count_delta_mae_per_trace": (
-            model.get("spike_count_delta_mae_per_trace") if isinstance(model, dict) else None
+            model.get("spike_count_delta_mae_per_trace")
+            if isinstance(model, dict)
+            else None
         ),
         "soma_direction_agreement": direction.get("soma_mean"),
         "spike_direction_agreement": direction.get("spike_count"),
@@ -440,11 +509,15 @@ def _compute_m1_trace_fidelity(
     pred = _apply_time_mask(np.asarray(predictions), ignore_start)
     tgt = _apply_time_mask(np.asarray(targets), ignore_start)
     if pred.shape != tgt.shape:
-        raise ValueError(f"prediction and target shapes must match, got {pred.shape} and {tgt.shape}")
+        raise ValueError(
+            f"prediction and target shapes must match, got {pred.shape} and {tgt.shape}"
+        )
     if pred.shape[1] == 0:
         raise ValueError("ignore_start leaves no timesteps to evaluate")
     if len(trace_ids) != pred.shape[0]:
-        raise ValueError(f"trace_ids length must match number of traces, got {len(trace_ids)} and {pred.shape[0]}")
+        raise ValueError(
+            f"trace_ids length must match number of traces, got {len(trace_ids)} and {pred.shape[0]}"
+        )
 
     residual = pred[..., 1] - tgt[..., 1]
     residual_mv = residual / soma_scale
@@ -457,13 +530,21 @@ def _compute_m1_trace_fidelity(
     clipped = np.clip(spike_probs, 1e-7, 1.0 - 1e-7)
     target_binary = spike_labels > 0.5
     spike_binary = spike_scores > 0.0
-    matched_threshold = _prevalence_matched_threshold(spike_scores, int(target_binary.sum()))
+    matched_threshold = _prevalence_matched_threshold(
+        spike_scores, int(target_binary.sum())
+    )
     matched_binary = spike_scores >= matched_threshold
     pred_counts = spike_binary.sum(axis=1)
     matched_counts = matched_binary.sum(axis=1)
     target_counts = target_binary.sum(axis=1)
-    calibrated_binary = spike_scores >= calibrated_spike_threshold if calibrated_spike_threshold is not None else None
-    calibrated_counts = calibrated_binary.sum(axis=1) if calibrated_binary is not None else None
+    calibrated_binary = (
+        spike_scores >= calibrated_spike_threshold
+        if calibrated_spike_threshold is not None
+        else None
+    )
+    calibrated_counts = (
+        calibrated_binary.sum(axis=1) if calibrated_binary is not None else None
+    )
     raw_masked = None
     if raw_soma_mv is not None:
         raw_masked = np.asarray(raw_soma_mv, dtype=np.float64)
@@ -474,7 +555,9 @@ def _compute_m1_trace_fidelity(
             raw_masked = raw_masked.reshape(leading, raw_masked.shape[-1])
         raw_masked = raw_masked[:, ignore_start:] if ignore_start > 0 else raw_masked
         if raw_masked.shape != pred.shape[:2]:
-            raise ValueError(f"raw_soma_mv shape after mask must match traces/time, got {raw_masked.shape} and {pred.shape[:2]}")
+            raise ValueError(
+                f"raw_soma_mv shape after mask must match traces/time, got {raw_masked.shape} and {pred.shape[:2]}"
+            )
     core_metrics = compute_core_metric_set(
         pred,
         tgt,
@@ -494,24 +577,29 @@ def _compute_m1_trace_fidelity(
     )
 
     result = {
-        "soma_rmse_normalized": float(np.sqrt(np.mean(residual ** 2))),
-        "soma_rmse_mv": float(np.sqrt(np.mean(residual_mv ** 2))),
+        "soma_rmse_normalized": float(np.sqrt(np.mean(residual**2))),
+        "soma_rmse_mv": float(np.sqrt(np.mean(residual_mv**2))),
         "soma_mae_mv": float(np.mean(np.abs(residual_mv))),
         "spike_auc": float(binary_auc(spike_scores, spike_labels)),
         "spike_brier": float(np.mean((spike_probs - spike_labels) ** 2)),
-        "spike_log_loss": float(-np.mean(spike_labels * np.log(clipped) + (1.0 - spike_labels) * np.log(1.0 - clipped))),
+        "spike_log_loss": float(
+            -np.mean(
+                spike_labels * np.log(clipped)
+                + (1.0 - spike_labels) * np.log(1.0 - clipped)
+            )
+        ),
         "voltage_sera_mv2": core_metrics["voltage_sera_mv2"],
-        "voltage_sera_mv": core_metrics["voltage_sera_mv"],
+        "voltage_root_sera_mv": core_metrics["voltage_root_sera_mv"],
         "voltage_sera_over_rmse": core_metrics["voltage"]["voltage_sera_over_rmse"],
         "voltage_relevance_mean": core_metrics["voltage"]["relevance_mean"],
-        "voltage_relevance_support_ge_0_5": core_metrics["voltage"]["relevance_support_ge_0_5"],
-        "voltage_relevance_support_ge_0_9": core_metrics["voltage"]["relevance_support_ge_0_9"],
-        "dynamics_sera_mv2_per_ms2": core_metrics[
-            "dynamics_sera_mv2_per_ms2"
+        "voltage_relevance_support_ge_0_5": core_metrics["voltage"][
+            "relevance_support_ge_0_5"
         ],
-        "dynamics_sera_mv_per_ms": core_metrics[
-            "dynamics_sera_mv_per_ms"
+        "voltage_relevance_support_ge_0_9": core_metrics["voltage"][
+            "relevance_support_ge_0_9"
         ],
+        "dynamics_sera_mv2_per_ms2": core_metrics["dynamics_sera_mv2_per_ms2"],
+        "dynamics_root_sera_mv_per_ms": core_metrics["dynamics_root_sera_mv_per_ms"],
         "spike_mean_f1": core_metrics["spike_mean_f1"],
         "spike_f1_area": core_metrics["spike_f1_area"],
         "spike_f1_t_min_steps": core_metrics["spike"]["t_min_steps"],
@@ -521,7 +609,9 @@ def _compute_m1_trace_fidelity(
         "spike_f1_curve": core_metrics["spike"]["rows"],
         "spike_target_count": int(target_binary.sum()),
         "spike_predicted_count": int(spike_binary.sum()),
-        "spike_count_mae_per_trace": float(np.mean(np.abs(pred_counts - target_counts))),
+        "spike_count_mae_per_trace": float(
+            np.mean(np.abs(pred_counts - target_counts))
+        ),
         "spike_threshold_zero": {
             "threshold": 0.0,
             "predicted_count": int(spike_binary.sum()),
@@ -531,15 +621,22 @@ def _compute_m1_trace_fidelity(
         "spike_prevalence_matched": {
             "threshold": float(matched_threshold),
             "predicted_count": int(matched_binary.sum()),
-            "count_mae_per_trace": float(np.mean(np.abs(matched_counts - target_counts))),
+            "count_mae_per_trace": float(
+                np.mean(np.abs(matched_counts - target_counts))
+            ),
             "semantics": "diagnostic threshold chosen so total predicted spike count matches the teacher under the current mask",
         },
         "per_trace_summary": per_trace,
         "worst_trace_ids": {
             "soma_rmse": [row["trace_id"] for row in per_trace["worst_soma_rmse"]],
-            "spike_count_abs_error": [row["trace_id"] for row in per_trace["worst_spike_count_abs_error"]],
+            "spike_count_abs_error": [
+                row["trace_id"] for row in per_trace["worst_spike_count_abs_error"]
+            ],
             "calibrated_spike_count_abs_error": (
-                [row["trace_id"] for row in per_trace["worst_calibrated_spike_count_abs_error"]]
+                [
+                    row["trace_id"]
+                    for row in per_trace["worst_calibrated_spike_count_abs_error"]
+                ]
                 if calibrated_spike_threshold is not None
                 else None
             ),
@@ -554,7 +651,9 @@ def _compute_m1_trace_fidelity(
         result["spike_calibrated_threshold"] = {
             "threshold": float(calibrated_spike_threshold),
             "predicted_count": int(calibrated_binary.sum()),
-            "count_mae_per_trace": float(np.mean(np.abs(calibrated_counts - target_counts))),
+            "count_mae_per_trace": float(
+                np.mean(np.abs(calibrated_counts - target_counts))
+            ),
             "semantics": "fixed logit threshold learned on a separate calibration split and frozen before evaluation",
         }
     return result
@@ -584,15 +683,21 @@ def _m1_per_trace_rows(
             "zero_threshold_spike_count": zero_count,
             "zero_threshold_spike_count_abs_error": abs(zero_count - target_count),
             "prevalence_matched_spike_count": matched_count,
-            "prevalence_matched_spike_count_abs_error": abs(matched_count - target_count),
+            "prevalence_matched_spike_count_abs_error": abs(
+                matched_count - target_count
+            ),
         }
         if calibrated_binary is not None:
             calibrated_count = int(calibrated_binary[index].sum())
             row["calibrated_spike_count"] = calibrated_count
-            row["calibrated_spike_count_abs_error"] = abs(calibrated_count - target_count)
+            row["calibrated_spike_count_abs_error"] = abs(
+                calibrated_count - target_count
+            )
         rows.append(row)
     worst_soma = sorted(rows, key=lambda row: row["soma_rmse_mv"], reverse=True)[:limit]
-    worst_spike = sorted(rows, key=lambda row: row["zero_threshold_spike_count_abs_error"], reverse=True)[:limit]
+    worst_spike = sorted(
+        rows, key=lambda row: row["zero_threshold_spike_count_abs_error"], reverse=True
+    )[:limit]
     result = {
         "rows": rows,
         "worst_soma_rmse": worst_soma,
@@ -612,11 +717,15 @@ def _trace_features(spikes: np.ndarray, soma_mv: np.ndarray) -> dict[str, float]
     isis = np.diff(spike_idx)
     return {
         "spike_count": float(spike_idx.size),
-        "firing_rate_per_1000_steps": float(1000.0 * spike_idx.size / max(1, spikes.size)),
+        "firing_rate_per_1000_steps": float(
+            1000.0 * spike_idx.size / max(1, spikes.size)
+        ),
         "first_isi_steps": float(isis[0]) if isis.size else float("nan"),
         "last_isi_steps": float(isis[-1]) if isis.size else float("nan"),
         "mean_isi_steps": float(np.mean(isis)) if isis.size else float("nan"),
-        "adaptation_ratio": float(isis[-1] / isis[0]) if isis.size >= 2 and isis[0] != 0 else float("nan"),
+        "adaptation_ratio": float(isis[-1] / isis[0])
+        if isis.size >= 2 and isis[0] != 0
+        else float("nan"),
         "peak_voltage_mv": float(np.max(soma_mv)),
         "trough_voltage_mv": float(np.min(soma_mv)),
         "non_spiking": float(spike_idx.size == 0),
@@ -644,12 +753,16 @@ def _compute_m1b_feature_fidelity(
     tgt = _apply_time_mask(np.asarray(targets), ignore_start)
     pred_spikes = pred[..., 0] > 0.0
     target_spikes = tgt[..., 0] > 0.5
-    matched_threshold = _prevalence_matched_threshold(pred[..., 0], int(target_spikes.sum()))
+    matched_threshold = _prevalence_matched_threshold(
+        pred[..., 0], int(target_spikes.sum())
+    )
     matched_pred_spikes = pred[..., 0] >= matched_threshold
     pred_soma_mv = pred[..., 1] / soma_scale + soma_bias_mv
     target_soma_mv = tgt[..., 1] / soma_scale + soma_bias_mv
 
-    features, worst = _feature_fidelity_rows(pred_spikes, target_spikes, pred_soma_mv, target_soma_mv, trace_ids)
+    features, worst = _feature_fidelity_rows(
+        pred_spikes, target_spikes, pred_soma_mv, target_soma_mv, trace_ids
+    )
     matched_features, matched_worst = _feature_fidelity_rows(
         matched_pred_spikes,
         target_spikes,
@@ -707,7 +820,9 @@ def _feature_fidelity_rows(
     target_features = []
     for index in range(pred_spikes.shape[0]):
         pred_features.append(_trace_features(pred_spikes[index], pred_soma_mv[index]))
-        target_features.append(_trace_features(target_spikes[index], target_soma_mv[index]))
+        target_features.append(
+            _trace_features(target_spikes[index], target_soma_mv[index])
+        )
 
     feature_names = list(target_features[0]) if target_features else []
     features: dict[str, Any] = {}
@@ -715,7 +830,10 @@ def _feature_fidelity_rows(
     for name in feature_names:
         target_values = [row[name] for row in target_features]
         pred_values = [row[name] for row in pred_features]
-        abs_errors = np.abs(np.asarray(pred_values, dtype=np.float64) - np.asarray(target_values, dtype=np.float64))
+        abs_errors = np.abs(
+            np.asarray(pred_values, dtype=np.float64)
+            - np.asarray(target_values, dtype=np.float64)
+        )
         features[name] = {
             "teacher_mean": _nanmean(target_values),
             "prediction_mean": _nanmean(pred_values),
@@ -732,4 +850,6 @@ def _prevalence_matched_threshold(scores: np.ndarray, positive_count: int) -> fl
         return float("inf")
     if positive_count >= flat.size:
         return float("-inf")
-    return float(np.partition(flat, flat.size - positive_count)[flat.size - positive_count])
+    return float(
+        np.partition(flat, flat.size - positive_count)[flat.size - positive_count]
+    )

@@ -7,19 +7,20 @@ measurement protocol and terminal report.
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
 import csv
-from dataclasses import asdict, dataclass
 import hashlib
 import json
-from pathlib import Path
 import re
 import time
-from typing import Any, Iterable
+from collections.abc import Callable, Iterable
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any
 
 import numpy as np
 
+from axobench.data import ShardedNeuronIODataset
 from axobench.metrics import (
     _tail_relevance,
     dynamics_sera,
@@ -30,8 +31,6 @@ from axobench.metrics import (
     voltage_relevance,
     voltage_sera,
 )
-from axobench.data import ShardedNeuronIODataset
-
 
 DEFAULT_SINGLE_MORPHOLOGY_STANDARD_SAMPLES = 120
 DEFAULT_SINGLE_MORPHOLOGY_INTERVENTION_SAMPLES = 40
@@ -118,7 +117,9 @@ class EvaluationConfig:
             raise ValueError("f1_tolerances_steps must not be empty")
         missing = set(self.selected_f1_steps) - set(self.f1_tolerances_steps)
         if missing:
-            raise ValueError(f"selected_f1_steps are absent from f1_tolerances_steps: {sorted(missing)}")
+            raise ValueError(
+                f"selected_f1_steps are absent from f1_tolerances_steps: {sorted(missing)}"
+            )
 
 
 @dataclass(frozen=True)
@@ -162,6 +163,7 @@ def evaluate_model(
     intervention_names: Iterable[str] | None = None,
     multiple_morphologies: bool = False,
     morphology_id: str | None = None,
+    validation_sample_start: int = 0,
     cache_shards: int = 1,
     config: EvaluationConfig | None = None,
 ) -> dict[str, Any]:
@@ -187,7 +189,11 @@ def evaluate_model(
     if intervention_workers <= 0:
         raise ValueError("intervention_workers must be positive")
     if multiple_morphologies and morphology_id is not None:
-        raise ValueError("morphology_id cannot be combined with multiple_morphologies=True")
+        raise ValueError(
+            "morphology_id cannot be combined with multiple_morphologies=True"
+        )
+    if validation_sample_start < 0:
+        raise ValueError("validation_sample_start must be non-negative")
     started_at = time.perf_counter()
     root = Path(dataset_root)
     validation = ShardedNeuronIODataset(root / "val", cache_shards=cache_shards)
@@ -196,6 +202,7 @@ def evaluate_model(
         min(int(max_samples), len(validation)),
         multiple_morphologies=multiple_morphologies,
         morphology_id=morphology_id,
+        sample_start=validation_sample_start,
     )
     sample_count = len(selected_indices)
     predictions: list[np.ndarray] = []
@@ -218,7 +225,10 @@ def evaluate_model(
         targets.append(np.asarray(batch_targets, dtype=np.float32))
         event_indicators.append(
             np.stack(
-                [np.count_nonzero(inputs > 0, axis=-1), np.count_nonzero(inputs < 0, axis=-1)],
+                [
+                    np.count_nonzero(inputs > 0, axis=-1),
+                    np.count_nonzero(inputs < 0, axis=-1),
+                ],
                 axis=-1,
             ).astype(np.int16, copy=False)
         )
@@ -243,7 +253,11 @@ def evaluate_model(
     prediction_array = np.concatenate(predictions, axis=0)
     target_array = np.concatenate(targets, axis=0)
     event_array = np.concatenate(event_indicators, axis=0)
-    raw_array = np.concatenate(raw_soma_chunks, axis=0) if raw_soma_available and raw_soma_chunks else None
+    raw_array = (
+        np.concatenate(raw_soma_chunks, axis=0)
+        if raw_soma_available and raw_soma_chunks
+        else None
+    )
     report_order = _round_robin_group_order(trace_ids)
     report = evaluate_predictions(
         prediction_array[report_order],
@@ -260,6 +274,7 @@ def evaluate_model(
     report["morphology_ids"] = selected_morphologies
     report["standard_sample_limit"] = max_samples
     report["intervention_sample_limit_per_condition"] = max_intervention_samples
+    report["validation_sample_start"] = validation_sample_start
     report["sample_profile"] = "iteration"
     return report
 
@@ -277,6 +292,7 @@ def create_model_evaluation_cache(
     intervention_names: Iterable[str] | None = None,
     multiple_morphologies: bool = False,
     morphology_id: str | None = None,
+    validation_sample_start: int = 0,
     cache_shards: int = 1,
     config: EvaluationConfig | None = None,
 ) -> ModelEvaluationCache:
@@ -289,6 +305,8 @@ def create_model_evaluation_cache(
         multiple_morphologies=multiple_morphologies,
     )
     names = tuple(intervention_names) if intervention_names is not None else None
+    if validation_sample_start < 0:
+        raise ValueError("validation_sample_start must be non-negative")
     collected = _collect_model_outputs(
         model_fn,
         dataset_root=dataset_root,
@@ -300,6 +318,7 @@ def create_model_evaluation_cache(
         intervention_names=names,
         multiple_morphologies=multiple_morphologies,
         morphology_id=morphology_id,
+        validation_sample_start=validation_sample_start,
         cache_shards=cache_shards,
     )
     report = evaluate_predictions(
@@ -320,6 +339,7 @@ def create_model_evaluation_cache(
         max_samples=max_samples,
         max_intervention_samples=max_intervention_samples,
     )
+    report["validation_sample_start"] = validation_sample_start
     protocol = _evaluation_cache_protocol(
         max_samples=max_samples,
         max_intervention_samples=max_intervention_samples,
@@ -327,6 +347,7 @@ def create_model_evaluation_cache(
         intervention_names=names,
         multiple_morphologies=multiple_morphologies,
         morphology_id=morphology_id,
+        validation_sample_start=validation_sample_start,
         config=cfg,
     )
     return ModelEvaluationCache(
@@ -354,6 +375,7 @@ def evaluate_model_against_cache(
     intervention_names: Iterable[str] | None = None,
     multiple_morphologies: bool = False,
     morphology_id: str | None = None,
+    validation_sample_start: int = 0,
     cache_shards: int = 1,
     config: EvaluationConfig | None = None,
     bootstrap_replicates: int = 250,
@@ -373,6 +395,8 @@ def evaluate_model_against_cache(
         multiple_morphologies=multiple_morphologies,
     )
     names = tuple(intervention_names) if intervention_names is not None else None
+    if validation_sample_start < 0:
+        raise ValueError("validation_sample_start must be non-negative")
     protocol = _evaluation_cache_protocol(
         max_samples=max_samples,
         max_intervention_samples=max_intervention_samples,
@@ -380,9 +404,12 @@ def evaluate_model_against_cache(
         intervention_names=names,
         multiple_morphologies=multiple_morphologies,
         morphology_id=morphology_id,
+        validation_sample_start=validation_sample_start,
         config=cfg,
     )
-    if protocol != cache.protocol:
+    cache_protocol = dict(cache.protocol)
+    cache_protocol.setdefault("validation_sample_start", 0)
+    if protocol != cache_protocol:
         raise ValueError("baseline cache protocol does not match candidate evaluation")
     collected = _collect_model_outputs(
         candidate_model_fn,
@@ -395,10 +422,13 @@ def evaluate_model_against_cache(
         intervention_names=names,
         multiple_morphologies=multiple_morphologies,
         morphology_id=morphology_id,
+        validation_sample_start=validation_sample_start,
         cache_shards=cache_shards,
     )
     if tuple(collected["trace_ids"]) != cache.trace_ids:
-        raise ValueError("baseline cache trace selection does not match candidate evaluation")
+        raise ValueError(
+            "baseline cache trace selection does not match candidate evaluation"
+        )
     if _array_sha256(collected["target"]) != cache.target_sha256:
         raise ValueError("baseline cache targets do not match candidate evaluation")
     comparison = compare_predictions(
@@ -425,6 +455,9 @@ def evaluate_model_against_cache(
         multiple_morphologies=multiple_morphologies,
         max_samples=max_samples,
         max_intervention_samples=max_intervention_samples,
+    )
+    comparison["candidate"]["validation_sample_start"] = (
+        validation_sample_start
     )
     comparison["evaluation_seconds"] = elapsed
     comparison["baseline_cache"] = (
@@ -457,16 +490,30 @@ def write_model_evaluation_cache(cache: ModelEvaluationCache, path: str | Path) 
     for index, item in enumerate(cache.interventions):
         prefix = f"intervention_{index}_"
         arrays[prefix + "name"] = np.asarray(item.name)
-        arrays[prefix + "baseline_prediction"] = np.asarray(item.baseline_prediction, dtype=np.float32)
-        arrays[prefix + "intervention_prediction"] = np.asarray(item.intervention_prediction, dtype=np.float32)
-        arrays[prefix + "baseline_target"] = np.asarray(item.baseline_target, dtype=np.float32)
-        arrays[prefix + "intervention_target"] = np.asarray(item.intervention_target, dtype=np.float32)
+        arrays[prefix + "baseline_prediction"] = np.asarray(
+            item.baseline_prediction, dtype=np.float32
+        )
+        arrays[prefix + "intervention_prediction"] = np.asarray(
+            item.intervention_prediction, dtype=np.float32
+        )
+        arrays[prefix + "baseline_target"] = np.asarray(
+            item.baseline_target, dtype=np.float32
+        )
+        arrays[prefix + "intervention_target"] = np.asarray(
+            item.intervention_target, dtype=np.float32
+        )
         if item.baseline_raw_soma_mv is not None:
-            arrays[prefix + "baseline_raw_soma_mv"] = np.asarray(item.baseline_raw_soma_mv, dtype=np.float32)
+            arrays[prefix + "baseline_raw_soma_mv"] = np.asarray(
+                item.baseline_raw_soma_mv, dtype=np.float32
+            )
         if item.intervention_raw_soma_mv is not None:
-            arrays[prefix + "intervention_raw_soma_mv"] = np.asarray(item.intervention_raw_soma_mv, dtype=np.float32)
+            arrays[prefix + "intervention_raw_soma_mv"] = np.asarray(
+                item.intervention_raw_soma_mv, dtype=np.float32
+            )
         if item.morphology_ids is not None:
-            arrays[prefix + "morphology_ids"] = np.asarray(item.morphology_ids, dtype=str)
+            arrays[prefix + "morphology_ids"] = np.asarray(
+                item.morphology_ids, dtype=str
+            )
     np.savez_compressed(output, **arrays)
     return output
 
@@ -484,17 +531,27 @@ def load_model_evaluation_cache(path: str | Path) -> ModelEvaluationCache:
             interventions.append(
                 PairedInterventionPredictions(
                     name=str(payload[prefix + "name"].item()),
-                    baseline_prediction=np.array(payload[prefix + "baseline_prediction"], copy=True),
-                    intervention_prediction=np.array(payload[prefix + "intervention_prediction"], copy=True),
-                    baseline_target=np.array(payload[prefix + "baseline_target"], copy=True),
-                    intervention_target=np.array(payload[prefix + "intervention_target"], copy=True),
+                    baseline_prediction=np.array(
+                        payload[prefix + "baseline_prediction"], copy=True
+                    ),
+                    intervention_prediction=np.array(
+                        payload[prefix + "intervention_prediction"], copy=True
+                    ),
+                    baseline_target=np.array(
+                        payload[prefix + "baseline_target"], copy=True
+                    ),
+                    intervention_target=np.array(
+                        payload[prefix + "intervention_target"], copy=True
+                    ),
                     baseline_raw_soma_mv=(
                         np.array(payload[prefix + "baseline_raw_soma_mv"], copy=True)
                         if prefix + "baseline_raw_soma_mv" in payload.files
                         else None
                     ),
                     intervention_raw_soma_mv=(
-                        np.array(payload[prefix + "intervention_raw_soma_mv"], copy=True)
+                        np.array(
+                            payload[prefix + "intervention_raw_soma_mv"], copy=True
+                        )
                         if prefix + "intervention_raw_soma_mv" in payload.files
                         else None
                     ),
@@ -518,7 +575,9 @@ def load_model_evaluation_cache(path: str | Path) -> ModelEvaluationCache:
     )
 
 
-def default_iteration_sample_limits(*, multiple_morphologies: bool = False) -> tuple[int, int]:
+def default_iteration_sample_limits(
+    *, multiple_morphologies: bool = False
+) -> tuple[int, int]:
     """Return ordinary and per-intervention defaults for a morphology mode."""
     if multiple_morphologies:
         return (
@@ -552,11 +611,15 @@ def evaluate_predictions(
             f"got {pred.shape} and {tgt.shape}"
         )
     if pred.shape[0] < 2:
-        raise ValueError("at least two traces are required to separate threshold calibration and scoring")
+        raise ValueError(
+            "at least two traces are required to separate threshold calibration and scoring"
+        )
     if cfg.ignore_start >= pred.shape[1]:
         raise ValueError("ignore_start leaves no timesteps to evaluate")
 
-    n_calibration = max(1, min(pred.shape[0] - 1, int(round(pred.shape[0] * cfg.calibration_fraction))))
+    n_calibration = max(
+        1, min(pred.shape[0] - 1, round(pred.shape[0] * cfg.calibration_fraction))
+    )
     calibration_scores = pred[:n_calibration, cfg.ignore_start :, 0]
     calibration_labels = tgt[:n_calibration, cfg.ignore_start :, 0] > 0.5
     finite_calibration = np.isfinite(calibration_scores)
@@ -568,8 +631,12 @@ def evaluate_predictions(
     score_slice = slice(n_calibration, None)
     pred_score = pred[score_slice, cfg.ignore_start :, :]
     tgt_score = tgt[score_slice, cfg.ignore_start :, :]
-    raw_score = _slice_optional_2d(raw_soma_mv, score_slice, cfg.ignore_start, pred.shape[:2], "raw_soma_mv")
-    inputs_score = _slice_optional_inputs(inputs, score_slice, cfg.ignore_start, pred.shape[:2])
+    raw_score = _slice_optional_2d(
+        raw_soma_mv, score_slice, cfg.ignore_start, pred.shape[:2], "raw_soma_mv"
+    )
+    inputs_score = _slice_optional_inputs(
+        inputs, score_slice, cfg.ignore_start, pred.shape[:2]
+    )
     ids = trace_ids or [str(index) for index in range(pred.shape[0])]
     if len(ids) != pred.shape[0]:
         raise ValueError("trace_ids length must match trace count")
@@ -603,12 +670,9 @@ def evaluate_predictions(
         timestep_ms=cfg.timestep_ms,
     )
 
-    intervention_reports = [
-        _evaluate_intervention(item, cfg)
-        for item in interventions
-    ]
+    intervention_reports = [_evaluate_intervention(item, cfg) for item in interventions]
     response_sera_value = _root_mean_square(
-        [item["response_sera_mv"] for item in intervention_reports]
+        [item["response_root_sera_mv"] for item in intervention_reports]
     )
     response_sera_value2 = _finite_mean(
         [item["response_sera_mv2"] for item in intervention_reports]
@@ -621,7 +685,12 @@ def evaluate_predictions(
             "mV^2",
             "support-normalized squared teacher-relevance voltage error",
         ),
-        _metric("voltage_sera_mv", voltage["voltage_sera_mv"], "mV", "teacher-relevance voltage error"),
+        _metric(
+            "voltage_root_sera_mv",
+            voltage["voltage_root_sera_mv"],
+            "mV",
+            "root teacher-relevance voltage error",
+        ),
         _metric(
             "dynamics_sera_mv2_per_ms2",
             dynamics["dynamics_sera_mv2_per_ms2"],
@@ -629,10 +698,10 @@ def evaluate_predictions(
             "support-normalized squared voltage-transition error",
         ),
         _metric(
-            "dynamics_sera_mv_per_ms",
-            dynamics["dynamics_sera_mv_per_ms"],
+            "dynamics_root_sera_mv_per_ms",
+            dynamics["dynamics_root_sera_mv_per_ms"],
             "mV/ms",
-            "teacher-relevance voltage-transition error",
+            "root teacher-relevance voltage-transition error",
         ),
         _metric(
             "spike_mean_f1_0_5ms",
@@ -664,7 +733,12 @@ def evaluate_predictions(
             "mV^2",
             "support-normalized squared paired intervention-response error",
         ),
-        _metric("response_sera_mv", response_sera_value, "mV", "paired intervention response error"),
+        _metric(
+            "response_root_sera_mv",
+            response_sera_value,
+            "mV",
+            "root paired intervention-response error",
+        ),
     ]
 
     diagnostics = _ordinary_attention_rows(
@@ -677,9 +751,13 @@ def evaluate_predictions(
         config=cfg,
     )
     diagnostics.extend(_intervention_attention_rows(intervention_reports))
-    diagnostics.append(_morphology_attention_row(pred_score, tgt_score, raw_score, score_ids, cfg))
+    diagnostics.append(
+        _morphology_attention_row(pred_score, tgt_score, raw_score, score_ids, cfg)
+    )
     if len(diagnostics) != 24:
-        raise RuntimeError(f"internal diagnostic panel must contain 24 rows, got {len(diagnostics)}")
+        raise RuntimeError(
+            f"internal diagnostic panel must contain 24 rows, got {len(diagnostics)}"
+        )
 
     return {
         "model_id": model_id,
@@ -688,6 +766,8 @@ def evaluate_predictions(
         "scored_samples": int(pred_score.shape[0]),
         "spike_threshold": float(threshold),
         "spike_f1_curve": f1["rows"],
+        "voltage_sera_curve": voltage["sera_curve"],
+        "dynamics_sera_curve": dynamics["sera_curve"],
         "metrics": metrics,
         "diagnostics": diagnostics,
         "interventions": intervention_reports,
@@ -719,7 +799,9 @@ def compare_predictions(
     baseline = _as_traces(baseline_prediction, "baseline_prediction")
     tgt = _as_traces(target, "target")
     if not (candidate.shape == baseline.shape == tgt.shape):
-        raise ValueError("candidate, baseline, and target arrays must have matching shapes")
+        raise ValueError(
+            "candidate, baseline, and target arrays must have matching shapes"
+        )
     ids = trace_ids or [str(index) for index in range(candidate.shape[0])]
     candidate_interventions = list(candidate_interventions)
     baseline_interventions = list(baseline_interventions)
@@ -784,7 +866,9 @@ def compare_predictions(
             ci_low, ci_high = float(low), float(high)
         else:
             ci_low = ci_high = None
-        assessment = _delta_assessment(ci_low, ci_high, higher_is_better=higher_is_better)
+        assessment = _delta_assessment(
+            ci_low, ci_high, higher_is_better=higher_is_better
+        )
         rows.append(
             {
                 "id": identifier,
@@ -838,6 +922,7 @@ def _evaluation_cache_protocol(
     intervention_names: tuple[str, ...] | None,
     multiple_morphologies: bool,
     morphology_id: str | None,
+    validation_sample_start: int = 0,
     config: EvaluationConfig,
 ) -> dict[str, Any]:
     return _json_safe(
@@ -845,9 +930,12 @@ def _evaluation_cache_protocol(
             "max_samples": int(max_samples),
             "max_intervention_samples": int(max_intervention_samples),
             "max_interventions": int(max_interventions),
-            "intervention_names": list(intervention_names) if intervention_names is not None else None,
+            "intervention_names": list(intervention_names)
+            if intervention_names is not None
+            else None,
             "multiple_morphologies": bool(multiple_morphologies),
             "morphology_id": morphology_id,
+            "validation_sample_start": int(validation_sample_start),
             "config": asdict(config),
         }
     )
@@ -865,14 +953,19 @@ def _collect_model_outputs(
     intervention_names: tuple[str, ...] | None,
     multiple_morphologies: bool,
     morphology_id: str | None,
+    validation_sample_start: int = 0,
     cache_shards: int,
 ) -> dict[str, Any]:
     if batch_size <= 0 or max_interventions < 0:
-        raise ValueError("batch size must be positive and max_interventions non-negative")
+        raise ValueError(
+            "batch size must be positive and max_interventions non-negative"
+        )
     if intervention_workers <= 0:
         raise ValueError("intervention_workers must be positive")
     if multiple_morphologies and morphology_id is not None:
-        raise ValueError("morphology_id cannot be combined with multiple_morphologies=True")
+        raise ValueError(
+            "morphology_id cannot be combined with multiple_morphologies=True"
+        )
     root = Path(dataset_root)
     validation = ShardedNeuronIODataset(root / "val", cache_shards=cache_shards)
     selected_indices, selected_morphologies = _validation_indices(
@@ -880,6 +973,7 @@ def _collect_model_outputs(
         min(max_samples, len(validation)),
         multiple_morphologies=multiple_morphologies,
         morphology_id=morphology_id,
+        sample_start=validation_sample_start,
     )
     predictions: list[np.ndarray] = []
     targets: list[np.ndarray] = []
@@ -901,7 +995,10 @@ def _collect_model_outputs(
         targets.append(np.asarray(batch_targets, dtype=np.float32))
         event_indicators.append(
             np.stack(
-                [np.count_nonzero(inputs > 0, axis=-1), np.count_nonzero(inputs < 0, axis=-1)],
+                [
+                    np.count_nonzero(inputs > 0, axis=-1),
+                    np.count_nonzero(inputs < 0, axis=-1),
+                ],
                 axis=-1,
             ).astype(np.int16, copy=False)
         )
@@ -925,7 +1022,11 @@ def _collect_model_outputs(
     prediction_array = np.concatenate(predictions, axis=0)
     target_array = np.concatenate(targets, axis=0)
     event_array = np.concatenate(event_indicators, axis=0)
-    raw_array = np.concatenate(raw_soma_chunks, axis=0) if raw_soma_available and raw_soma_chunks else None
+    raw_array = (
+        np.concatenate(raw_soma_chunks, axis=0)
+        if raw_soma_available and raw_soma_chunks
+        else None
+    )
     report_order = _round_robin_group_order(trace_ids)
     return {
         "prediction": prediction_array[report_order],
@@ -986,8 +1087,10 @@ def format_model_comparison(comparison: dict[str, Any]) -> str:
         )
     lines = [
         "PAIRED COMPARISON",
-        f"candidate={comparison['candidate']['model_id']}  baseline={comparison['baseline']['model_id']}  "
-        f"bootstrap={comparison['bootstrap_replicates']}  95% CI",
+        (
+            f"candidate={comparison['candidate']['model_id']}  baseline={comparison['baseline']['model_id']}  "
+            f"bootstrap={comparison['bootstrap_replicates']}  95% CI"
+        ),
     ]
     lines.extend(
         _ascii_table(
@@ -1008,7 +1111,10 @@ def write_model_comparison(comparison: dict[str, Any], path: str | Path) -> Path
     output.parent.mkdir(parents=True, exist_ok=True)
     if suffix == ".json":
         output.write_text(
-            json.dumps(_json_safe(comparison), indent=2, sort_keys=True, allow_nan=False) + "\n",
+            json.dumps(
+                _json_safe(comparison), indent=2, sort_keys=True, allow_nan=False
+            )
+            + "\n",
             encoding="utf-8",
         )
         return output
@@ -1044,14 +1150,20 @@ def write_model_comparison(comparison: dict[str, Any], path: str | Path) -> Path
 
 def format_evaluation_report(report: dict[str, Any]) -> str:
     """Render a deterministic, bounded plain-text report."""
-    runtime = "" if "evaluation_seconds" not in report else f"  runtime={report['evaluation_seconds']:.2f}s"
+    runtime = (
+        ""
+        if "evaluation_seconds" not in report
+        else f"  runtime={report['evaluation_seconds']:.2f}s"
+    )
     morphology = ""
     if report.get("morphology_mode"):
         morphology = f"  morphologies={report['morphology_mode']}:{','.join(report.get('morphology_ids', []))}"
     lines = [
-        f"MODEL: {report['model_id']}  samples={report['samples']} "
-        f"(calibration={report['calibration_samples']}, scored={report['scored_samples']}) "
-        f"spike_threshold={_format_number(report['spike_threshold'])}{morphology}{runtime}",
+        (
+            f"MODEL: {report['model_id']}  samples={report['samples']} "
+            f"(calibration={report['calibration_samples']}, scored={report['scored_samples']}) "
+            f"spike_threshold={_format_number(report['spike_threshold'])}{morphology}{runtime}"
+        ),
         "",
         "CORE METRICS",
     ]
@@ -1059,8 +1171,16 @@ def format_evaluation_report(report: dict[str, Any]) -> str:
         [row["id"], _format_value(row["value"], row["unit"]), row["meaning"]]
         for row in report["metrics"]
     ]
-    lines.extend(_ascii_table(["metric", "value", "role"], metric_rows, widths=(27, 14, 35)))
-    lines.extend(["", "ATTENTION PANEL", "YES = early watch; NO = clear at this trigger; NA = evidence unavailable."])
+    lines.extend(
+        _ascii_table(["metric", "value", "role"], metric_rows, widths=(27, 14, 35))
+    )
+    lines.extend(
+        [
+            "",
+            "ATTENTION PANEL",
+            "YES = early watch; NO = clear at this trigger; NA = evidence unavailable.",
+        ]
+    )
     diagnostic_rows = [
         [
             row["area"],
@@ -1080,7 +1200,9 @@ def format_evaluation_report(report: dict[str, Any]) -> str:
     )
     yes = sum(row["attention"] == "YES" for row in report["diagnostics"])
     na = sum(row["attention"] == "NA" for row in report["diagnostics"])
-    lines.append(f"Attention summary: {yes} YES, {24 - yes - na} NO, {na} NA (24 fixed rows).")
+    lines.append(
+        f"Attention summary: {yes} YES, {24 - yes - na} NO, {na} NA (24 fixed rows)."
+    )
     return "\n".join(lines)
 
 
@@ -1093,7 +1215,8 @@ def write_evaluation_report(report: dict[str, Any], path: str | Path) -> Path:
     output.parent.mkdir(parents=True, exist_ok=True)
     if suffix == ".json":
         output.write_text(
-            json.dumps(_json_safe(report), indent=2, sort_keys=True, allow_nan=False) + "\n",
+            json.dumps(_json_safe(report), indent=2, sort_keys=True, allow_nan=False)
+            + "\n",
             encoding="utf-8",
         )
         return output
@@ -1170,8 +1293,8 @@ def _report_csv_rows(report: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
     intervention_units = {
-        "response_sera_mv": "mV",
-        "zero_response_sera_mv": "mV",
+        "response_root_sera_mv": "mV",
+        "zero_response_root_sera_mv": "mV",
         "response_skill": "skill",
         "direction_agreement": "fraction",
         "response_gain": "ratio",
@@ -1240,7 +1363,10 @@ def _paired_metric_bootstrap(
 ) -> dict[str, list[float]]:
     calibration_count = max(
         1,
-        min(candidate.shape[0] - 1, int(round(candidate.shape[0] * config.calibration_fraction))),
+        min(
+            candidate.shape[0] - 1,
+            round(candidate.shape[0] * config.calibration_fraction),
+        ),
     )
     candidate_score = candidate[calibration_count:, config.ignore_start :, :]
     baseline_score = baseline[calibration_count:, config.ignore_start :, :]
@@ -1293,15 +1419,15 @@ def _paired_metric_bootstrap(
     )
     values = {
         "voltage_sera_mv2": [],
-        "voltage_sera_mv": [],
+        "voltage_root_sera_mv": [],
         "dynamics_sera_mv2_per_ms2": [],
-        "dynamics_sera_mv_per_ms": [],
+        "dynamics_root_sera_mv_per_ms": [],
         "spike_mean_f1_0_5ms": [],
         "spike_f1_area_0_5ms": [],
         "spike_f1_exact": [],
         "spike_f1_5ms": [],
         "response_sera_mv2": [],
-        "response_sera_mv": [],
+        "response_root_sera_mv": [],
     }
     rng = np.random.default_rng(seed)
     exact_step, tolerant_step = config.selected_f1_steps
@@ -1311,7 +1437,7 @@ def _paired_metric_bootstrap(
             _sera_from_trace_statistics(*candidate_voltage, indices)
             - _sera_from_trace_statistics(*baseline_voltage, indices)
         )
-        values["voltage_sera_mv"].append(
+        values["voltage_root_sera_mv"].append(
             _root_sera_from_trace_statistics(*candidate_voltage, indices)
             - _root_sera_from_trace_statistics(*baseline_voltage, indices)
         )
@@ -1319,7 +1445,7 @@ def _paired_metric_bootstrap(
             _sera_from_trace_statistics(*candidate_dynamics, indices)
             - _sera_from_trace_statistics(*baseline_dynamics, indices)
         )
-        values["dynamics_sera_mv_per_ms"].append(
+        values["dynamics_root_sera_mv_per_ms"].append(
             _root_sera_from_trace_statistics(*candidate_dynamics, indices)
             - _root_sera_from_trace_statistics(*baseline_dynamics, indices)
         )
@@ -1336,7 +1462,9 @@ def _paired_metric_bootstrap(
         values["spike_mean_f1_0_5ms"].append(
             candidate_spike["mean"] - baseline_spike["mean"]
         )
-        values["spike_f1_area_0_5ms"].append(candidate_spike["area"] - baseline_spike["area"])
+        values["spike_f1_area_0_5ms"].append(
+            candidate_spike["area"] - baseline_spike["area"]
+        )
         values["spike_f1_exact"].append(
             candidate_spike[exact_step] - baseline_spike[exact_step]
         )
@@ -1345,11 +1473,13 @@ def _paired_metric_bootstrap(
         )
         response_deltas = _bootstrap_response_deltas(response_stats, rng)
         values["response_sera_mv2"].append(response_deltas["sera"])
-        values["response_sera_mv"].append(response_deltas["root_sera"])
+        values["response_root_sera_mv"].append(response_deltas["root_sera"])
     return values
 
 
-def _sera_trace_statistics(error: np.ndarray, relevance: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def _sera_trace_statistics(
+    error: np.ndarray, relevance: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
     squared_error = np.square(np.asarray(error, dtype=np.float64))
     rel = np.asarray(relevance, dtype=np.float64)
     if squared_error.shape != rel.shape:
@@ -1447,7 +1577,11 @@ def _f1_metrics_from_trace_statistics(
         area = f1_values[0]
     else:
         widths = np.diff(np.asarray(tolerances, dtype=np.float64))
-        integral = float(np.sum(0.5 * (np.asarray(f1_values[:-1]) + np.asarray(f1_values[1:])) * widths))
+        integral = float(
+            np.sum(
+                0.5 * (np.asarray(f1_values[:-1]) + np.asarray(f1_values[1:])) * widths
+            )
+        )
         span = float(tolerances[-1] - tolerances[0])
         area = integral / span if span > 0.0 else float(np.mean(f1_values))
     result["mean"] = mean_f1
@@ -1462,8 +1596,12 @@ def _bootstrap_groups(trace_ids: Iterable[str]) -> list[np.ndarray]:
     return [np.asarray(groups[name], dtype=int) for name in sorted(groups)]
 
 
-def _draw_stratified_bootstrap(groups: list[np.ndarray], rng: np.random.Generator) -> np.ndarray:
-    return np.concatenate([rng.choice(group, size=len(group), replace=True) for group in groups])
+def _draw_stratified_bootstrap(
+    groups: list[np.ndarray], rng: np.random.Generator
+) -> np.ndarray:
+    return np.concatenate(
+        [rng.choice(group, size=len(group), replace=True) for group in groups]
+    )
 
 
 def _paired_response_statistics(
@@ -1472,22 +1610,36 @@ def _paired_response_statistics(
     config: EvaluationConfig,
 ) -> list[dict[str, Any]]:
     if len(candidate_interventions) != len(baseline_interventions):
-        raise ValueError("candidate and baseline intervention lists must have matching lengths")
+        raise ValueError(
+            "candidate and baseline intervention lists must have matching lengths"
+        )
     rows = []
-    for candidate, baseline in zip(candidate_interventions, baseline_interventions, strict=True):
+    for candidate, baseline in zip(
+        candidate_interventions, baseline_interventions, strict=True
+    ):
         if candidate.name != baseline.name:
-            raise ValueError("candidate and baseline interventions must have matching names and order")
+            raise ValueError(
+                "candidate and baseline interventions must have matching names and order"
+            )
         if not (
             np.array_equal(candidate.baseline_target, baseline.baseline_target)
-            and np.array_equal(candidate.intervention_target, baseline.intervention_target)
+            and np.array_equal(
+                candidate.intervention_target, baseline.intervention_target
+            )
         ):
             raise ValueError(
                 f"intervention {candidate.name!r} candidate and baseline must share teacher targets"
             )
-        candidate_stats, candidate_groups = _response_trace_statistics(candidate, config)
+        candidate_stats, candidate_groups = _response_trace_statistics(
+            candidate, config
+        )
         baseline_stats, baseline_groups = _response_trace_statistics(baseline, config)
-        if [len(group) for group in candidate_groups] != [len(group) for group in baseline_groups]:
-            raise ValueError(f"intervention {candidate.name!r} morphology groups do not match")
+        if [len(group) for group in candidate_groups] != [
+            len(group) for group in baseline_groups
+        ]:
+            raise ValueError(
+                f"intervention {candidate.name!r} morphology groups do not match"
+            )
         rows.append(
             {
                 "candidate": candidate_stats,
@@ -1502,16 +1654,36 @@ def _response_trace_statistics(
     item: PairedInterventionPredictions,
     config: EvaluationConfig,
 ) -> tuple[tuple[np.ndarray, np.ndarray], list[np.ndarray]]:
-    base_pred = _as_traces(item.baseline_prediction, "baseline_prediction")[:, config.ignore_start :, :]
-    int_pred = _as_traces(item.intervention_prediction, "intervention_prediction")[:, config.ignore_start :, :]
-    base_tgt = _as_traces(item.baseline_target, "baseline_target")[:, config.ignore_start :, :]
-    int_tgt = _as_traces(item.intervention_target, "intervention_target")[:, config.ignore_start :, :]
+    base_pred = _as_traces(item.baseline_prediction, "baseline_prediction")[
+        :, config.ignore_start :, :
+    ]
+    int_pred = _as_traces(item.intervention_prediction, "intervention_prediction")[
+        :, config.ignore_start :, :
+    ]
+    base_tgt = _as_traces(item.baseline_target, "baseline_target")[
+        :, config.ignore_start :, :
+    ]
+    int_tgt = _as_traces(item.intervention_target, "intervention_target")[
+        :, config.ignore_start :, :
+    ]
     if not (base_pred.shape == int_pred.shape == base_tgt.shape == int_tgt.shape):
         raise ValueError(f"intervention {item.name!r} arrays must have matching shapes")
-    base_raw = _crop_intervention_raw(item.baseline_raw_soma_mv, config.ignore_start, base_pred.shape[:2])
-    int_raw = _crop_intervention_raw(item.intervention_raw_soma_mv, config.ignore_start, base_pred.shape[:2])
-    teacher_base = base_raw if base_raw is not None else base_tgt[..., 1] / config.soma_scale + config.soma_bias_mv
-    teacher_int = int_raw if int_raw is not None else int_tgt[..., 1] / config.soma_scale + config.soma_bias_mv
+    base_raw = _crop_intervention_raw(
+        item.baseline_raw_soma_mv, config.ignore_start, base_pred.shape[:2]
+    )
+    int_raw = _crop_intervention_raw(
+        item.intervention_raw_soma_mv, config.ignore_start, base_pred.shape[:2]
+    )
+    teacher_base = (
+        base_raw
+        if base_raw is not None
+        else base_tgt[..., 1] / config.soma_scale + config.soma_bias_mv
+    )
+    teacher_int = (
+        int_raw
+        if int_raw is not None
+        else int_tgt[..., 1] / config.soma_scale + config.soma_bias_mv
+    )
     model_base = base_pred[..., 1] / config.soma_scale + config.soma_bias_mv
     model_int = int_pred[..., 1] / config.soma_scale + config.soma_bias_mv
     teacher_delta = teacher_int - teacher_base
@@ -1520,7 +1692,9 @@ def _response_trace_statistics(
         [
             voltage_relevance(teacher_base, base_tgt[..., 0] > 0.5),
             voltage_relevance(teacher_int, int_tgt[..., 0] > 0.5),
-            _tail_relevance(np.abs(teacher_delta), start_quantile=0.80, stop_quantile=0.995),
+            _tail_relevance(
+                np.abs(teacher_delta), start_quantile=0.80, stop_quantile=0.995
+            ),
         ]
     )
     labels = (
@@ -1529,7 +1703,9 @@ def _response_trace_statistics(
         else ["single"] * base_pred.shape[0]
     )
     if len(labels) != base_pred.shape[0]:
-        raise ValueError(f"intervention {item.name!r} morphology_ids length does not match traces")
+        raise ValueError(
+            f"intervention {item.name!r} morphology_ids length does not match traces"
+        )
     return _sera_trace_statistics(error, relevance), _bootstrap_groups(labels)
 
 
@@ -1543,19 +1719,13 @@ def _bootstrap_response_deltas(
     baseline_values = []
     for row in rows:
         indices = _draw_stratified_bootstrap(row["groups"], rng)
-        candidate_values.append(
-            _sera_from_trace_statistics(*row["candidate"], indices)
-        )
-        baseline_values.append(
-            _sera_from_trace_statistics(*row["baseline"], indices)
-        )
+        candidate_values.append(_sera_from_trace_statistics(*row["candidate"], indices))
+        baseline_values.append(_sera_from_trace_statistics(*row["baseline"], indices))
     candidate_sera = float(np.mean(candidate_values))
     baseline_sera = float(np.mean(baseline_values))
     return {
         "sera": candidate_sera - baseline_sera,
-        "root_sera": float(
-            np.sqrt(candidate_sera) - np.sqrt(baseline_sera)
-        ),
+        "root_sera": float(np.sqrt(candidate_sera) - np.sqrt(baseline_sera)),
     }
 
 
@@ -1597,10 +1767,15 @@ def _run_dataset_interventions(
         return []
     requested = set(intervention_names) if intervention_names is not None else None
     directories = [
-        path for path in sorted(interventions_root.iterdir())
+        path
+        for path in sorted(interventions_root.iterdir())
         if path.is_dir() and (requested is None or path.name in requested)
     ][:max_interventions]
-    missing = requested - {path.name for path in directories} if requested is not None else set()
+    missing = (
+        requested - {path.name for path in directories}
+        if requested is not None
+        else set()
+    )
     if missing:
         raise FileNotFoundError(f"intervention folders not found: {sorted(missing)}")
 
@@ -1618,7 +1793,9 @@ def _run_dataset_interventions(
         )
         executor = None
     else:
-        executor = ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="axobench-intervention")
+        executor = ThreadPoolExecutor(
+            max_workers=worker_count, thread_name_prefix="axobench-intervention"
+        )
         loaded_pairs = executor.map(
             lambda path: _load_intervention_directory(
                 path,
@@ -1660,26 +1837,27 @@ def _run_dataset_interventions(
     return results
 
 
-def _balanced_validation_indices(dataset: ShardedNeuronIODataset, sample_count: int) -> list[int]:
+def _balanced_validation_indices(
+    dataset: ShardedNeuronIODataset,
+    sample_count: int,
+    *,
+    sample_start: int = 0,
+) -> list[int]:
     all_indices = list(range(len(dataset)))
     all_ids = dataset.get_sample_ids(all_indices)
     groups: dict[str, list[int]] = {}
     for index, trace_id in zip(all_indices, all_ids, strict=True):
         groups.setdefault(_morphology_id(trace_id), []).append(index)
-    if len(groups) <= 1:
-        return all_indices[:sample_count]
-
     names = sorted(groups)
-    base, extra = divmod(sample_count, len(names))
-    selected: list[int] = []
-    unused: list[int] = []
-    for position, name in enumerate(names):
-        quota = base + int(position < extra)
-        selected.extend(groups[name][:quota])
-        unused.extend(groups[name][quota:])
-    if len(selected) < sample_count:
-        selected.extend(sorted(unused)[: sample_count - len(selected)])
-    return sorted(selected)
+    balanced_order: list[int] = []
+    for offset in range(max(len(indices) for indices in groups.values())):
+        for name in names:
+            if offset < len(groups[name]):
+                balanced_order.append(groups[name][offset])
+    stop = sample_start + sample_count
+    if sample_start < 0 or stop > len(balanced_order):
+        raise ValueError("validation sample block lies outside the dataset")
+    return sorted(balanced_order[sample_start:stop])
 
 
 def _validation_indices(
@@ -1688,6 +1866,7 @@ def _validation_indices(
     *,
     multiple_morphologies: bool,
     morphology_id: str | None,
+    sample_start: int = 0,
 ) -> tuple[list[int], list[str]]:
     all_indices = list(range(len(dataset)))
     all_ids = dataset.get_sample_ids(all_indices)
@@ -1698,7 +1877,11 @@ def _validation_indices(
     if not names:
         raise ValueError("validation dataset contains no morphology groups")
     if multiple_morphologies:
-        selected = _balanced_validation_indices(dataset, sample_count)
+        selected = _balanced_validation_indices(
+            dataset,
+            sample_count,
+            sample_start=sample_start,
+        )
         selected_names = sorted({_morphology_id(all_ids[index]) for index in selected})
         return selected, selected_names
     selected_name = morphology_id or names[0]
@@ -1706,7 +1889,10 @@ def _validation_indices(
         raise ValueError(
             f"morphology {selected_name!r} is unavailable; choose one of {names}"
         )
-    return groups[selected_name][:sample_count], [selected_name]
+    stop = sample_start + sample_count
+    if sample_start < 0 or sample_start >= len(groups[selected_name]):
+        raise ValueError("validation sample block lies outside the morphology")
+    return groups[selected_name][sample_start:stop], [selected_name]
 
 
 def _round_robin_group_order(trace_ids: list[str]) -> np.ndarray:
@@ -1744,7 +1930,9 @@ def _load_intervention_directory(
         for position, name in enumerate(names):
             quota = base + int(position < extra)
             if quota > 0:
-                loaded.append((name, _load_intervention_paths(groups[name], max_samples=quota)))
+                loaded.append(
+                    (name, _load_intervention_paths(groups[name], max_samples=quota))
+                )
     else:
         selected_name = morphology_id or names[0]
         if selected_name not in groups:
@@ -1752,13 +1940,26 @@ def _load_intervention_directory(
                 f"morphology {selected_name!r} is unavailable in {path}; choose one of {names}"
             )
         loaded.append(
-            (selected_name, _load_intervention_paths(groups[selected_name], max_samples=max_samples))
+            (
+                selected_name,
+                _load_intervention_paths(
+                    groups[selected_name], max_samples=max_samples
+                ),
+            )
         )
     if not loaded:
         raise ValueError("max_samples must be positive")
 
-    required = ("baseline_inputs", "baseline_targets", "intervention_inputs", "intervention_targets")
-    result = {name: np.concatenate([item[name] for _, item in loaded], axis=0) for name in required}
+    required = (
+        "baseline_inputs",
+        "baseline_targets",
+        "intervention_inputs",
+        "intervention_targets",
+    )
+    result = {
+        name: np.concatenate([item[name] for _, item in loaded], axis=0)
+        for name in required
+    }
     for name in ("baseline_soma_mv", "intervention_soma_mv"):
         if all(name in item for _, item in loaded):
             result[name] = np.concatenate([item[name] for _, item in loaded], axis=0)
@@ -1768,8 +1969,15 @@ def _load_intervention_directory(
     return result
 
 
-def _load_intervention_paths(paths: list[Path], *, max_samples: int) -> dict[str, np.ndarray]:
-    required = ("baseline_inputs", "baseline_targets", "intervention_inputs", "intervention_targets")
+def _load_intervention_paths(
+    paths: list[Path], *, max_samples: int
+) -> dict[str, np.ndarray]:
+    required = (
+        "baseline_inputs",
+        "baseline_targets",
+        "intervention_inputs",
+        "intervention_targets",
+    )
     optional = ("baseline_soma_mv", "intervention_soma_mv")
     chunks: dict[str, list[np.ndarray]] = {name: [] for name in (*required, *optional)}
     remaining = int(max_samples)
@@ -1792,9 +2000,17 @@ def _load_intervention_paths(paths: list[Path], *, max_samples: int) -> dict[str
         remaining -= count
     if not chunks["baseline_inputs"]:
         raise FileNotFoundError("paired intervention files contain no samples")
-    result = {name: np.concatenate(values, axis=0) for name, values in chunks.items() if values}
+    result = {
+        name: np.concatenate(values, axis=0)
+        for name, values in chunks.items()
+        if values
+    }
     for name in optional:
-        if chunks[name] and sum(chunk.shape[0] for chunk in chunks[name]) != result["baseline_inputs"].shape[0]:
+        if (
+            chunks[name]
+            and sum(chunk.shape[0] for chunk in chunks[name])
+            != result["baseline_inputs"].shape[0]
+        ):
             result.pop(name, None)
     return result
 
@@ -1815,7 +2031,9 @@ def _predict_in_batches(
     for start in range(0, inputs.shape[0], batch_size):
         batch = inputs[start : start + batch_size]
         batch_morphologies = (
-            morphology_ids[start : start + batch_size] if morphology_ids is not None else None
+            morphology_ids[start : start + batch_size]
+            if morphology_ids is not None
+            else None
         )
         prediction = _call_model(model_fn, batch, batch_morphologies)
         if prediction.shape[:2] != batch.shape[:2] or prediction.shape[-1] != 2:
@@ -1850,7 +2068,11 @@ def _ordinary_attention_rows(
     config: EvaluationConfig,
 ) -> list[dict[str, Any]]:
     pred_soma = prediction[..., 1] / config.soma_scale + config.soma_bias_mv
-    target_soma = raw_soma_mv if raw_soma_mv is not None else target[..., 1] / config.soma_scale + config.soma_bias_mv
+    target_soma = (
+        raw_soma_mv
+        if raw_soma_mv is not None
+        else target[..., 1] / config.soma_scale + config.soma_bias_mv
+    )
     residual = pred_soma - target_soma
     finite = np.isfinite(prediction)
     finite_soma = np.isfinite(pred_soma) & np.isfinite(target_soma)
@@ -1859,7 +2081,9 @@ def _ordinary_attention_rows(
     overall_rmse = _finite_rmse(finite_residual)
 
     lower, upper = config.physiological_voltage_bounds_mv
-    bounds_fraction = _fraction((pred_soma < lower) | (pred_soma > upper), np.isfinite(pred_soma))
+    bounds_fraction = _fraction(
+        (pred_soma < lower) | (pred_soma > upper), np.isfinite(pred_soma)
+    )
     pred_dvdt = np.diff(pred_soma, axis=1) / config.timestep_ms
     slew_fraction = _fraction(
         np.abs(pred_dvdt) > config.physiological_slew_bound_mv_per_ms,
@@ -1869,20 +2093,32 @@ def _ordinary_attention_rows(
     trace_mean = np.nanmean(target_soma, axis=1, keepdims=True)
     null_rmse = _finite_rmse(target_soma - trace_mean)
     voltage_skill = (
-        1.0 - (overall_rmse ** 2 / null_rmse ** 2)
+        1.0 - (overall_rmse**2 / null_rmse**2)
         if null_rmse > 0.0
         else (1.0 if overall_rmse == 0.0 else float("-inf"))
     )
     target_std = float(np.std(target_finite)) if target_finite.size else float("nan")
     bias = float(np.mean(finite_residual)) if finite_residual.size else float("nan")
-    normalized_bias = abs(bias) / target_std if target_std > 0.0 else (0.0 if bias == 0.0 else float("inf"))
+    normalized_bias = (
+        abs(bias) / target_std
+        if target_std > 0.0
+        else (0.0 if bias == 0.0 else float("inf"))
+    )
     gain = _least_squares_gain(target_finite, pred_soma[finite_soma])
     lag1 = _lag1_autocorrelation(residual)
 
     spikes = target[..., 0] > 0.5
-    event_load = np.sum(np.abs(inputs_score), axis=-1) if inputs_score is not None else None
-    target_dvdt = np.diff(target_soma, axis=1, prepend=target_soma[:, :1]) / config.timestep_ms
-    low_input_mask = _low_input_mask(event_load, spikes, radius=5) if event_load is not None else None
+    event_load = (
+        np.sum(np.abs(inputs_score), axis=-1) if inputs_score is not None else None
+    )
+    target_dvdt = (
+        np.diff(target_soma, axis=1, prepend=target_soma[:, :1]) / config.timestep_ms
+    )
+    low_input_mask = (
+        _low_input_mask(event_load, spikes, radius=5)
+        if event_load is not None
+        else None
+    )
     hyper_mask = target_soma <= np.nanquantile(target_soma, 0.10)
     depol_mask = target_soma >= np.nanquantile(target_soma, 0.90)
     dvdt_mask = np.abs(target_dvdt) >= np.nanquantile(np.abs(target_dvdt), 0.90)
@@ -1899,16 +2135,27 @@ def _ordinary_attention_rows(
     exact_f1 = _numeric(exact_f1_raw)
     tolerant_f1 = _numeric(tolerant_f1_raw)
     timing_gap = tolerant_f1 - exact_f1
-    predicted = np.where(np.isfinite(prediction[..., 0]), prediction[..., 0], -np.inf) >= threshold
+    predicted = (
+        np.where(np.isfinite(prediction[..., 0]), prediction[..., 0], -np.inf)
+        >= threshold
+    )
     default_predicted = (
         np.where(np.isfinite(prediction[..., 0]), prediction[..., 0], -np.inf)
         >= config.default_spike_threshold
     )
     count_nmae = _count_nmae(predicted, spikes)
-    timing_bias = _matched_timing_bias_ms(predicted, spikes, tolerant_step, config.timestep_ms)
+    timing_bias = _matched_timing_bias_ms(
+        predicted, spikes, tolerant_step, config.timestep_ms
+    )
     target_count = int(spikes.sum())
-    default_count_ratio = float(default_predicted.sum() / target_count) if target_count > 0 else float("nan")
-    refractory_fraction = _refractory_violation_fraction(predicted, config.refractory_period_ms, config.timestep_ms)
+    default_count_ratio = (
+        float(default_predicted.sum() / target_count)
+        if target_count > 0
+        else float("nan")
+    )
+    refractory_fraction = _refractory_violation_fraction(
+        predicted, config.refractory_period_ms, config.timestep_ms
+    )
 
     if target_count == 0 and not default_predicted.any():
         spike_rows = [
@@ -1917,30 +2164,79 @@ def _ordinary_attention_rows(
             _attention_na("spikes", "spike_timing_tolerance_gap", "> 0.05"),
             _attention_na("spikes", "spike_count_error", "> 0.10"),
             _attention_na("spikes", "spike_timing_bias", "|bias| > 0.5 ms"),
-            _attention_na("calibration", "default_threshold_count", "outside [0.80, 1.25]"),
+            _attention_na(
+                "calibration", "default_threshold_count", "outside [0.80, 1.25]"
+            ),
         ]
     else:
         spike_rows = [
-            _attention_or_na("spikes", "spike_exact_fidelity", exact_f1_raw, "< 0.90", exact_f1 < 0.90, "F1"),
-            _attention_or_na("spikes", "spike_5ms_fidelity", tolerant_f1_raw, "< 0.95", tolerant_f1 < 0.95, "F1"),
-            _attention("spikes", "spike_timing_tolerance_gap", timing_gap, "> 0.05", timing_gap > 0.05, "F1 delta"),
-            _attention("spikes", "spike_count_error", count_nmae, "> 0.10", count_nmae > 0.10, "normalized MAE"),
             _attention_or_na(
-                "spikes", "spike_timing_bias", timing_bias, "|bias| > 0.5 ms", abs(timing_bias) > 0.5, "ms"
+                "spikes",
+                "spike_exact_fidelity",
+                exact_f1_raw,
+                "< 0.90",
+                exact_f1 < 0.90,
+                "F1",
             ),
             _attention_or_na(
-                "calibration", "default_threshold_count", default_count_ratio, "outside [0.80, 1.25]",
-                not 0.80 <= default_count_ratio <= 1.25, "ratio",
+                "spikes",
+                "spike_5ms_fidelity",
+                tolerant_f1_raw,
+                "< 0.95",
+                tolerant_f1 < 0.95,
+                "F1",
+            ),
+            _attention(
+                "spikes",
+                "spike_timing_tolerance_gap",
+                timing_gap,
+                "> 0.05",
+                timing_gap > 0.05,
+                "F1 delta",
+            ),
+            _attention(
+                "spikes",
+                "spike_count_error",
+                count_nmae,
+                "> 0.10",
+                count_nmae > 0.10,
+                "normalized MAE",
+            ),
+            _attention_or_na(
+                "spikes",
+                "spike_timing_bias",
+                timing_bias,
+                "|bias| > 0.5 ms",
+                abs(timing_bias) > 0.5,
+                "ms",
+            ),
+            _attention_or_na(
+                "calibration",
+                "default_threshold_count",
+                default_count_ratio,
+                "outside [0.80, 1.25]",
+                not 0.80 <= default_count_ratio <= 1.25,
+                "ratio",
             ),
         ]
 
     state_rows = [
-        _state_attention("low_input_state_error", low_input_mask, residual, overall_rmse, config),
-        _state_attention("hyperpolarized_state_error", hyper_mask, residual, overall_rmse, config),
-        _state_attention("depolarized_state_error", depol_mask, residual, overall_rmse, config),
+        _state_attention(
+            "low_input_state_error", low_input_mask, residual, overall_rmse, config
+        ),
+        _state_attention(
+            "hyperpolarized_state_error", hyper_mask, residual, overall_rmse, config
+        ),
+        _state_attention(
+            "depolarized_state_error", depol_mask, residual, overall_rmse, config
+        ),
         _state_attention("high_dvdt_error", dvdt_mask, residual, overall_rmse, config),
-        _state_attention("near_spike_error", near_spike_mask, residual, overall_rmse, config),
-        _state_attention("post_input_burst_error", post_event_mask, residual, overall_rmse, config),
+        _state_attention(
+            "near_spike_error", near_spike_mask, residual, overall_rmse, config
+        ),
+        _state_attention(
+            "post_input_burst_error", post_event_mask, residual, overall_rmse, config
+        ),
     ]
     return [
         _attention(
@@ -1951,12 +2247,54 @@ def _ordinary_attention_rows(
             not bool(finite.all()),
             "fraction",
         ),
-        _attention("physiology", "voltage_bounds", bounds_fraction, "> 0", bounds_fraction > 0.0, "fraction"),
-        _attention("physiology", "voltage_slew", slew_fraction, "> 0", slew_fraction > 0.0, "fraction"),
-        _attention("voltage", "voltage_null_skill", voltage_skill, "<= 0", voltage_skill <= 0.0, "fraction"),
-        _attention("voltage", "voltage_bias", normalized_bias, "> 0.10 target SD", normalized_bias > 0.10, "ratio"),
-        _attention("voltage", "voltage_gain", gain, "outside [0.90, 1.10]", not 0.90 <= gain <= 1.10, "ratio"),
-        _attention("dynamics", "residual_lag1", lag1, "|r| > 0.10", abs(lag1) > 0.10, "correlation"),
+        _attention(
+            "physiology",
+            "voltage_bounds",
+            bounds_fraction,
+            "> 0",
+            bounds_fraction > 0.0,
+            "fraction",
+        ),
+        _attention(
+            "physiology",
+            "voltage_slew",
+            slew_fraction,
+            "> 0",
+            slew_fraction > 0.0,
+            "fraction",
+        ),
+        _attention(
+            "voltage",
+            "voltage_null_skill",
+            voltage_skill,
+            "<= 0",
+            voltage_skill <= 0.0,
+            "fraction",
+        ),
+        _attention(
+            "voltage",
+            "voltage_bias",
+            normalized_bias,
+            "> 0.10 target SD",
+            normalized_bias > 0.10,
+            "ratio",
+        ),
+        _attention(
+            "voltage",
+            "voltage_gain",
+            gain,
+            "outside [0.90, 1.10]",
+            not 0.90 <= gain <= 1.10,
+            "ratio",
+        ),
+        _attention(
+            "dynamics",
+            "residual_lag1",
+            lag1,
+            "|r| > 0.10",
+            abs(lag1) > 0.10,
+            "correlation",
+        ),
         *state_rows,
         *spike_rows,
         _attention(
@@ -1970,15 +2308,29 @@ def _ordinary_attention_rows(
     ]
 
 
-def _evaluate_intervention(item: PairedInterventionPredictions, config: EvaluationConfig) -> dict[str, Any]:
-    base_pred = _as_traces(item.baseline_prediction, "baseline_prediction")[:, config.ignore_start :, :]
-    int_pred = _as_traces(item.intervention_prediction, "intervention_prediction")[:, config.ignore_start :, :]
-    base_tgt = _as_traces(item.baseline_target, "baseline_target")[:, config.ignore_start :, :]
-    int_tgt = _as_traces(item.intervention_target, "intervention_target")[:, config.ignore_start :, :]
+def _evaluate_intervention(
+    item: PairedInterventionPredictions, config: EvaluationConfig
+) -> dict[str, Any]:
+    base_pred = _as_traces(item.baseline_prediction, "baseline_prediction")[
+        :, config.ignore_start :, :
+    ]
+    int_pred = _as_traces(item.intervention_prediction, "intervention_prediction")[
+        :, config.ignore_start :, :
+    ]
+    base_tgt = _as_traces(item.baseline_target, "baseline_target")[
+        :, config.ignore_start :, :
+    ]
+    int_tgt = _as_traces(item.intervention_target, "intervention_target")[
+        :, config.ignore_start :, :
+    ]
     if not (base_pred.shape == int_pred.shape == base_tgt.shape == int_tgt.shape):
         raise ValueError(f"intervention {item.name!r} arrays must have matching shapes")
-    base_raw = _crop_intervention_raw(item.baseline_raw_soma_mv, config.ignore_start, base_pred.shape[:2])
-    int_raw = _crop_intervention_raw(item.intervention_raw_soma_mv, config.ignore_start, base_pred.shape[:2])
+    base_raw = _crop_intervention_raw(
+        item.baseline_raw_soma_mv, config.ignore_start, base_pred.shape[:2]
+    )
+    int_raw = _crop_intervention_raw(
+        item.intervention_raw_soma_mv, config.ignore_start, base_pred.shape[:2]
+    )
     measured = response_sera(
         base_pred,
         int_pred,
@@ -1999,8 +2351,16 @@ def _evaluate_intervention(item: PairedInterventionPredictions, config: Evaluati
         soma_scale=config.soma_scale,
         soma_bias_mv=config.soma_bias_mv,
     )
-    teacher_base_mv = base_raw if base_raw is not None else base_tgt[..., 1] / config.soma_scale + config.soma_bias_mv
-    teacher_int_mv = int_raw if int_raw is not None else int_tgt[..., 1] / config.soma_scale + config.soma_bias_mv
+    teacher_base_mv = (
+        base_raw
+        if base_raw is not None
+        else base_tgt[..., 1] / config.soma_scale + config.soma_bias_mv
+    )
+    teacher_int_mv = (
+        int_raw
+        if int_raw is not None
+        else int_tgt[..., 1] / config.soma_scale + config.soma_bias_mv
+    )
     model_base_mv = base_pred[..., 1] / config.soma_scale + config.soma_bias_mv
     model_int_mv = int_pred[..., 1] / config.soma_scale + config.soma_bias_mv
     teacher_delta = teacher_int_mv - teacher_base_mv
@@ -2017,11 +2377,9 @@ def _evaluate_intervention(item: PairedInterventionPredictions, config: Evaluati
         "name": item.name,
         "samples": int(base_pred.shape[0]),
         "response_sera_mv2": float(measured["response_sera_mv2"]),
-        "response_sera_mv": float(measured["response_sera_mv"]),
+        "response_root_sera_mv": float(measured["response_root_sera_mv"]),
         "zero_response_sera_mv2": null_sera,
-        "zero_response_sera_mv": float(
-            zero_response["response_sera_mv"]
-        ),
+        "zero_response_root_sera_mv": float(zero_response["response_root_sera_mv"]),
         "response_skill": skill,
         "direction_agreement": direction,
         "response_gain": gain,
@@ -2036,20 +2394,39 @@ def _intervention_attention_rows(reports: list[dict[str, Any]]) -> list[dict[str
             _attention_na("intervention", "intervention_gain", "outside [0.80, 1.20]"),
         ]
     skill = min(reports, key=lambda row: _nan_to(row["response_skill"], -np.inf))
-    direction = min(reports, key=lambda row: _nan_to(row["direction_agreement"], -np.inf))
-    gain = max(reports, key=lambda row: abs(_nan_to(row["response_gain"], np.inf) - 1.0))
+    direction = min(
+        reports, key=lambda row: _nan_to(row["direction_agreement"], -np.inf)
+    )
+    gain = max(
+        reports, key=lambda row: abs(_nan_to(row["response_gain"], np.inf) - 1.0)
+    )
     return [
         _attention(
-            "intervention", "intervention_response_skill", skill["response_skill"], "< 0.80",
-            skill["response_skill"] < 0.80, "skill", suffix=skill["name"],
+            "intervention",
+            "intervention_response_skill",
+            skill["response_skill"],
+            "< 0.80",
+            skill["response_skill"] < 0.80,
+            "skill",
+            suffix=skill["name"],
         ),
         _attention(
-            "intervention", "intervention_direction", direction["direction_agreement"], "< 0.95",
-            direction["direction_agreement"] < 0.95, "fraction", suffix=direction["name"],
+            "intervention",
+            "intervention_direction",
+            direction["direction_agreement"],
+            "< 0.95",
+            direction["direction_agreement"] < 0.95,
+            "fraction",
+            suffix=direction["name"],
         ),
         _attention(
-            "intervention", "intervention_gain", gain["response_gain"], "outside [0.80, 1.20]",
-            not 0.80 <= gain["response_gain"] <= 1.20, "ratio", suffix=gain["name"],
+            "intervention",
+            "intervention_gain",
+            gain["response_gain"],
+            "outside [0.80, 1.20]",
+            not 0.80 <= gain["response_gain"] <= 1.20,
+            "ratio",
+            suffix=gain["name"],
         ),
     ]
 
@@ -2068,20 +2445,37 @@ def _morphology_attention_row(
     if len(groups) < 2:
         return _attention_na("transfer", "morphology_error_disparity", "> 1.25x median")
     pred_mv = prediction[..., 1] / config.soma_scale + config.soma_bias_mv
-    target_mv = raw_soma_mv if raw_soma_mv is not None else target[..., 1] / config.soma_scale + config.soma_bias_mv
+    target_mv = (
+        raw_soma_mv
+        if raw_soma_mv is not None
+        else target[..., 1] / config.soma_scale + config.soma_bias_mv
+    )
     errors = {
         name: _finite_rmse(pred_mv[indices] - target_mv[indices])
         for name, indices in groups.items()
     }
-    finite_errors = np.asarray([value for value in errors.values() if np.isfinite(value)], dtype=float)
+    finite_errors = np.asarray(
+        [value for value in errors.values() if np.isfinite(value)], dtype=float
+    )
     if not finite_errors.size:
         return _attention_na("transfer", "morphology_error_disparity", "> 1.25x median")
     median = float(np.median(finite_errors))
-    worst_name, worst_error = max(errors.items(), key=lambda item: _nan_to(item[1], -np.inf))
-    ratio = worst_error / median if median > 0.0 else (1.0 if worst_error == 0.0 else float("inf"))
+    worst_name, worst_error = max(
+        errors.items(), key=lambda item: _nan_to(item[1], -np.inf)
+    )
+    ratio = (
+        worst_error / median
+        if median > 0.0
+        else (1.0 if worst_error == 0.0 else float("inf"))
+    )
     return _attention(
-        "transfer", "morphology_error_disparity", ratio, "> 1.25x median", ratio > 1.25,
-        "ratio", suffix=worst_name,
+        "transfer",
+        "morphology_error_disparity",
+        ratio,
+        "> 1.25x median",
+        ratio > 1.25,
+        "ratio",
+        suffix=worst_name,
     )
 
 
@@ -2093,13 +2487,26 @@ def _state_attention(
     config: EvaluationConfig,
 ) -> dict[str, Any]:
     if mask is None or not np.any(mask):
-        return _attention_na("states", name, f"> {config.state_error_ratio_watch:.2f}x overall")
+        return _attention_na(
+            "states", name, f"> {config.state_error_ratio_watch:.2f}x overall"
+        )
     state_rmse = _finite_rmse(residual[mask])
-    ratio = state_rmse / overall_rmse if overall_rmse > 0.0 else (1.0 if state_rmse == 0.0 else float("inf"))
-    watch = state_rmse > config.state_error_floor_mv and ratio > config.state_error_ratio_watch
+    ratio = (
+        state_rmse / overall_rmse
+        if overall_rmse > 0.0
+        else (1.0 if state_rmse == 0.0 else float("inf"))
+    )
+    watch = (
+        state_rmse > config.state_error_floor_mv
+        and ratio > config.state_error_ratio_watch
+    )
     return _attention(
-        "states", name, ratio, f"> {config.state_error_ratio_watch:.2f}x & > {config.state_error_floor_mv:g} mV",
-        watch, "RMSE ratio",
+        "states",
+        name,
+        ratio,
+        f"> {config.state_error_ratio_watch:.2f}x & > {config.state_error_floor_mv:g} mV",
+        watch,
+        "RMSE ratio",
     )
 
 
@@ -2154,7 +2561,9 @@ def _attention_or_na(
     return _attention(area, identifier, float(value), trigger, watch, unit)
 
 
-def _metric(identifier: str, value: float | None, unit: str, meaning: str) -> dict[str, Any]:
+def _metric(
+    identifier: str, value: float | None, unit: str, meaning: str
+) -> dict[str, Any]:
     return {"id": identifier, "value": value, "unit": unit, "meaning": meaning}
 
 
@@ -2163,7 +2572,9 @@ def _as_traces(array: np.ndarray, name: str) -> np.ndarray:
     if out.ndim == 2:
         out = out[None, ...]
     if out.ndim != 3:
-        raise ValueError(f"{name} must have shape (trace, time, feature), got {out.shape}")
+        raise ValueError(
+            f"{name} must have shape (trace, time, feature), got {out.shape}"
+        )
     return out
 
 
@@ -2192,7 +2603,9 @@ def _slice_optional_inputs(
         return None
     out = np.asarray(inputs)
     if out.ndim != 3 or out.shape[:2] != expected_shape:
-        raise ValueError(f"inputs must begin with shape {expected_shape}, got {out.shape}")
+        raise ValueError(
+            f"inputs must begin with shape {expected_shape}, got {out.shape}"
+        )
     return out[trace_slice, ignore_start:, :]
 
 
@@ -2206,14 +2619,20 @@ def _crop_intervention_raw(
     out = np.asarray(array, dtype=np.float64)
     cropped = out[:, ignore_start:]
     if cropped.shape != expected_cropped:
-        raise ValueError(f"intervention raw soma shape after masking must be {expected_cropped}, got {cropped.shape}")
+        raise ValueError(
+            f"intervention raw soma shape after masking must be {expected_cropped}, got {cropped.shape}"
+        )
     return cropped
 
 
 def _finite_rmse(values: np.ndarray) -> float:
     arr = np.asarray(values, dtype=np.float64)
     finite = np.isfinite(arr)
-    return float(np.sqrt(np.mean(np.square(arr[finite])))) if finite.any() else float("nan")
+    return (
+        float(np.sqrt(np.mean(np.square(arr[finite]))))
+        if finite.any()
+        else float("nan")
+    )
 
 
 def _least_squares_gain(source: np.ndarray, response: np.ndarray) -> float:
@@ -2236,13 +2655,19 @@ def _lag1_autocorrelation(residual: np.ndarray) -> float:
     for trace in np.asarray(residual):
         left, right = trace[:-1], trace[1:]
         finite = np.isfinite(left) & np.isfinite(right)
-        if finite.sum() < 3 or np.std(left[finite]) == 0.0 or np.std(right[finite]) == 0.0:
+        if (
+            finite.sum() < 3
+            or np.std(left[finite]) == 0.0
+            or np.std(right[finite]) == 0.0
+        ):
             continue
         values.append(float(np.corrcoef(left[finite], right[finite])[0, 1]))
     return float(np.mean(values)) if values else 0.0
 
 
-def _low_input_mask(event_load: np.ndarray, spikes: np.ndarray, *, radius: int) -> np.ndarray:
+def _low_input_mask(
+    event_load: np.ndarray, spikes: np.ndarray, *, radius: int
+) -> np.ndarray:
     load = np.asarray(event_load, dtype=float)
     low_drive = load <= np.quantile(load, 0.10)
     return low_drive & ~_dilate(spikes, radius)
@@ -2293,7 +2718,8 @@ def _matched_timing_bias_ms(
             candidates = [
                 (abs(int(pred_idx[index]) - int(target_time)), index)
                 for index in range(pred_idx.size)
-                if index not in used and abs(int(pred_idx[index]) - int(target_time)) <= tolerance_steps
+                if index not in used
+                and abs(int(pred_idx[index]) - int(target_time)) <= tolerance_steps
             ]
             if not candidates:
                 continue
@@ -2303,7 +2729,9 @@ def _matched_timing_bias_ms(
     return float(np.median(lags) * timestep_ms) if lags else float("nan")
 
 
-def _refractory_violation_fraction(predicted: np.ndarray, refractory_ms: float, timestep_ms: float) -> float:
+def _refractory_violation_fraction(
+    predicted: np.ndarray, refractory_ms: float, timestep_ms: float
+) -> float:
     minimum_steps = int(np.ceil(refractory_ms / timestep_ms))
     intervals: list[int] = []
     for trace in predicted:
@@ -2315,7 +2743,9 @@ def _refractory_violation_fraction(predicted: np.ndarray, refractory_ms: float, 
     return float(np.mean(arr < minimum_steps))
 
 
-def _response_direction_agreement(teacher_delta: np.ndarray, model_delta: np.ndarray) -> float:
+def _response_direction_agreement(
+    teacher_delta: np.ndarray, model_delta: np.ndarray
+) -> float:
     teacher = np.asarray(teacher_delta, dtype=float)
     model = np.asarray(model_delta, dtype=float)
     finite = np.isfinite(teacher) & np.isfinite(model)
@@ -2379,14 +2809,25 @@ def _format_number(value: float) -> str:
     return f"{value:.2f}"
 
 
-def _ascii_table(headers: list[str], rows: list[list[str]], *, widths: tuple[int, ...]) -> list[str]:
+def _ascii_table(
+    headers: list[str], rows: list[list[str]], *, widths: tuple[int, ...]
+) -> list[str]:
     def cell(value: str, width: int) -> str:
         text = str(value)
         return text if len(text) <= width else text[: max(1, width - 1)] + "~"
 
-    rendered = [[cell(value, width) for value, width in zip(row, widths, strict=True)] for row in [headers, *rows]]
-    actual_widths = [max(len(row[index]) for row in rendered) for index in range(len(widths))]
-    lines = [" | ".join(value.ljust(actual_widths[index]) for index, value in enumerate(rendered[0]))]
+    rendered = [
+        [cell(value, width) for value, width in zip(row, widths, strict=True)]
+        for row in [headers, *rows]
+    ]
+    actual_widths = [
+        max(len(row[index]) for row in rendered) for index in range(len(widths))
+    ]
+    lines = [
+        " | ".join(
+            value.ljust(actual_widths[index]) for index, value in enumerate(rendered[0])
+        )
+    ]
     lines.append("-+-".join("-" * width for width in actual_widths))
     lines.extend(
         " | ".join(value.ljust(actual_widths[index]) for index, value in enumerate(row))

@@ -2,40 +2,42 @@ from __future__ import annotations
 
 import csv
 import json
-from threading import Lock
 import time
+from dataclasses import replace
+from threading import Lock
 
 import numpy as np
 
-import axobench.benchmark as benchmark
+from axobench import benchmark
 from axobench.benchmark import iteration_evaluator
-from axobench.metrics import root_sera, sera
-
 from axobench.benchmark.iteration_evaluator import (
     DEFAULT_BATCH_SIZE,
     DEFAULT_INTERVENTION_SAMPLES,
+    DEFAULT_INTERVENTION_WORKERS,
     DEFAULT_MULTIPLE_MORPHOLOGY_INTERVENTION_SAMPLES,
     DEFAULT_MULTIPLE_MORPHOLOGY_STANDARD_SAMPLES,
-    DEFAULT_INTERVENTION_WORKERS,
     DEFAULT_STANDARD_SAMPLES,
     EvaluationConfig,
     PairedInterventionPredictions,
+    compare_predictions,
     create_model_evaluation_cache,
+    default_iteration_sample_limits,
     evaluate_model,
     evaluate_model_against_cache,
     evaluate_predictions,
-    default_iteration_sample_limits,
-    compare_predictions,
-    format_model_comparison,
     format_evaluation_report,
+    format_model_comparison,
     load_model_evaluation_cache,
     write_evaluation_report,
-    write_model_evaluation_cache,
     write_model_comparison,
+    write_model_evaluation_cache,
 )
+from axobench.metrics import root_sera, sera
 
 
-def _ordinary_fixture(*, delayed_spikes: int = 0) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str]]:
+def _ordinary_fixture(
+    *, delayed_spikes: int = 0
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str]]:
     traces, steps = 8, 80
     time = np.arange(steps, dtype=np.float64)
     soma_mv = np.stack(
@@ -62,13 +64,15 @@ def _ordinary_fixture(*, delayed_spikes: int = 0) -> tuple[np.ndarray, np.ndarra
 
 
 def _intervention_fixture(*, ignored: bool = False) -> PairedInterventionPredictions:
-    prediction, target, inputs, _ = _ordinary_fixture()
+    prediction, target, _inputs, _ = _ordinary_fixture()
     baseline_target = target.copy()
     intervention_target = target.copy()
     intervention_target[..., 1] += 0.5  # +5 mV response
     intervention_target[:, 40, 0] = 1.0
     baseline_prediction = prediction.copy()
-    intervention_prediction = baseline_prediction.copy() if ignored else intervention_target.copy()
+    intervention_prediction = (
+        baseline_prediction.copy() if ignored else intervention_target.copy()
+    )
     return PairedInterventionPredictions(
         name="excitatory_drive",
         baseline_prediction=baseline_prediction,
@@ -122,11 +126,14 @@ def test_perfect_predictions_clear_available_attention_rows() -> None:
     assert metrics["spike_mean_f1_0_5ms"]["value"] == 1.0
     assert metrics["spike_f1_area_0_5ms"]["value"] == 1.0
     assert metrics["voltage_sera_mv2"]["value"] == 0.0
-    assert metrics["voltage_sera_mv"]["value"] == 0.0
+    assert metrics["voltage_root_sera_mv"]["value"] == 0.0
     assert metrics["dynamics_sera_mv2_per_ms2"]["value"] == 0.0
-    assert metrics["dynamics_sera_mv_per_ms"]["value"] == 0.0
+    assert metrics["dynamics_root_sera_mv_per_ms"]["value"] == 0.0
     assert metrics["response_sera_mv2"]["value"] == 0.0
-    assert metrics["response_sera_mv"]["value"] == 0.0
+    assert metrics["response_root_sera_mv"]["value"] == 0.0
+    assert "voltage_sera_mv" not in metrics
+    assert "dynamics_sera_mv_per_ms" not in metrics
+    assert "response_sera_mv" not in metrics
     assert [row["tolerance_steps"] for row in report["spike_f1_curve"]] == [
         0,
         1,
@@ -135,6 +142,14 @@ def test_perfect_predictions_clear_available_attention_rows() -> None:
         4,
         5,
     ]
+    for field in ("voltage_sera_curve", "dynamics_sera_curve"):
+        curve = report[field]
+        assert len(curve["thresholds"]) == 101
+        assert len(curve["mse"]) == 101
+        assert len(curve["support"]) == 101
+        assert curve["thresholds"][0] == 0.0
+        assert curve["thresholds"][-1] == 1.0
+        assert curve["value"] >= 0.0
     assert "raw_voltage_rmse_mv" not in metrics
     assert "clipped_voltage_rmse_mv" not in metrics
     assert "spike_auc" not in metrics
@@ -187,15 +202,15 @@ def test_paired_comparison_identifies_consistent_candidate_improvement() -> None
     rows = {row["id"]: row for row in comparison["comparison"]}
     assert set(rows) == {
         "voltage_sera_mv2",
-        "voltage_sera_mv",
+        "voltage_root_sera_mv",
         "dynamics_sera_mv2_per_ms2",
-        "dynamics_sera_mv_per_ms",
+        "dynamics_root_sera_mv_per_ms",
         "spike_mean_f1_0_5ms",
         "spike_f1_area_0_5ms",
         "spike_f1_exact",
         "spike_f1_5ms",
         "response_sera_mv2",
-        "response_sera_mv",
+        "response_root_sera_mv",
     }
     assert all(
         row["assessment"] == "improved"
@@ -203,7 +218,7 @@ def test_paired_comparison_identifies_consistent_candidate_improvement() -> None
         if identifier != "spike_f1_5ms"
     )
     assert rows["spike_f1_5ms"]["assessment"] == "uncertain"
-    assert rows["voltage_sera_mv"]["delta"] < 0.0
+    assert rows["voltage_root_sera_mv"]["delta"] < 0.0
     assert rows["spike_f1_exact"]["delta"] > 0.0
     rendered = format_model_comparison(comparison)
     assert "PAIRED COMPARISON" in rendered
@@ -246,7 +261,9 @@ def test_paired_comparison_writes_json_and_tidy_csv(tmp_path) -> None:
     json_path = write_model_comparison(comparison, tmp_path / "comparison.json")
     csv_path = write_model_comparison(comparison, tmp_path / "comparison.csv")
 
-    assert json.loads(json_path.read_text(encoding="utf-8"))["bootstrap_replicates"] == 10
+    assert (
+        json.loads(json_path.read_text(encoding="utf-8"))["bootstrap_replicates"] == 10
+    )
     with csv_path.open(newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
     assert len(rows) == 10
@@ -260,7 +277,9 @@ def test_bootstrap_sera_statistics_match_metric_definition() -> None:
     sums, counts = iteration_evaluator._sera_trace_statistics(error, relevance)
     indices = np.arange(error.shape[0])
 
-    from_statistics = iteration_evaluator._root_sera_from_trace_statistics(sums, counts, indices)
+    from_statistics = iteration_evaluator._root_sera_from_trace_statistics(
+        sums, counts, indices
+    )
     direct = root_sera(
         error,
         relevance,
@@ -282,7 +301,9 @@ def test_bootstrap_sera_statistics_match_metric_definition() -> None:
     )
 
 
-def test_invalid_outputs_raise_numerical_and_physiological_attention_without_crashing() -> None:
+def test_invalid_outputs_raise_numerical_and_physiological_attention_without_crashing() -> (
+    None
+):
     prediction, target, inputs, trace_ids = _ordinary_fixture()
     prediction[4, 30, 1] = np.nan
     prediction[5, 31, 1] = (80.0 + 67.7) * 0.1
@@ -348,7 +369,7 @@ def test_model_runner_batches_inference_and_discovers_interventions(tmp_path) ->
     val_root.mkdir(parents=True)
     intervention_root.mkdir(parents=True)
 
-    prediction, target, inputs, trace_ids = _ordinary_fixture()
+    _prediction, target, inputs, trace_ids = _ordinary_fixture()
     inputs = np.zeros((8, 80, 4), dtype=np.float32)
     inputs[..., :2] = target
     np.savez_compressed(
@@ -446,7 +467,9 @@ def test_cached_baseline_comparison_reuses_predictions_and_report(tmp_path) -> N
     assert baseline_calls == calls_after_cache
     assert comparison["baseline"] == loaded.report
     assert comparison["baseline_cache"] == str(cache_path.resolve())
-    voltage = next(row for row in comparison["comparison"] if row["id"] == "voltage_sera_mv")
+    voltage = next(
+        row for row in comparison["comparison"] if row["id"] == "voltage_root_sera_mv"
+    )
     assert voltage["assessment"] == "improved"
 
 
@@ -537,7 +560,9 @@ def test_model_runner_balances_grouped_morphology_shards(tmp_path) -> None:
         [f"specimen_a:trace_{index}" for index in range(6)]
         + [f"specimen_b:trace_{index}" for index in range(6)]
     )
-    np.savez_compressed(val_root / "val.npz", inputs=inputs, targets=targets, sample_ids=sample_ids)
+    np.savez_compressed(
+        val_root / "val.npz", inputs=inputs, targets=targets, sample_ids=sample_ids
+    )
 
     report = evaluate_model(
         lambda batch: batch[..., :2],
@@ -554,7 +579,9 @@ def test_model_runner_balances_grouped_morphology_shards(tmp_path) -> None:
     assert morphology["value"] == 1.0
 
 
-def test_machine_readable_report_writes_json_or_tidy_csv_only_when_called(tmp_path) -> None:
+def test_machine_readable_report_writes_json_or_tidy_csv_only_when_called(
+    tmp_path,
+) -> None:
     prediction, target, inputs, trace_ids = _ordinary_fixture()
     report = evaluate_predictions(
         prediction,
@@ -584,14 +611,21 @@ def test_machine_readable_report_writes_json_or_tidy_csv_only_when_called(tmp_pa
     assert "morphology_mode" in exact
 
 
-def test_intervention_loading_can_overlap_without_concurrent_model_calls(tmp_path, monkeypatch) -> None:
+def test_intervention_loading_can_overlap_without_concurrent_model_calls(
+    tmp_path, monkeypatch
+) -> None:
     dataset_root = tmp_path / "dataset"
     val_root = dataset_root / "val"
     val_root.mkdir(parents=True)
-    prediction, target, inputs, trace_ids = _ordinary_fixture()
+    _prediction, target, inputs, trace_ids = _ordinary_fixture()
     inputs = np.zeros((8, 80, 4), dtype=np.float32)
     inputs[..., :2] = target
-    np.savez_compressed(val_root / "val.npz", inputs=inputs, targets=target, sample_ids=np.asarray(trace_ids))
+    np.savez_compressed(
+        val_root / "val.npz",
+        inputs=inputs,
+        targets=target,
+        sample_ids=np.asarray(trace_ids),
+    )
     for name in ("a", "b"):
         folder = dataset_root / "interventions" / name
         folder.mkdir(parents=True)
@@ -649,7 +683,9 @@ def test_intervention_loading_can_overlap_without_concurrent_model_calls(tmp_pat
 def test_intervention_sample_is_balanced_across_morphology_files(tmp_path) -> None:
     folder = tmp_path / "intervention"
     folder.mkdir()
-    for morphology_index, morphology in enumerate(("specimen_100", "specimen_200"), start=1):
+    for morphology_index, morphology in enumerate(
+        ("specimen_100", "specimen_200"), start=1
+    ):
         inputs = np.full((4, 6, 3), morphology_index, dtype=np.int8)
         targets = np.zeros((4, 6, 2), dtype=np.float32)
         targets[..., 1] = morphology_index
@@ -670,10 +706,14 @@ def test_intervention_sample_is_balanced_across_morphology_files(tmp_path) -> No
     assert pair["baseline_inputs"].shape[0] == 4
     assert np.count_nonzero(pair["baseline_targets"][:, 0, 1] == 1) == 2
     assert np.count_nonzero(pair["baseline_targets"][:, 0, 1] == 2) == 2
-    assert pair["morphology_ids"].tolist() == ["specimen_100"] * 2 + ["specimen_200"] * 2
+    assert (
+        pair["morphology_ids"].tolist() == ["specimen_100"] * 2 + ["specimen_200"] * 2
+    )
 
 
-def test_single_morphology_is_default_for_validation_and_interventions(tmp_path) -> None:
+def test_single_morphology_is_default_for_validation_and_interventions(
+    tmp_path,
+) -> None:
     dataset_root = tmp_path / "dataset"
     val_root = dataset_root / "val"
     intervention_root = dataset_root / "interventions" / "drive"
@@ -686,7 +726,9 @@ def test_single_morphology_is_default_for_validation_and_interventions(tmp_path)
         [f"specimen_100:trace_{index}" for index in range(4)]
         + [f"specimen_200:trace_{index}" for index in range(4)]
     )
-    np.savez_compressed(val_root / "val.npz", inputs=inputs, targets=targets, sample_ids=sample_ids)
+    np.savez_compressed(
+        val_root / "val.npz", inputs=inputs, targets=targets, sample_ids=sample_ids
+    )
     for morphology, value in (("specimen_100", 1.0), ("specimen_200", 2.0)):
         pair_inputs = np.full((4, steps, 4), value, dtype=np.float32)
         np.savez_compressed(
@@ -729,7 +771,9 @@ def test_requested_single_morphology_is_used_consistently(tmp_path) -> None:
         [f"specimen_100:trace_{index}" for index in range(4)]
         + [f"specimen_200:trace_{index}" for index in range(4)]
     )
-    np.savez_compressed(val_root / "val.npz", inputs=inputs, targets=targets, sample_ids=sample_ids)
+    np.savez_compressed(
+        val_root / "val.npz", inputs=inputs, targets=targets, sample_ids=sample_ids
+    )
 
     seen: list[float] = []
 
@@ -752,6 +796,209 @@ def test_requested_single_morphology_is_used_consistently(tmp_path) -> None:
     assert seen == [2.0]
 
 
+def test_validation_sample_start_creates_disjoint_balanced_blocks(
+    tmp_path,
+) -> None:
+    dataset_root = tmp_path / "dataset"
+    val_root = dataset_root / "val"
+    val_root.mkdir(parents=True)
+    traces, steps = 8, 12
+    inputs = np.zeros((traces, steps, 4), dtype=np.float32)
+    targets = np.zeros((traces, steps, 2), dtype=np.float32)
+    sample_ids = np.asarray(
+        [f"specimen_100:trace_{index}" for index in range(4)]
+        + [f"specimen_200:trace_{index}" for index in range(4)]
+    )
+    np.savez_compressed(
+        val_root / "val.npz",
+        inputs=inputs,
+        targets=targets,
+        sample_ids=sample_ids,
+    )
+
+    def model_fn(batch: np.ndarray) -> np.ndarray:
+        return np.zeros((*batch.shape[:2], 2), dtype=np.float32)
+
+    first = create_model_evaluation_cache(
+        model_fn,
+        dataset_root=dataset_root,
+        model_id="first",
+        max_samples=4,
+        max_intervention_samples=1,
+        max_interventions=0,
+        intervention_workers=1,
+        multiple_morphologies=True,
+        validation_sample_start=0,
+        config=EvaluationConfig(ignore_start=0, calibration_fraction=0.25),
+    )
+    second = create_model_evaluation_cache(
+        model_fn,
+        dataset_root=dataset_root,
+        model_id="second",
+        max_samples=4,
+        max_intervention_samples=1,
+        max_interventions=0,
+        intervention_workers=1,
+        multiple_morphologies=True,
+        validation_sample_start=4,
+        config=EvaluationConfig(ignore_start=0, calibration_fraction=0.25),
+    )
+
+    assert set(first.trace_ids).isdisjoint(second.trace_ids)
+    assert set(first.trace_ids) == {
+        "specimen_100:trace_0",
+        "specimen_100:trace_1",
+        "specimen_200:trace_0",
+        "specimen_200:trace_1",
+    }
+    assert set(second.trace_ids) == {
+        "specimen_100:trace_2",
+        "specimen_100:trace_3",
+        "specimen_200:trace_2",
+        "specimen_200:trace_3",
+    }
+    assert first.protocol["validation_sample_start"] == 0
+    assert second.protocol["validation_sample_start"] == 4
+    assert first.report["validation_sample_start"] == 0
+    assert second.report["validation_sample_start"] == 4
+
+
+def test_evaluate_model_applies_validation_sample_start(tmp_path) -> None:
+    dataset_root = tmp_path / "dataset"
+    val_root = dataset_root / "val"
+    val_root.mkdir(parents=True)
+    traces, steps = 8, 12
+    inputs = np.stack(
+        [
+            np.full((steps, 4), index, dtype=np.float32)
+            for index in range(traces)
+        ]
+    )
+    targets = np.zeros((traces, steps, 2), dtype=np.float32)
+    sample_ids = np.asarray(
+        [f"specimen_100:trace_{index}" for index in range(traces)]
+    )
+    np.savez_compressed(
+        val_root / "val.npz",
+        inputs=inputs,
+        targets=targets,
+        sample_ids=sample_ids,
+    )
+    seen: list[float] = []
+
+    def model_fn(batch: np.ndarray) -> np.ndarray:
+        seen.extend(np.unique(batch).tolist())
+        return np.zeros((*batch.shape[:2], 2), dtype=np.float32)
+
+    report = evaluate_model(
+        model_fn,
+        dataset_root=dataset_root,
+        max_samples=2,
+        max_interventions=0,
+        validation_sample_start=4,
+        config=EvaluationConfig(ignore_start=0, calibration_fraction=0.25),
+    )
+
+    assert seen == [4.0, 5.0]
+    assert report["validation_sample_start"] == 4
+
+
+def test_paired_cache_evaluation_reuses_the_same_validation_block(
+    tmp_path,
+) -> None:
+    dataset_root = tmp_path / "dataset"
+    val_root = dataset_root / "val"
+    val_root.mkdir(parents=True)
+    traces, steps = 8, 12
+    inputs = np.zeros((traces, steps, 4), dtype=np.float32)
+    targets = np.zeros((traces, steps, 2), dtype=np.float32)
+    sample_ids = np.asarray(
+        [f"specimen_100:trace_{index}" for index in range(traces)]
+    )
+    np.savez_compressed(
+        val_root / "val.npz",
+        inputs=inputs,
+        targets=targets,
+        sample_ids=sample_ids,
+    )
+
+    def model_fn(batch: np.ndarray) -> np.ndarray:
+        return np.zeros((*batch.shape[:2], 2), dtype=np.float32)
+
+    cache = create_model_evaluation_cache(
+        model_fn,
+        dataset_root=dataset_root,
+        max_samples=2,
+        max_intervention_samples=1,
+        max_interventions=0,
+        validation_sample_start=4,
+        config=EvaluationConfig(ignore_start=0, calibration_fraction=0.25),
+    )
+    comparison = evaluate_model_against_cache(
+        model_fn,
+        baseline_cache=cache,
+        dataset_root=dataset_root,
+        max_samples=2,
+        max_intervention_samples=1,
+        max_interventions=0,
+        validation_sample_start=4,
+        bootstrap_replicates=10,
+        config=EvaluationConfig(ignore_start=0, calibration_fraction=0.25),
+    )
+
+    assert comparison["candidate"]["validation_sample_start"] == 4
+    assert all(
+        row["delta"] == 0.0
+        for row in comparison["comparison"]
+        if row["delta"] is not None
+    )
+
+
+def test_zero_start_accepts_pre_offset_cache_protocol(tmp_path) -> None:
+    dataset_root = tmp_path / "dataset"
+    val_root = dataset_root / "val"
+    val_root.mkdir(parents=True)
+    inputs = np.zeros((4, 12, 4), dtype=np.float32)
+    targets = np.zeros((4, 12, 2), dtype=np.float32)
+    sample_ids = np.asarray(
+        [f"specimen_100:trace_{index}" for index in range(4)]
+    )
+    np.savez_compressed(
+        val_root / "val.npz",
+        inputs=inputs,
+        targets=targets,
+        sample_ids=sample_ids,
+    )
+
+    def model_fn(batch: np.ndarray) -> np.ndarray:
+        return np.zeros((*batch.shape[:2], 2), dtype=np.float32)
+
+    cache = create_model_evaluation_cache(
+        model_fn,
+        dataset_root=dataset_root,
+        max_samples=2,
+        max_intervention_samples=1,
+        max_interventions=0,
+        config=EvaluationConfig(ignore_start=0, calibration_fraction=0.25),
+    )
+    legacy_protocol = dict(cache.protocol)
+    legacy_protocol.pop("validation_sample_start")
+    legacy_cache = replace(cache, protocol=legacy_protocol)
+
+    comparison = evaluate_model_against_cache(
+        model_fn,
+        baseline_cache=legacy_cache,
+        dataset_root=dataset_root,
+        max_samples=2,
+        max_intervention_samples=1,
+        max_interventions=0,
+        bootstrap_replicates=10,
+        config=EvaluationConfig(ignore_start=0, calibration_fraction=0.25),
+    )
+
+    assert comparison["candidate"]["validation_sample_start"] == 0
+
+
 def test_context_aware_model_receives_per_sample_morphology_ids(tmp_path) -> None:
     dataset_root = tmp_path / "dataset"
     val_root = dataset_root / "val"
@@ -759,9 +1006,16 @@ def test_context_aware_model_receives_per_sample_morphology_ids(tmp_path) -> Non
     inputs = np.zeros((4, 8, 3), dtype=np.float32)
     targets = np.zeros((4, 8, 2), dtype=np.float32)
     sample_ids = np.asarray(
-        ["specimen_100:trace_0", "specimen_100:trace_1", "specimen_200:trace_0", "specimen_200:trace_1"]
+        [
+            "specimen_100:trace_0",
+            "specimen_100:trace_1",
+            "specimen_200:trace_0",
+            "specimen_200:trace_1",
+        ]
     )
-    np.savez_compressed(val_root / "val.npz", inputs=inputs, targets=targets, sample_ids=sample_ids)
+    np.savez_compressed(
+        val_root / "val.npz", inputs=inputs, targets=targets, sample_ids=sample_ids
+    )
     seen: list[str] = []
 
     def model_fn(batch, *, morphology_ids=None):

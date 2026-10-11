@@ -36,7 +36,11 @@ TEMPLATE_HOC = Path(os.environ.get("AXOBENCH_SWC_TEMPLATE_HOC", SWC_MECH_ROOT / 
 DEFAULT_PYTHON = Path(".venv/bin/python")
 
 from axobench.benchmark import make_structured_intervention_inputs
-from axobench.benchmark.dataset_schema import INTERVENTION_CONDITIONS, build_v1_dataset_manifest_template, provisional_v1_morphologies
+from axobench.benchmark.dataset_schema import (
+    INTERVENTION_CONDITIONS,
+    build_v1_dataset_manifest_template,
+    v1_morphologies,
+)
 from axobench.generation.generate_hay_neuron_dataset import SOMA_BIAS_MV, SOMA_CLIP_THRESHOLD_MV, SOMA_SCALE, local_peak_spike_labels
 from axobench.generation.run_coreneuron_event_dropout_pair import _build_source_site_route, _summarize_input_routing, simulate_signed_trace_batch
 from axobench.generation.run_coreneuron_hay_probe import load_probe_mechanisms
@@ -181,7 +185,7 @@ def orchestrator_main(args: argparse.Namespace) -> int:
 def selected_morphologies(selected: list[str] | None) -> list[dict[str, str]]:
     wanted = {int(item) for item in selected} if selected else None
     rows = []
-    for morphology in provisional_v1_morphologies():
+    for morphology in v1_morphologies():
         if wanted is not None and morphology.specimen_id not in wanted:
             continue
         rows.append(

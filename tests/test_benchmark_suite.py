@@ -1,10 +1,8 @@
 import numpy as np
 
-from axobench.benchmark.regime_stratified import compute_regime_stratified_metrics
 from axobench.benchmark.morphology_transfer import MorphologyTransferEvaluator
+from axobench.benchmark.regime_stratified import compute_regime_stratified_metrics
 from axobench.benchmark.state_metrics import compute_state_conditioned_metrics
-from axobench.benchmark.suite import BenchmarkSuite
-from axobench.benchmark.trace_shape import compute_trace_shape_metrics
 from axobench.benchmark.structured_intervention import (
     compute_paired_event_intervention_metrics,
     make_event_dropout_inputs,
@@ -13,6 +11,8 @@ from axobench.benchmark.structured_intervention import (
     make_structured_intervention_inputs,
     make_temporal_jitter_inputs,
 )
+from axobench.benchmark.suite import BenchmarkSuite
+from axobench.benchmark.trace_shape import compute_trace_shape_metrics
 
 
 def test_benchmark_suite_reports_mvp_schema_and_masked_m1(tmp_path):
@@ -41,7 +41,16 @@ def test_benchmark_suite_reports_mvp_schema_and_masked_m1(tmp_path):
         run_perturbation=False,
     )
 
-    assert set(["metadata", "m1_trace_fidelity", "m1b_feature_fidelity", "m2_regimes", "state_conditioned_fidelity", "trace_shape_fidelity", "m4_intervention", "limitations"]).issubset(report)
+    assert {
+        "metadata",
+        "m1_trace_fidelity",
+        "m1b_feature_fidelity",
+        "m2_regimes",
+        "state_conditioned_fidelity",
+        "trace_shape_fidelity",
+        "m4_intervention",
+        "limitations",
+    }.issubset(report)
     assert report["metadata"]["model_name"] == "unit-model"
     assert report["metadata"]["model_config"] == {"kind": "toy"}
     assert report["metadata"]["dataset_path"] == "unit-dataset"
@@ -51,23 +60,41 @@ def test_benchmark_suite_reports_mvp_schema_and_masked_m1(tmp_path):
     assert report["m1_trace_fidelity"]["soma_rmse_mv"] == 0.0
     assert report["m1_trace_fidelity"]["voltage_sera_mv2"] == 0.0
     assert report["m1_trace_fidelity"]["dynamics_sera_mv2_per_ms2"] == 0.0
-    assert report["m1_trace_fidelity"]["dynamics_sera_mv_per_ms"] == 0.0
+    assert report["m1_trace_fidelity"]["dynamics_root_sera_mv_per_ms"] == 0.0
+    assert "voltage_root_sera_mv" in report["m1_trace_fidelity"]
+    assert "voltage_sera_mv" not in report["m1_trace_fidelity"]
     assert report["m1_trace_fidelity"]["spike_mean_f1"] == 1.0
     assert "state_weighted_trace_distance_mv" in report["m1_trace_fidelity"]
     assert "dynamic_distance" in report["m1_trace_fidelity"]
     assert "trace_shape_distance" in report["m1_trace_fidelity"]
     assert "state_trace_shape_distance" in report["m1_trace_fidelity"]
     assert "spike_train_distance" in report["m1_trace_fidelity"]
-    assert report["state_conditioned_fidelity"]["kind"] == "state_conditioned_dynamic_fidelity"
+    assert (
+        report["state_conditioned_fidelity"]["kind"]
+        == "state_conditioned_dynamic_fidelity"
+    )
     assert report["trace_shape_fidelity"]["kind"] == "multiscale_trace_shape_fidelity"
     assert report["m1_trace_fidelity"]["spike_target_count"] == 1
     assert report["m1_trace_fidelity"]["spike_brier"] < 0.001
-    assert report["m1_trace_fidelity"]["worst_trace_ids"]["soma_rmse"] == ["trace-a", "trace-b"]
-    assert report["m1_trace_fidelity"]["per_trace_summary"]["rows"][0]["trace_id"] == "trace-a"
-    assert report["m1b_feature_fidelity"]["features"]["spike_count"]["teacher_mean"] == 0.5
-    assert report["m1b_feature_fidelity"]["worst_trace_ids"]["spike_count_abs_error"] == []
+    assert report["m1_trace_fidelity"]["worst_trace_ids"]["soma_rmse"] == [
+        "trace-a",
+        "trace-b",
+    ]
+    assert (
+        report["m1_trace_fidelity"]["per_trace_summary"]["rows"][0]["trace_id"]
+        == "trace-a"
+    )
+    assert (
+        report["m1b_feature_fidelity"]["features"]["spike_count"]["teacher_mean"] == 0.5
+    )
+    assert (
+        report["m1b_feature_fidelity"]["worst_trace_ids"]["spike_count_abs_error"] == []
+    )
     assert report["m4_intervention"]["status"] == "not_run"
-    assert "M4 structured intervention was not run for this report." in report["limitations"]
+    assert (
+        "M4 structured intervention was not run for this report."
+        in report["limitations"]
+    )
     assert (tmp_path / "benchmark_results.json").exists()
 
 
@@ -93,8 +120,15 @@ def test_benchmark_suite_reports_calibrated_spike_threshold():
     assert m1["spike_threshold_zero"]["predicted_count"] == 0
     assert m1["spike_calibrated_threshold"]["predicted_count"] == 1
     assert m1["spike_calibrated_threshold"]["count_mae_per_trace"] == 0.0
-    assert report["m1b_feature_fidelity"]["calibrated_threshold"]["features"]["spike_count"]["prediction_mean"] == 1.0
-    assert report["m2_regimes"]["spike_timing_calibrated_threshold"]["threshold"] == -0.3
+    assert (
+        report["m1b_feature_fidelity"]["calibrated_threshold"]["features"][
+            "spike_count"
+        ]["prediction_mean"]
+        == 1.0
+    )
+    assert (
+        report["m2_regimes"]["spike_timing_calibrated_threshold"]["threshold"] == -0.3
+    )
 
 
 def test_benchmark_voltage_features_and_regime_bins_include_soma_bias():
@@ -144,15 +178,23 @@ def test_regime_metrics_do_not_leak_spike_windows_across_trace_boundaries():
         ignore_start=0,
     )
 
-    near = next(row for row in metrics["spike_proximity"] if row["regime_label"] == "near_spike")
-    far = next(row for row in metrics["spike_proximity"] if row["regime_label"] == "far_from_spike")
+    near = next(
+        row for row in metrics["spike_proximity"] if row["regime_label"] == "near_spike"
+    )
+    far = next(
+        row
+        for row in metrics["spike_proximity"]
+        if row["regime_label"] == "far_from_spike"
+    )
     mvp = {row["regime_label"]: row for row in metrics["mvp_regimes"]}
 
     assert near["count"] == 3
     assert far["count"] == 7
     assert mvp["near_spike"]["count"] == 3
     assert mvp["far_from_spike_subthreshold"]["count"] == 7
-    assert metrics["mvp_regime_representatives"]["near_spike"]["worst_trace_ids"] == ["0"]
+    assert metrics["mvp_regime_representatives"]["near_spike"]["worst_trace_ids"] == [
+        "0"
+    ]
     assert "near_spike" in metrics["what_failure_means"]
     warned = {row["regime_label"] for row in metrics["support_warnings"]}
     assert {"post_spike_refractory", "post_input_event"}.issubset(warned)
@@ -174,15 +216,21 @@ def test_regime_post_event_uses_high_drive_for_many_input_channels():
         soma_bias_mv=0.0,
         post_event_quantile=0.95,
     )
-    post = next(row for row in metrics["post_event"] if row["regime_label"] == "post_event")
-    no_recent = next(row for row in metrics["post_event"] if row["regime_label"] == "no_recent_event")
+    post = next(
+        row for row in metrics["post_event"] if row["regime_label"] == "post_event"
+    )
+    no_recent = next(
+        row for row in metrics["post_event"] if row["regime_label"] == "no_recent_event"
+    )
     mvp = {row["regime_label"]: row for row in metrics["mvp_regimes"]}
 
     assert metrics["post_event_definition"]["event_count_threshold"] > 2
     assert post["count"] == 3
     assert no_recent["count"] == 7
     assert mvp["far_from_spike_subthreshold"]["count"] == 7
-    assert metrics["mvp_regime_representatives"]["post_input_event"]["worst_trace_ids"] == ["0"]
+    assert metrics["mvp_regime_representatives"]["post_input_event"][
+        "worst_trace_ids"
+    ] == ["0"]
     assert "post_input_event" in metrics["what_failure_means"]
 
 
@@ -213,7 +261,9 @@ def test_state_conditioned_metrics_weight_rare_states_separately():
     rows = {row["state"]: row for row in metrics["states"]}
     assert rows["spiking"]["count"] == 1
     assert rows["spiking"]["voltage_rmse_mv"] == 18.0
-    assert metrics["state_weighted_trace_distance_mv"] > np.sqrt(np.mean((predictions[..., 1] - targets[..., 1]) ** 2))
+    assert metrics["state_weighted_trace_distance_mv"] > np.sqrt(
+        np.mean((predictions[..., 1] - targets[..., 1]) ** 2)
+    )
     assert metrics["dynamic_distance"] is not None
 
 
@@ -235,7 +285,10 @@ def test_trace_shape_metric_is_lag_tolerant_for_shifted_events():
         lag_tolerance_steps=1,
     )
 
-    assert metrics["lag_tolerant_voltage"]["symmetric_rmse_mv"] < metrics["pointwise"]["rmse_mv"]
+    assert (
+        metrics["lag_tolerant_voltage"]["symmetric_rmse_mv"]
+        < metrics["pointwise"]["rmse_mv"]
+    )
     assert metrics["spike_triggered_waveform"]["matched_spikes"] == 1
     assert metrics["spike_triggered_waveform"]["waveform_rmse_mv"] == 0.0
     assert metrics["spike_train_distance"]["mean_normalized_van_rossum_distance"] > 0.0
@@ -277,8 +330,12 @@ def test_event_dropout_only_removes_existing_events_deterministically():
     inputs[0, 2, 1] = -1
     inputs[0, 3, 2] = 1
 
-    dropped_a, mask_a = make_event_dropout_inputs(inputs, dropout_probability=0.5, seed=7)
-    dropped_b, mask_b = make_event_dropout_inputs(inputs, dropout_probability=0.5, seed=7)
+    dropped_a, mask_a = make_event_dropout_inputs(
+        inputs, dropout_probability=0.5, seed=7
+    )
+    dropped_b, mask_b = make_event_dropout_inputs(
+        inputs, dropout_probability=0.5, seed=7
+    )
 
     assert np.array_equal(dropped_a, dropped_b)
     assert np.array_equal(mask_a, mask_b)
@@ -308,7 +365,9 @@ def test_structured_intervention_input_transforms_are_targeted():
     assert np.count_nonzero(jittered) <= np.count_nonzero(inputs)
     assert changed.shape == inputs.shape
 
-    silenced, silence_mask = make_site_silence_inputs(inputs, start_fraction=0.0, site_fraction=0.5)
+    silenced, silence_mask = make_site_silence_inputs(
+        inputs, start_fraction=0.0, site_fraction=0.5
+    )
     assert np.count_nonzero(silenced[..., [0, 1, 4, 5]]) == 0
     assert np.count_nonzero(silence_mask) == 4
 
@@ -328,24 +387,13 @@ def test_morphology_transfer_reports_feature_and_route_mismatch(tmp_path):
     train_swc = tmp_path / "train.swc"
     test_swc = tmp_path / "test.swc"
     train_swc.write_text(
-        "\n".join([
-            "1 1 0 0 0 5 -1",
-            "2 3 10 0 0 1 1",
-            "3 3 20 0 0 1 2",
-            "4 4 0 10 0 1 1",
-            "5 4 0 20 0 1 4",
-        ]) + "\n",
+        "1 1 0 0 0 5 -1\n2 3 10 0 0 1 1\n3 3 20 0 0 1 2\n4 4 0 10 0 1 1\n5 4 0 20 0 1 4"
+        + "\n",
         encoding="utf-8",
     )
     test_swc.write_text(
-        "\n".join([
-            "1 1 0 0 0 5 -1",
-            "2 3 30 0 0 1 1",
-            "3 3 60 0 0 1 2",
-            "4 4 0 30 0 1 1",
-            "5 4 0 60 0 1 4",
-            "6 4 0 90 0 1 5",
-        ]) + "\n",
+        "1 1 0 0 0 5 -1\n2 3 30 0 0 1 1\n3 3 60 0 0 1 2\n4 4 0 30 0 1 1\n5 4 0 60 0 1 4\n6 4 0 90 0 1 5"
+        + "\n",
         encoding="utf-8",
     )
 
@@ -394,11 +442,16 @@ def test_paired_event_intervention_scores_teacher_and_model_delta_alignment():
     )
 
     assert report["status"] == "model_compared"
-    assert report["teacher_response"]["baseline_event_fraction"] > report["teacher_response"]["intervention_event_fraction"]
+    assert (
+        report["teacher_response"]["baseline_event_fraction"]
+        > report["teacher_response"]["intervention_event_fraction"]
+    )
     assert report["teacher_response"]["delta_spike_rate_per_1000_steps"] < 0
     assert report["teacher_response"]["n_traces"] == 2
     assert report["teacher_response"]["delta_soma_trace_mean_mv"]["n"] == 2
     assert report["model_response"]["soma_delta_rmse_mv"] == 0.0
+    assert report["model_response"]["response_root_sera_mv"] == 0.0
+    assert "response_sera_mv" not in report["model_response"]
     assert report["model_response"]["spike_count_delta_mae_per_trace"] == 0.0
     assert report["model_response"]["soma_delta_gain"] == 1.0
     assert report["model_response"]["spike_count_delta_gain"] == 1.0
@@ -469,7 +522,10 @@ def test_benchmark_suite_accepts_paired_m4_intervention():
     assert report["m4_intervention"]["status"] == "model_compared"
     assert report["m4_intervention"]["kind"] == "paired_event_intervention"
     assert report["m4_intervention"]["model_response"]["soma_delta_rmse_mv"] == 0.0
-    assert "M4 structured intervention results are limited to the supplied paired traces and should be expanded before robustness claims." in report["limitations"]
+    assert (
+        "M4 structured intervention results are limited to the supplied paired traces and should be expanded before robustness claims."
+        in report["limitations"]
+    )
 
 
 def test_compare_models_uses_publishable_metric_schema():
@@ -533,7 +589,12 @@ def test_compare_models_uses_publishable_metric_schema():
     assert "dynamic_distance" in comparison["state_conditioned_fidelity"]["perfect"]
     assert "trace_shape_distance" in comparison["trace_shape_fidelity"]["perfect"]
     assert "spike_train_distance" in comparison["trace_shape_fidelity"]["perfect"]
-    assert "spiking" in comparison["state_conditioned_fidelity"]["perfect"]["per_state_voltage_rmse_mv"]
+    assert (
+        "spiking"
+        in comparison["state_conditioned_fidelity"]["perfect"][
+            "per_state_voltage_rmse_mv"
+        ]
+    )
     assert comparison["m1b_feature_fidelity"]["perfect"]["spike_count_mae"] == 0.0
     assert comparison["m4_intervention"]["perfect"]["status"] == "model_compared"
     assert comparison["m4_intervention"]["perfect"]["soma_delta_rmse_mv"] == 0.0
