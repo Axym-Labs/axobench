@@ -94,7 +94,7 @@ from axobench.benchmark import write_evaluation_report
 write_evaluation_report(report, "runs/candidate-17.csv")
 ```
 
-The terminal report is bounded to seven core metric rows, two secondary metric
+The terminal report is bounded to seven core metric rows, six secondary metric
 rows, and 24 diagnostic rows. The primary metrics are Voltage SERA,
 subthreshold RMSE, Response SERA, and Mean F1 over the declared integer timing
 tolerances. SERA is the squared error-relevance area of Ribeiro and Moniz
@@ -141,6 +141,58 @@ For iterative comparisons, create and save a baseline with
 each candidate. Paired metric deltas use morphology-stratified 95% bootstrap
 intervals without rerunning the baseline. The corresponding `improved`,
 `regressed`, and `uncertain` labels are evidence, not a model-promotion rule.
+
+### SERA skill and the action-potential ceiling
+
+SERA per spike has no natural scale, so four secondary rows express it as skill
+against a constant voltage, the mean -55 mV-clipped teacher voltage of the
+calibration traces: `voltage_sera_skill` and `dynamics_sera_skill` are
+`1 - SERA / SERA(constant)` with the same relevance and spike count. Almost all
+voltage SERA sits in action-potential windows. A prediction that stays at or
+below -55 mV, as from a model trained on clipped voltage, cannot exceed
+`voltage_sera_ceiling_skill`, the skill of the teacher clipped at -55 mV, and
+models that do not emit action potentials stay near it. The
+ceiling falls as the spike rate rises (0.48 on the AxoBench confirmation block,
+about 0.72 on the NeuronIO test set), so raw skill is not comparable across datasets;
+`voltage_sera_skill_of_ceiling` divides the ceiling out. All four are ratios of
+per-trace sums and are included in the paired bootstrap; the ceiling depends on
+the teacher only, so its delta between two models is zero.
+
+### Error anatomy
+
+`error_anatomy` explains where a prediction's errors come from, on the
+evaluator's scored traces with its spike threshold, predicted events, AP
+windows and relevance:
+
+```python
+from axobench.benchmark.error_anatomy import error_anatomy, reweight_to_rate_distribution
+
+anatomy = error_anatomy(prediction, target, raw_soma_mv=raw, trace_ids=ids, config=config)
+```
+
+It reports teacher spikes hit, missed and false predicted spikes (within 2 ms)
+with the timing errors of matched events; the spike-triggered mean voltage of
+teacher and model around isolated hit, missed and false spikes, which shows
+whether a model emits action potentials or averages them away; subthreshold
+error, null variance and skill by time since the last and until the next
+teacher spike; voltage SERA, subthreshold and spike skill by teacher firing rate
+(0-1, 1-3, 3-6, 6+ Hz) and by morphology; and subthreshold skill by frequency
+band (Parseval on the zero-filled masked traces).
+`reweight_to_rate_distribution(anatomy, reference)` reweights traces to another
+dataset's rate-bin distribution for cross-dataset comparisons. From the command
+line, with a cache written by `create_model_evaluation_cache` (or any NPZ with a
+`prediction` array) and the block's targets (`target`, optional `raw_soma_mv`
+and `trace_ids`):
+
+```bash
+axobench error-anatomy --cache runs/baseline/axobench-evaluation-cache.npz \
+  --targets block-targets.npz --output runs/baseline/anatomy
+```
+
+This writes `error-anatomy.json`, the figure as PDF and PNG, and
+`error-anatomy.tex`, a standalone pgfplots version of the same figure for LaTeX
+documents. The evaluation settings come from the cache's protocol, and the
+targets must match the cache's target hash.
 
 ## Scope
 

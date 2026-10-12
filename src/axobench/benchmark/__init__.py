@@ -144,6 +144,8 @@ _EXPORTS: dict[str, tuple[str, str]] = {
         "default_iteration_sample_limits",
     ),
     "evaluate_predictions": ("axobench.benchmark.iteration_evaluator", "evaluate_predictions"),
+    "error_anatomy": ("axobench.benchmark.error_anatomy", "error_anatomy"),
+    "reweight_to_rate_distribution": ("axobench.benchmark.error_anatomy", "reweight_to_rate_distribution"),
     "format_evaluation_report": ("axobench.benchmark.iteration_evaluator", "format_evaluation_report"),
     "write_evaluation_report": ("axobench.benchmark.iteration_evaluator", "write_evaluation_report"),
 }
