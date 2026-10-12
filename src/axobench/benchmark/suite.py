@@ -568,6 +568,7 @@ def _compute_m1_trace_fidelity(
         pred,
         tgt,
         raw_soma_mv=raw_masked,
+        trace_ids=trace_ids,
         soma_scale=soma_scale,
         soma_bias_mv=soma_bias_mv,
         spike_threshold=calibrated_spike_threshold,

@@ -8,7 +8,11 @@ import numpy as np
 from axobench.relevance import iron_relevance, iron_threshold_weights
 
 AP_PRE_STEPS = 2
-AP_POST_STEPS = 4
+AP_POST_STEPS = 4  # fallback window end
+AP_FLAT_SLOPE_MV_PER_MS = 1.0
+AP_WAVEFORM_PRE_STEPS = 6
+AP_ISOLATION_STEPS = 30
+AP_MIN_ISOLATED_SPIKES = 20
 SOMA_CLIP_MV = -55.0
 
 
@@ -332,19 +336,88 @@ def iron_dynamics_sera(
     }
 
 
-def ap_window_mask(spikes: np.ndarray) -> np.ndarray:
-    """Steps from `AP_PRE_STEPS` before to `AP_POST_STEPS` after each spike (inclusive)."""
+def ap_window_mask(spikes: np.ndarray, post_steps: np.ndarray | None = None) -> np.ndarray:
+    """Steps from `AP_PRE_STEPS` before to `post_steps` after each spike (inclusive).
+
+    `post_steps` holds one window end per trace (default `AP_POST_STEPS`).
+    """
     spk = _as_2d(spikes) > 0.5
+    ends = np.broadcast_to(
+        np.asarray(AP_POST_STEPS if post_steps is None else post_steps, dtype=np.int64),
+        (spk.shape[0],),
+    )
     mask = np.zeros_like(spk)
     steps = spk.shape[1]
-    for offset in range(-AP_PRE_STEPS, AP_POST_STEPS + 1):
+    for offset in range(-AP_PRE_STEPS, int(ends.max(initial=0)) + 1):
         if abs(offset) >= steps:
             continue
+        rows = ends >= offset
         if offset >= 0:
-            mask[:, offset:] |= spk[:, : steps - offset]
+            mask[rows, offset:] |= spk[rows, : steps - offset]
         else:
-            mask[:, :offset] |= spk[:, -offset:]
+            mask[rows, :offset] |= spk[rows, -offset:]
     return mask
+
+
+def ap_window_ends(
+    raw_soma_mv: np.ndarray | None,
+    teacher_spikes: np.ndarray,
+    *,
+    trace_ids: list[str] | None = None,
+    timestep_ms: float = 1.0,
+) -> dict[str, Any]:
+    """Cell-type-specific end of the action-potential window, from the teacher.
+
+    Traces are grouped by cell type, the trace-id prefix before the first
+    ``:`` (traces without ids or without ``:`` form one group). A group's end
+    is the first lag ``L >= 1`` at which its mean isolated teacher spike
+    waveform (lags -6 to +30; no other teacher spike in the following 30
+    steps) is flat, ``|V(L) - V(L - 1)| < AP_FLAT_SLOPE_MV_PER_MS * timestep_ms``. Groups
+    with fewer than `AP_MIN_ISOLATED_SPIKES` isolated spikes, no flat lag, or
+    no raw voltage fall back to `AP_POST_STEPS`. Returns the per-trace
+    ``post_steps``, ``end_steps_by_cell_type``, and ``fallback_cell_types``.
+    """
+    spk = _as_2d(teacher_spikes) > 0.5
+    traces, steps = spk.shape
+    if trace_ids is not None and len(trace_ids) != traces:
+        raise ValueError("trace_ids length must match trace count")
+    cells = np.array(
+        [
+            str(i).split(":", 1)[0] if ":" in str(i) else "all"
+            for i in (trace_ids if trace_ids is not None else ["all"] * traces)
+        ]
+    )
+    lags = np.arange(-AP_WAVEFORM_PRE_STEPS, AP_ISOLATION_STEPS + 1)
+    rows, times = np.nonzero(spk)
+    inside = (times + lags[0] >= 0) & (times + lags[-1] < steps)
+    rows, times = rows[inside], times[inside]
+    count = np.concatenate([np.zeros((traces, 1)), np.cumsum(spk, axis=1)], axis=1)
+    following = count[rows, times + AP_ISOLATION_STEPS + 1] - count[rows, times + 1]
+    rows, times = rows[following == 0], times[following == 0]
+    voltage = None if raw_soma_mv is None else _as_2d(raw_soma_mv)
+    if voltage is not None and voltage.shape != spk.shape:
+        raise ValueError(
+            f"raw_soma_mv must match teacher spike shape, got {voltage.shape} and {spk.shape}"
+        )
+    ends: dict[str, int] = {}
+    fallback: list[str] = []
+    for cell in sorted(set(cells.tolist())):
+        selected = cells[rows] == cell
+        flat = []
+        if voltage is not None and selected.sum() >= AP_MIN_ISOLATED_SPIKES:
+            waveform = voltage[rows[selected, None], times[selected, None] + lags].mean(axis=0)
+            slope = np.abs(np.diff(waveform))
+            flat = lags[1:][(lags[1:] >= 1) & (slope < AP_FLAT_SLOPE_MV_PER_MS * timestep_ms)]
+        if len(flat):
+            ends[cell] = int(flat[0])
+        else:
+            ends[cell] = AP_POST_STEPS
+            fallback.append(cell)
+    return {
+        "post_steps": np.array([ends[cell] for cell in cells], dtype=np.int64),
+        "end_steps_by_cell_type": ends,
+        "fallback_cell_types": fallback,
+    }
 
 
 def subthreshold_voltage_trace_terms(
@@ -353,17 +426,22 @@ def subthreshold_voltage_trace_terms(
     *,
     predicted_spikes: np.ndarray,
     raw_soma_mv: np.ndarray | None = None,
+    trace_ids: list[str] | None = None,
+    ap_post_steps: np.ndarray | None = None,
     soma_scale: float = 0.1,
     soma_bias_mv: float = -67.7,
     ignore_start: int = 0,
+    timestep_ms: float = 1.0,
 ) -> dict[str, np.ndarray]:
     """Per-trace terms of the subthreshold voltage error.
 
     `prediction` and `target` cover the whole trace; `predicted_spikes` are the
     predicted spike events of the scored steps (``>= ignore_start``). Scored
     steps inside the action-potential window (:func:`ap_window_mask`) of a
-    teacher or a predicted spike are excluded. Both voltages are clipped from
-    above at `SOMA_CLIP_MV`. For each trace the result holds the summed squared
+    teacher or a predicted spike are excluded; the per-trace window ends
+    `ap_post_steps` default to :func:`ap_window_ends` of the scored teacher
+    steps of these traces. Both voltages are clipped from above at
+    `SOMA_CLIP_MV`. For each trace the result holds the summed squared
     error, the same sum for the null prediction (the trace's mean clipped
     teacher voltage over its retained steps), and the retained step count.
     """
@@ -378,7 +456,16 @@ def subthreshold_voltage_trace_terms(
             "predicted_spikes must cover the scored steps, got "
             f"{predicted.shape} for {(pred.shape[0], pred.shape[1] - ignore_start)}"
         )
-    excluded = ap_window_mask(tgt[..., 0])[:, ignore_start:] | ap_window_mask(predicted)
+    if ap_post_steps is None:
+        ap_post_steps = ap_window_ends(
+            None if raw is None else raw[:, ignore_start:],
+            tgt[:, ignore_start:, 0],
+            trace_ids=trace_ids,
+            timestep_ms=timestep_ms,
+        )["post_steps"]
+    excluded = ap_window_mask(tgt[..., 0], ap_post_steps)[:, ignore_start:] | ap_window_mask(
+        predicted, ap_post_steps
+    )
     keep = ~excluded
     pred_mv = pred[:, ignore_start:, 1] / soma_scale + soma_bias_mv
     target_mv = (
@@ -405,18 +492,24 @@ def subthreshold_voltage_error(
     *,
     predicted_spikes: np.ndarray,
     raw_soma_mv: np.ndarray | None = None,
+    trace_ids: list[str] | None = None,
+    ap_post_steps: np.ndarray | None = None,
     soma_scale: float = 0.1,
     soma_bias_mv: float = -67.7,
     ignore_start: int = 0,
+    timestep_ms: float = 1.0,
 ) -> dict[str, Any]:
     """RMSE of the somatic voltage outside action-potential windows.
 
     Voltage SERA is dominated by spike-timing errors near action potentials,
     and spike F1 scores only event times. This metric covers what both miss:
     voltage offset, gain, and post-spike (afterhyperpolarization or
-    afterdepolarization) errors. Steps within 2 steps before to 4 steps after
-    any teacher or predicted spike are excluded, so spike-timing errors are
-    not counted twice, and both voltages are clipped at `SOMA_CLIP_MV`. The
+    afterdepolarization) errors. Steps from 2 steps before to the cell type's
+    window end after any teacher or predicted spike are excluded, so
+    spike-timing errors are not counted twice; the end is where the teacher's
+    mean isolated spike waveform flattens (:func:`ap_window_ends`), because
+    the repolarization and fast afterhyperpolarization last longer in some
+    cells than in others. Both voltages are clipped at `SOMA_CLIP_MV`. The
     RMSE pools squared errors over the retained steps of all traces; skill is
     ``1 - RMSE / RMSE(null)`` for the per-trace mean clipped teacher voltage
     on the same steps. See :func:`subthreshold_voltage_trace_terms`.
@@ -426,9 +519,12 @@ def subthreshold_voltage_error(
         target,
         predicted_spikes=predicted_spikes,
         raw_soma_mv=raw_soma_mv,
+        trace_ids=trace_ids,
+        ap_post_steps=ap_post_steps,
         soma_scale=soma_scale,
         soma_bias_mv=soma_bias_mv,
         ignore_start=ignore_start,
+        timestep_ms=timestep_ms,
     )
     error = float(np.sum(terms["squared_error"]))
     null_error = float(np.sum(terms["null_squared_error"]))
@@ -555,6 +651,7 @@ def compute_core_metric_set(
     target: np.ndarray,
     *,
     raw_soma_mv: np.ndarray | None = None,
+    trace_ids: list[str] | None = None,
     soma_scale: float = 0.1,
     soma_bias_mv: float = -67.7,
     ignore_start: int = 0,
@@ -620,9 +717,11 @@ def compute_core_metric_set(
             pred[..., 0], float(spike_threshold), refractory_steps=spike_refractory_steps
         ),
         raw_soma_mv=raw_soma_mv,
+        trace_ids=trace_ids,
         soma_scale=soma_scale,
         soma_bias_mv=soma_bias_mv,
         ignore_start=ignore_start,
+        timestep_ms=timestep_ms,
     )
     result = {
         "voltage": voltage,

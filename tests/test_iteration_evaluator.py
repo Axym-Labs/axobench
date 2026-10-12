@@ -10,7 +10,7 @@ import numpy as np
 
 from axobench import benchmark
 from axobench.benchmark import iteration_evaluator
-from axobench.metrics import spike_f1_curve
+from axobench.metrics import spike_f1_curve, subthreshold_voltage_trace_terms
 from axobench.benchmark.iteration_evaluator import (
     DEFAULT_BATCH_SIZE,
     DEFAULT_INTERVENTION_SAMPLES,
@@ -236,6 +236,55 @@ def test_paired_comparison_identifies_consistent_candidate_improvement() -> None
     assert "95% CI" in rendered
 
 
+def test_paired_bootstrap_uses_one_teacher_ap_window_for_both_models(monkeypatch) -> None:
+    traces, steps = 8, 300
+    raw = np.full((traces, steps), -70.0)
+    target = np.zeros((traces, steps, 2))
+    recovery = {0: [-80.0, -77.0, -75.0, -73.4, -72.2, -71.1, -70.5, -70.2], 1: [-75.0, -71.5, -71.0]}
+    for trace in range(traces):
+        for t in 10 + 40 * np.arange(6):
+            target[trace, t, 0] = 1.0
+            raw[trace, t] = 20.0
+            raw[trace, t + 1 : t + 1 + len(recovery[trace % 2])] = recovery[trace % 2]
+    target[..., 1] = (raw + 67.7) * 0.1
+    trace_ids = [f"cell{trace % 2}:val:{trace}" for trace in range(traces)]
+    baseline = target.copy()
+    baseline[..., 0] = np.roll(target[..., 0], 3, axis=1)
+    baseline[..., 1] += 0.2
+    calls = []
+
+    def recording_terms(*args, **kwargs):
+        calls.append(np.asarray(kwargs["ap_post_steps"]).copy())
+        return subthreshold_voltage_trace_terms(*args, **kwargs)
+
+    monkeypatch.setattr(iteration_evaluator, "subthreshold_voltage_trace_terms", recording_terms)
+    config = EvaluationConfig(ignore_start=0, calibration_fraction=0.25)
+    stale = evaluate_predictions(
+        baseline, target, raw_soma_mv=raw, trace_ids=trace_ids, config=config, model_id="baseline"
+    )
+    stale.pop("subthreshold_ap_window")  # report cached before per-cell windows
+    comparison = compare_predictions(
+        target,
+        baseline,
+        target,
+        raw_soma_mv=raw,
+        trace_ids=trace_ids,
+        config=config,
+        baseline_report=stale,
+        bootstrap_replicates=5,
+    )
+
+    # 2 calibration traces are used too: the 6 scored traces alone have only
+    # 18 isolated spikes per cell type, below the 20-spike minimum.
+    expected = {"pre_steps": 2, "end_steps_by_cell_type": {"cell0": 7, "cell1": 3}, "fallback_cell_types": []}
+    assert comparison["candidate"]["subthreshold_ap_window"] == expected
+    assert comparison["baseline"]["subthreshold_ap_window"] == expected
+    assert len(calls) == 2
+    np.testing.assert_array_equal(calls[0], calls[1])
+    assert calls[0].tolist() == [7, 3, 7, 3, 7, 3]
+    assert "cell0=+7, cell1=+3" in format_evaluation_report(comparison["candidate"])
+
+
 def test_paired_comparison_marks_identical_models_uncertain() -> None:
     prediction, target, inputs, trace_ids = _ordinary_fixture()
 
@@ -371,7 +420,7 @@ def test_report_format_is_deterministic_and_bounded() -> None:
     assert "dynamics_sera_iron_per_spike_mv2_per_ms2" in secondary
     assert "subthreshold_skill" in secondary
     assert "YES = early watch" in rendered
-    assert len(rendered.splitlines()) <= 48
+    assert len(rendered.splitlines()) <= 49
     assert rendered == format_evaluation_report(report)
 
 

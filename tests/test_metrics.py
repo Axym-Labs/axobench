@@ -3,6 +3,9 @@ import pytest
 
 from axobench.relevance import iron_relevance, iron_threshold_weights
 from axobench.metrics import (
+    AP_POST_STEPS,
+    ap_window_ends,
+    ap_window_mask,
     binary_auc,
     compute_core_metric_set,
     iron_dynamics_sera,
@@ -383,3 +386,90 @@ def test_subthreshold_error_clips_both_voltages_at_minus_55_mv():
     assert terms["squared_error"][1] == pytest.approx(
         (-55.0 - raw[1, 10]) ** 2 + 16.0
     )
+
+
+SLOW_RECOVERY_MV = [-80.0, -77.0, -75.0, -73.4, -72.2, -71.1, -70.5, -70.2]  # flat from +7
+FAST_RECOVERY_MV = [-75.0, -71.5, -71.0]  # flat from +3
+
+
+def _isolated_spike_teacher(recovery_mv, *, traces=2, spikes_per_trace=12, steps=600):
+    """Flat -70 mV teacher; each spike (+20 mV) is followed by `recovery_mv` at lags 1, 2, ..."""
+    raw = np.full((traces, steps), -70.0)
+    spikes = np.zeros((traces, steps))
+    for t in 10 + 40 * np.arange(spikes_per_trace):
+        spikes[:, t] = 1.0
+        raw[:, t] = 20.0
+        raw[:, t + 1 : t + 1 + len(recovery_mv)] = recovery_mv
+    return raw, spikes
+
+
+def test_ap_window_mask_accepts_per_trace_window_ends():
+    spikes = np.zeros((2, 12))
+    spikes[:, 5] = 1.0
+    mask = ap_window_mask(spikes, np.array([1, 3]))
+    assert np.flatnonzero(mask[0]).tolist() == [3, 4, 5, 6]
+    assert np.flatnonzero(mask[1]).tolist() == [3, 4, 5, 6, 7, 8]
+    np.testing.assert_array_equal(
+        ap_window_mask(spikes), ap_window_mask(spikes, np.full(2, AP_POST_STEPS))
+    )
+
+
+def test_ap_window_end_is_first_flat_lag_of_mean_isolated_waveform():
+    raw, spikes = _isolated_spike_teacher(SLOW_RECOVERY_MV)
+    windows = ap_window_ends(raw, spikes)
+    assert windows["end_steps_by_cell_type"] == {"all": 7}
+    assert windows["fallback_cell_types"] == []
+    assert windows["post_steps"].tolist() == [7, 7]
+    # The flatness threshold is 1 mV/ms times the time step.
+    assert ap_window_ends(raw, spikes, timestep_ms=2.0)["end_steps_by_cell_type"] == {"all": 4}
+
+
+def test_ap_window_ends_group_traces_by_trace_id_prefix():
+    slow_raw, slow_spikes = _isolated_spike_teacher(SLOW_RECOVERY_MV)
+    fast_raw, fast_spikes = _isolated_spike_teacher(FAST_RECOVERY_MV)
+    raw = np.concatenate([slow_raw, fast_raw])[[0, 2, 1, 3]]
+    spikes = np.concatenate([slow_spikes, fast_spikes])[[0, 2, 1, 3]]
+    ids = ["cellA:val:0", "cellB:val:1", "cellA:val:2", "cellB:val:3"]
+    windows = ap_window_ends(raw, spikes, trace_ids=ids)
+    assert windows["end_steps_by_cell_type"] == {"cellA": 7, "cellB": 3}
+    assert windows["post_steps"].tolist() == [7, 3, 7, 3]
+    pooled = ap_window_ends(raw, spikes, trace_ids=["0", "1", "2", "3"])
+    assert list(pooled["end_steps_by_cell_type"]) == ["all"]
+
+
+def test_ap_window_ends_fall_back_without_enough_isolated_spikes_or_voltage():
+    slow_raw, slow_spikes = _isolated_spike_teacher(SLOW_RECOVERY_MV)
+    few_raw, few_spikes = _isolated_spike_teacher(SLOW_RECOVERY_MV, spikes_per_trace=9)
+    windows = ap_window_ends(
+        np.concatenate([slow_raw, few_raw]),
+        np.concatenate([slow_spikes, few_spikes]),
+        trace_ids=["a:0", "a:1", "b:0", "b:1"],  # b has 18 isolated spikes
+    )
+    assert windows["end_steps_by_cell_type"] == {"a": 7, "b": AP_POST_STEPS}
+    assert windows["fallback_cell_types"] == ["b"]
+    no_voltage = ap_window_ends(None, slow_spikes)
+    assert no_voltage["end_steps_by_cell_type"] == {"all": AP_POST_STEPS}
+    assert no_voltage["fallback_cell_types"] == ["all"]
+
+
+def test_subthreshold_error_uses_the_teacher_window_end():
+    raw, spikes = _isolated_spike_teacher(SLOW_RECOVERY_MV)
+    target = np.zeros(raw.shape + (2,))
+    target[..., 0] = spikes
+    target[..., 1] = (raw + 67.7) * 0.1
+    voltage = raw.copy()
+    voltage[0, 10 + 6] += 3.0  # inside the +7 window, outside the fixed +4 window
+    prediction = _with_voltage(target, voltage)
+    result = subthreshold_voltage_error(
+        prediction, target, predicted_spikes=spikes, raw_soma_mv=raw
+    )
+    assert result["subthreshold_rmse_mv"] == pytest.approx(0.0, abs=1e-12)
+    assert result["retained_points"] == 2 * (600 - 12 * 10)
+    fixed = subthreshold_voltage_trace_terms(
+        prediction,
+        target,
+        predicted_spikes=spikes,
+        raw_soma_mv=raw,
+        ap_post_steps=np.full(2, AP_POST_STEPS),
+    )
+    assert fixed["squared_error"][0] == pytest.approx(9.0)

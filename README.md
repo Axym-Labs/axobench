@@ -112,11 +112,17 @@ teacher voltage change (intervention minus baseline) for Response SERA
 teacher voltage change and whose spike count covers baseline and intervention
 traces. Response skill compares Response SERA with a zero-response control.
 Subthreshold RMSE (`subthreshold_rmse_mv`) is the soma voltage RMSE pooled
-over scored steps outside the action-potential windows (2 steps before to 4
-steps after) of every teacher and every predicted spike, with both voltages
-clipped at -55 mV. It measures voltage offset, gain, and post-spike errors that
-Voltage SERA, dominated by spike timing near action potentials, and spike F1
-miss; excluding predicted-spike windows avoids counting spike-timing errors
+over scored steps outside the action-potential windows of every teacher and
+every predicted spike, with both voltages clipped at -55 mV. A window runs from
+2 steps before the spike to a cell-type-specific end: the first lag at which the
+teacher's mean isolated spike waveform for that morphology (trace-id prefix)
+changes by less than 1 mV/ms, computed once from all teacher traces of the
+evaluated block (fixed +4 steps when fewer than 20 isolated spikes or no raw
+voltage are available). Repolarization and the fast afterhyperpolarization last
+until 4 to 9 ms after the spike depending on the cell, so a fixed end would
+score part of the spike waveform as subthreshold; the report lists the ends.
+The metric measures voltage offset, gain, and post-spike errors that Voltage
+SERA, dominated by spike timing near action potentials, and spike F1 miss; excluding predicted-spike windows avoids counting spike-timing errors
 twice. Its companion `subthreshold_skill` is `1 - RMSE / RMSE(null)` for the
 per-trace mean clipped teacher voltage on the same steps. Subthreshold skill
 and Dynamics SERA are secondary rows.

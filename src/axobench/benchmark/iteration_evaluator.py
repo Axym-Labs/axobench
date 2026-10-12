@@ -13,7 +13,8 @@ SERA), or the paired intervention-minus-baseline voltage change (Response
 SERA, pooled over interventions as summed area per summed spike count).
 
 The core metrics are Voltage SERA, subthreshold voltage RMSE (outside the
-action-potential windows of teacher and predicted spikes), spike F1, and
+cell-type-specific action-potential windows of teacher and predicted spikes,
+fixed by the teacher of the whole evaluated block), spike F1, and
 Response SERA. Subthreshold skill and Dynamics SERA are secondary rows.
 """
 
@@ -34,6 +35,9 @@ import numpy as np
 
 from axobench.data import ShardedNeuronIODataset
 from axobench.metrics import (
+    AP_POST_STEPS,
+    AP_PRE_STEPS,
+    ap_window_ends,
     iron_dynamics_sera,
     iron_voltage_sera,
     prevalence_matched_threshold,
@@ -684,6 +688,7 @@ def evaluate_predictions(
         soma_bias_mv=cfg.soma_bias_mv,
         timestep_ms=cfg.timestep_ms,
     )
+    ap_windows = _subthreshold_ap_windows(tgt, raw_soma_mv, ids, cfg)
     subthreshold = subthreshold_voltage_error(
         pred[score_slice],
         tgt[score_slice],
@@ -691,6 +696,7 @@ def evaluate_predictions(
         raw_soma_mv=_slice_optional_2d(
             raw_soma_mv, score_slice, 0, pred.shape[:2], "raw_soma_mv"
         ),
+        ap_post_steps=ap_windows["post_steps"][score_slice],
         soma_scale=cfg.soma_scale,
         soma_bias_mv=cfg.soma_bias_mv,
         ignore_start=cfg.ignore_start,
@@ -783,6 +789,11 @@ def evaluate_predictions(
         "scored_samples": int(pred_score.shape[0]),
         "spike_threshold": float(threshold),
         "spike_f1_curve": f1["rows"],
+        "subthreshold_ap_window": {
+            "pre_steps": AP_PRE_STEPS,
+            "end_steps_by_cell_type": ap_windows["end_steps_by_cell_type"],
+            "fallback_cell_types": ap_windows["fallback_cell_types"],
+        },
         "metrics": metrics,
         "diagnostics": diagnostics,
         "interventions": intervention_reports,
@@ -832,10 +843,14 @@ def compare_predictions(
     )
     if baseline_report is not None and baseline_report.get("model_id") != baseline_id:
         raise ValueError("cached baseline report model_id does not match baseline_id")
-    if baseline_report is None or {
-        row["id"] for row in baseline_report["metrics"]
-    } != {row["id"] for row in candidate_report["metrics"]}:
-        # A missing or stale cached report (older metric set) is recomputed.
+    if (
+        baseline_report is None
+        or {row["id"] for row in baseline_report["metrics"]}
+        != {row["id"] for row in candidate_report["metrics"]}
+        or baseline_report.get("subthreshold_ap_window")
+        != candidate_report["subthreshold_ap_window"]
+    ):
+        # A missing or stale cached report (older metric set or AP windows) is recomputed.
         baseline_report = evaluate_predictions(
             baseline,
             tgt,
@@ -1200,6 +1215,8 @@ def format_evaluation_report(report: dict[str, Any]) -> str:
         lines.extend(
             _ascii_table(["metric", "value", "role"], metric_rows, widths=(40, 24, 35))
         )
+        if core and report.get("subthreshold_ap_window"):
+            lines.append(_format_ap_window(report["subthreshold_ap_window"]))
     lines.extend(
         [
             "",
@@ -1230,6 +1247,17 @@ def format_evaluation_report(report: dict[str, Any]) -> str:
         f"Attention summary: {yes} YES, {24 - yes - na} NO, {na} NA (24 fixed rows)."
     )
     return "\n".join(lines)
+
+
+def _format_ap_window(window: dict[str, Any]) -> str:
+    ends = ", ".join(
+        f"{cell}=+{end}" for cell, end in window["end_steps_by_cell_type"].items()
+    )
+    fallback = ", ".join(window["fallback_cell_types"]) or "none"
+    return (
+        f"subthreshold AP window [-{window['pre_steps']}, +end] steps, end by cell type: "
+        f"{ends}; fallback to +{AP_POST_STEPS}: {fallback}"
+    )
 
 
 def write_evaluation_report(report: dict[str, Any], path: str | Path) -> Path:
@@ -1434,6 +1462,10 @@ def _paired_metric_bootstrap(
         candidate.shape[:2],
         "raw_soma_mv",
     )
+    # One teacher-derived window for both models.
+    ap_post_steps = _subthreshold_ap_windows(target, raw_soma_mv, trace_ids, config)[
+        "post_steps"
+    ][calibration_count:]
     subthreshold_terms = [
         subthreshold_voltage_trace_terms(
             prediction[calibration_count:],
@@ -1442,6 +1474,7 @@ def _paired_metric_bootstrap(
                 np.where(np.isfinite(scores), scores, -np.inf), threshold
             ),
             raw_soma_mv=raw_full,
+            ap_post_steps=ap_post_steps,
             soma_scale=config.soma_scale,
             soma_bias_mv=config.soma_bias_mv,
             ignore_start=config.ignore_start,
@@ -1531,6 +1564,24 @@ def _paired_metric_bootstrap(
             _bootstrap_response_delta(response_stats, rng)
         )
     return values
+
+
+def _subthreshold_ap_windows(
+    target: np.ndarray,
+    raw_soma_mv: np.ndarray | None,
+    trace_ids: list[str],
+    config: EvaluationConfig,
+) -> dict[str, Any]:
+    # From the teacher of every trace in the block, calibration traces included,
+    # so the window is identical for every model scored on the block.
+    return ap_window_ends(
+        _slice_optional_2d(
+            raw_soma_mv, slice(None), config.ignore_start, target.shape[:2], "raw_soma_mv"
+        ),
+        target[:, config.ignore_start :, 0],
+        trace_ids=trace_ids,
+        timestep_ms=config.timestep_ms,
+    )
 
 
 def _f1_trace_statistics(
