@@ -198,3 +198,56 @@ def test_dose_change_invalidates_existing_pair_shards():
     gen_meta = {k: task[k] for k in ("synapse_delay_ms", "input_routing", "nseg_policy", "soma_samples_per_ms")}
     assert gen._generator_matches({"generator": gen_meta, "intervention_dose": 0.7}, task)
     assert not gen._generator_matches({"generator": gen_meta, "intervention_dose": 0.35}, task)
+
+
+def _layout_args(root, *extra):
+    return gen.apply_data_version(gen.build_parser().parse_args(
+        ["--data-version", "v2", "--allen-all-active-root", str(root), "--samples-per-shard", "2",
+         "--val-samples-per-morphology", "2", "--test-samples-per-morphology", "2",
+         "--intervention-samples-per-morphology", "2", "--intervention", "inh_dropout",
+         "--heldout-morphology", "222", *extra]))
+
+
+def _layout(tmp_path, *extra):
+    root = tmp_path / "allen"
+    if not (root / "models.json").exists():
+        _allen_root(root, specimens=(111, 222, 333))
+    args = _layout_args(root, *extra)
+    morphologies = gen.selected_morphologies(None, include_hay_cell=True, excitatory_teacher="allen_all_active",
+                                             allen_root=root)
+    tasks = gen.build_tasks(args, tmp_path / "out", morphologies, ("inh_dropout",))
+    return args, {t["output"]: t for t in tasks}
+
+
+def test_extension_keeps_every_shard_and_seed_of_the_base_layout(tmp_path):
+    _, base = _layout(tmp_path, "--train-samples-per-morphology", "4")
+    _, larger = _layout(tmp_path, "--train-samples-per-morphology", "10", "--layout-train-samples-per-morphology", "4")
+    for output, task in base.items():
+        assert larger[output]["seed"] == task["seed"] and larger[output]["shard_index"] == task["shard_index"]
+    extension = [t for t in larger.values() if t["extension"]]
+    # 3 extension shards (6 traces) for each of the three training cells; held-out 222 gets none
+    assert len(extension) == 9 and {t["split"] for t in extension} == {"train"}
+    assert "specimen_222" not in {t["morphology_id"] for t in extension}
+    indices = sorted(t["shard_index"] for t in extension)
+    assert indices[0] >= gen.EXTENSION_BASE and len(set(indices)) == len(indices)
+    assert not {t["seed"] for t in extension} & {t["seed"] for t in base.values()}
+
+
+def test_without_a_layout_option_the_layout_is_unchanged(tmp_path):
+    _, explicit = _layout(tmp_path, "--train-samples-per-morphology", "4", "--layout-train-samples-per-morphology", "4")
+    _, default = _layout(tmp_path, "--train-samples-per-morphology", "4")
+    assert {o: t["seed"] for o, t in explicit.items()} == {o: t["seed"] for o, t in default.items()}
+
+
+def test_generate_morphology_selects_tasks_without_renumbering(tmp_path):
+    args, full = _layout(tmp_path, "--train-samples-per-morphology", "10", "--layout-train-samples-per-morphology", "4",
+                         "--generate-morphology", "333", "--generate-morphology", gen.HAY_CELL_ID, "--extension-only")
+    chosen = gen.select_tasks(list(full.values()), args.generate_morphology, args.extension_only)
+    assert {t["morphology_id"] for t in chosen} == {"specimen_333", gen.HAY_CELL_ID}
+    assert all(t["extension"] and t["split"] == "train" for t in chosen) and len(chosen) == 6
+    assert all(full[t["output"]]["seed"] == t["seed"] for t in chosen)
+
+
+def test_layout_base_must_divide_into_shards(tmp_path):
+    with pytest.raises(ValueError):
+        _layout(tmp_path, "--train-samples-per-morphology", "10", "--layout-train-samples-per-morphology", "3")

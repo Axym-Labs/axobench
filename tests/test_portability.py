@@ -1,4 +1,15 @@
 from pathlib import Path
+import subprocess
+
+
+def _repository_files(root: Path) -> list[Path]:
+    """Tracked and unignored files: what the public repository contains, not local generation artifacts."""
+    try:
+        listed = subprocess.run(["git", "ls-files", "--cached", "--others", "--exclude-standard"], cwd=root,
+                                capture_output=True, text=True, check=True).stdout.splitlines()
+    except (OSError, subprocess.CalledProcessError):
+        return [path for path in root.rglob("*") if ".git" not in path.parts]
+    return [root / name for name in listed]
 
 
 def test_public_repository_contains_no_machine_specific_home_paths():
@@ -17,9 +28,8 @@ def test_public_repository_contains_no_machine_specific_home_paths():
     }
     offenders = [
         str(path.relative_to(repository_root))
-        for path in repository_root.rglob("*")
+        for path in _repository_files(repository_root)
         if path.is_file()
-        and ".git" not in path.parts
         and not any(part.startswith(".venv") for part in path.parts)
         and path.suffix.lower() in suffixes
         and any(

@@ -97,6 +97,10 @@ DATA_VERSIONS: dict[str, dict[str, Any]] = {
                                  "temporal_jitter=1,2,8", "site_silence=0.1,0.25,0.5"]},
 }
 HAY_CELL_ID = "neuronio_hay_cell1"
+# Extension train shards (beyond --layout-train-samples-per-morphology) take indices
+# EXTENSION_BASE + rank * EXTENSION_STRIDE + k, above every layout index of the v2 variants.
+EXTENSION_BASE = 20_000
+EXTENSION_STRIDE = 5_000
 # Intervention strength: the parameter each condition's dose sets, and its v1 default.
 DOSE_PARAMETER = {"event_dropout": "dropout_probability", "exc_dropout": "dropout_probability",
                   "inh_dropout": "dropout_probability", "temporal_jitter": "jitter_steps", "site_silence": "site_fraction"}
@@ -168,6 +172,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--exc-gmax-scale", type=float)
     parser.add_argument("--inh-gmax-scale", type=float, default=1.0)
     parser.add_argument("--train-samples-per-morphology", type=int, default=0)
+    parser.add_argument("--layout-train-samples-per-morphology", type=int,
+                        help="Train traces per morphology that define the shard layout (default: all of them). "
+                             "Traces beyond it get shard indices from a separate extension range, so a larger "
+                             "variant keeps every shard, index and seed of the smaller one it extends.")
+    parser.add_argument("--generate-morphology", action="append", default=[],
+                        help="Specimen id (or the Hay cell id) to generate; repeatable. Unlike --morphology it "
+                             "does not change the layout, so machines that split the morphologies write the "
+                             "shards a single run would write.")
+    parser.add_argument("--extension-only", action="store_true",
+                        help="Generate only the train shards beyond --layout-train-samples-per-morphology.")
     parser.add_argument("--val-samples-per-morphology", type=int, default=1)
     parser.add_argument("--test-samples-per-morphology", type=int, default=0)
     parser.add_argument("--private-test-samples-per-morphology", type=int, default=0)
@@ -218,10 +232,14 @@ def orchestrator_main(args: argparse.Namespace) -> int:
     unknown = set(args.heldout_morphology) - {m["id"].replace("specimen_", "") for m in morphologies} - {HAY_CELL_ID}
     if unknown:
         raise ValueError(f"held-out morphologies not among the selected ones: {sorted(unknown)}")
+    unknown = set(args.generate_morphology) - {m["id"].replace("specimen_", "") for m in morphologies} - {HAY_CELL_ID}
+    if unknown:
+        raise ValueError(f"--generate-morphology ids not among the selected ones: {sorted(unknown)}")
     interventions = tuple(args.intervention or INTERVENTION_CONDITIONS)
     variants = intervention_variants(args, interventions)
     intervention_counts = intervention_counts_per_morphology(args, interventions)
-    tasks = build_tasks(args, output_root, morphologies, interventions)
+    tasks = select_tasks(build_tasks(args, output_root, morphologies, interventions),
+                         args.generate_morphology, args.extension_only)
     total_tasks = len(tasks)
     total_samples = sum(task["samples"] for task in tasks)
     skipped_tasks = 0
@@ -244,6 +262,9 @@ def orchestrator_main(args: argparse.Namespace) -> int:
     summary = {
         "kind": "v1_parallel_generation",
         "output_root": str(output_root),
+        "layout_train_samples_per_morphology": args.layout_train_samples_per_morphology,
+        "generate_morphology": sorted(args.generate_morphology),
+        "extension_only": bool(args.extension_only),
         "backend": args.backend,
         "coreneuron_gpu": bool(args.coreneuron_gpu),
         "duration_ms": int(args.duration_ms),
@@ -409,29 +430,46 @@ def build_tasks(
     }
     intervention_counts = intervention_counts_per_morphology(args, interventions)
     gains = exc_gains(args, morphologies)
+    layout_train = getattr(args, "layout_train_samples_per_morphology", None)
+    if layout_train is None:
+        layout_train = args.train_samples_per_morphology
+    if layout_train > args.train_samples_per_morphology or (
+        layout_train < args.train_samples_per_morphology and layout_train % args.samples_per_shard
+    ):
+        raise ValueError("--layout-train-samples-per-morphology must be a multiple of --samples-per-shard "
+                         "and at most --train-samples-per-morphology")
+    extension_shards = -(-(args.train_samples_per_morphology - layout_train) // args.samples_per_shard)
+    if extension_shards > EXTENSION_STRIDE:
+        raise ValueError(f"at most {EXTENSION_STRIDE * args.samples_per_shard} extension train traces per morphology")
     tasks = []
     shard_index = 0
     heldout = {f"specimen_{item}" if item != HAY_CELL_ID else item for item in getattr(args, "heldout_morphology", [])}
-    for morphology in morphologies:
+    for rank, morphology in enumerate(morphologies):
         for split, samples in split_counts.items():
             if samples <= 0 or (morphology["id"] in heldout and split in ("train", "val")):
                 continue
+            layout_samples = layout_train if split == "train" else samples
             for offset in range(0, samples, args.samples_per_shard):
                 shard_samples = min(args.samples_per_shard, samples - offset)
+                if offset < layout_samples:
+                    index = shard_index
+                    shard_index += 1
+                else:  # extension train shard: index from a range disjoint from the layout's
+                    index = EXTENSION_BASE + rank * EXTENSION_STRIDE + (offset - layout_samples) // args.samples_per_shard
                 tasks.append(
                     task_payload(
                         args,
                         "split",
-                        output_root / split / f"{morphology['id']}_{shard_index:05d}.npz",
+                        output_root / split / f"{morphology['id']}_{index:05d}.npz",
                         morphology,
                         split,
                         None,
                         shard_samples,
-                        shard_index,
+                        index,
                         exc_gain=gains[morphology["id"]],
                     )
                 )
-                shard_index += 1
+                tasks[-1]["extension"] = offset >= layout_samples
         for name, condition, dose in intervention_variants(args, interventions):
             intervention_samples = intervention_counts[name]
             if intervention_samples <= 0:
@@ -450,9 +488,17 @@ def build_tasks(
                     exc_gain=gains[morphology["id"]],
                 )
                 task["intervention_dose"] = float(dose)
+                task["extension"] = False
                 tasks.append(task)
                 shard_index += 1
     return tasks
+
+
+def select_tasks(tasks: list[dict[str, Any]], generate_morphology: list[str], extension_only: bool) -> list[dict[str, Any]]:
+    """Restrict a full layout to the morphologies and shards this machine generates."""
+    wanted = {item if item == HAY_CELL_ID else f"specimen_{item}" for item in generate_morphology}
+    return [task for task in tasks
+            if (not wanted or task["morphology_id"] in wanted) and (not extension_only or task["extension"])]
 
 
 def exc_gains(args: argparse.Namespace, morphologies: list[dict[str, str]]) -> dict[str, float]:
