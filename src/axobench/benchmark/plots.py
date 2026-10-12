@@ -64,177 +64,6 @@ def apply_paper_plot_style() -> None:
     )
 
 
-def plot_mechanistic_metric_matrix(
-    rows: list[dict[str, Any]], output: str | Path
-) -> None:
-    """Plot selected mechanistic-response rows as compact metric profiles."""
-    apply_paper_plot_style()
-    selected = [
-        ("phase_plane", "near_spike_phase_rmse_mv", "Near-spike\nphase RMSE"),
-        ("phase_plane", "dvdt_rmse_mv_per_step", "dV/dt\nRMSE"),
-        ("phase_plane", "phase_distribution_jsd", "Phase\nJSD"),
-        ("exc_event_triggered", "response_gain", "Exc.\ngain"),
-        ("inh_event_triggered", "response_gain", "Inh.\ngain"),
-        ("recent_spike_history", "voltage_rmse_mv", "Recent-spike\nRMSE"),
-        ("balanced_high_drive", "voltage_rmse_mv", "High E/I\nRMSE"),
-    ]
-    values: dict[tuple[str, str, str], float] = {}
-    models = []
-    for row in rows:
-        if row.get("diagnostic") != "mechanistic_response":
-            continue
-        value = row.get("value")
-        if not isinstance(value, (int, float)) or not np.isfinite(value):
-            continue
-        model = str(row["model_id"])
-        models.append(model)
-        values[(model, str(row["state"]), str(row["metric"]))] = float(value)
-    models = sorted(dict.fromkeys(models))
-    if not models:
-        return
-    values_by_metric = np.full((len(models), len(selected)), np.nan, dtype=float)
-    for model_index, model in enumerate(models):
-        for metric_index, (state, metric, _label) in enumerate(selected):
-            values_by_metric[model_index, metric_index] = values.get(
-                (model, state, metric), np.nan
-            )
-
-    n_cols = 4
-    n_rows = 2
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(7.4, 3.9))
-    colors = [
-        OKABE_ITO["blue"],
-        OKABE_ITO["orange"],
-        OKABE_ITO["green"],
-        OKABE_ITO["purple"],
-    ]
-    x = np.arange(len(models))
-    for metric_index, ax in enumerate(axes.flat):
-        if metric_index >= len(selected):
-            ax.axis("off")
-            continue
-        _state, _metric, label = selected[metric_index]
-        y = values_by_metric[:, metric_index]
-        ax.plot(x, y, color="#B8C0CC", linewidth=0.9)
-        for model_index, value in enumerate(y):
-            if np.isfinite(value):
-                ax.scatter(
-                    model_index,
-                    value,
-                    s=21,
-                    color=colors[model_index % len(colors)],
-                    edgecolor="white",
-                    linewidth=0.5,
-                )
-        ax.set_xticks(
-            x,
-            labels=[model.replace("branch_elm_", "") for model in models],
-            rotation=18,
-        )
-        ax.text(
-            0.02,
-            0.94,
-            label.replace("\n", " "),
-            transform=ax.transAxes,
-            ha="left",
-            va="top",
-            fontsize=6.8,
-        )
-        ax.grid(True, axis="y", alpha=0.32)
-    fig.tight_layout()
-    output = Path(output)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    for suffix in ("png", "pdf"):
-        fig.savefig(output.with_suffix(f".{suffix}"), dpi=240)
-    plt.close(fig)
-
-
-def plot_event_response_curves(curves: dict[str, Any], output: str | Path) -> None:
-    """Plot teacher/model event-triggered voltage-response curves."""
-    apply_paper_plot_style()
-    models = sorted(curves)
-    if not models:
-        return
-    colors = {
-        "teacher": "#222222",
-        "branch_elm_best": "#2f7f75",
-        "branch_elm_m1": "#8a3f3f",
-        "branch_elm_m30": "#6b5aa6",
-        "branch_elm_m100": "#2f5f8f",
-    }
-    fig, axes = plt.subplots(1, 2, figsize=(7.4, 2.8), sharey=False)
-    for ax, event_kind in zip(axes, ("exc", "inh")):
-        teacher_plotted = False
-        for model in models:
-            event = curves[model].get(event_kind, {})
-            offsets = np.asarray(event.get("offsets", []), dtype=float)
-            if offsets.size == 0:
-                continue
-            if not teacher_plotted:
-                ax.plot(
-                    offsets,
-                    event["target_mean"],
-                    color=colors["teacher"],
-                    linewidth=1.6,
-                    label="teacher",
-                )
-                teacher_plotted = True
-            ax.plot(
-                offsets,
-                event["prediction_mean"],
-                linewidth=1.1,
-                color=colors.get(model, "#555555"),
-                alpha=0.9,
-                label=model,
-            )
-        ax.axvline(0, color="#777777", linewidth=0.8, alpha=0.6)
-        ax.axhline(0, color="#777777", linewidth=0.6, alpha=0.4)
-        ax.grid(True, alpha=0.25)
-        ax.set_xlabel("Time from event (ms)")
-        ax.set_ylabel("Soma response (mV)")
-        ax.text(
-            0.04,
-            0.92,
-            "Excitatory" if event_kind == "exc" else "Inhibitory",
-            transform=ax.transAxes,
-            ha="left",
-            va="top",
-        )
-    axes[1].legend(loc="best", frameon=False)
-    fig.tight_layout()
-    output = Path(output)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    for suffix in ("png", "pdf"):
-        fig.savefig(output.with_suffix(f".{suffix}"), dpi=240)
-    plt.close(fig)
-
-
-def plot_phase_plane_example(example: dict[str, Any], output: str | Path) -> None:
-    """Plot a downsampled target/model phase-plane comparison for one model."""
-    apply_paper_plot_style()
-    target_v = np.asarray(example["target_soma_mv"], dtype=float)
-    pred_v = np.asarray(example["prediction_soma_mv"], dtype=float)
-    target_d = np.diff(target_v, prepend=target_v[:1])
-    pred_d = np.diff(pred_v, prepend=pred_v[:1])
-    step = max(1, target_v.size // 4000)
-    fig, axes = plt.subplots(1, 2, figsize=(7.0, 2.8), sharex=True, sharey=True)
-    axes[0].scatter(
-        target_v[::step], target_d[::step], s=1.3, alpha=0.32, color="#222222"
-    )
-    axes[1].scatter(pred_v[::step], pred_d[::step], s=1.3, alpha=0.32, color="#2f7f75")
-    axes[0].set_ylabel("dV/dt (mV/ms)")
-    for ax, title in zip(axes, ("Teacher", str(example.get("model_id", "model")))):
-        ax.set_xlabel("Soma voltage (mV)")
-        ax.grid(True, alpha=0.2)
-        ax.text(0.04, 0.92, title, transform=ax.transAxes, ha="left", va="top")
-    fig.tight_layout()
-    output = Path(output)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    for suffix in ("png", "pdf"):
-        fig.savefig(output.with_suffix(f".{suffix}"), dpi=240)
-    plt.close(fig)
-
-
 def plot_phase_plane_surface(
     *,
     output: str | Path,
@@ -351,11 +180,6 @@ def plot_phase_plane_surface(
         formats=formats,
     )
     return str(output_path.with_suffix(f".{formats[0]}"))
-
-
-def plot_state_space_surface(*args: Any, **kwargs: Any) -> str:
-    """Compatibility alias for the old phase-plane surface name."""
-    return plot_phase_plane_surface(*args, **kwargs)
 
 
 def plot_state_embedding_surface(
@@ -925,13 +749,6 @@ def _display_model_name(model_name: str) -> str:
     )
 
 
-def group_rows_by_model(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
-    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for row in rows:
-        grouped[str(row["model_id"])].append(row)
-    return dict(grouped)
-
-
 def write_core_metric_set_artifacts(
     *,
     summary: dict[str, Any] | str | Path,
@@ -1316,12 +1133,6 @@ def _write_core_metric_configuration_table(
     ]
     _write_markdown_table(output, ("setting", "value"), rows)
     return str(output)
-
-
-def _save_figure(fig: plt.Figure, output: Path, formats: tuple[str, ...]) -> None:
-    output.parent.mkdir(parents=True, exist_ok=True)
-    for suffix in formats:
-        fig.savefig(output.with_suffix(f".{suffix}"), dpi=240)
 
 
 def _max_model_value(models: list[dict[str, Any]], field: str) -> float:

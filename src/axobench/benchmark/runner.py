@@ -253,21 +253,6 @@ def _leading_indices(n: int) -> list[int]:
     return list(range(n))
 
 
-def _resolve_pair_path(selector: DatasetSelector) -> Path:
-    candidates = [
-        selector.root / "intervention_pair.npz",
-        selector.root / f"{selector.intervention}_pair.npz",
-        selector.root / "event_dropout_pair.npz",
-    ]
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-    raise FileNotFoundError(
-        "missing intervention pair file; expected one of "
-        + ", ".join(str(candidate) for candidate in candidates)
-    )
-
-
 def resolve_intervention_pair_paths(selector: DatasetSelector) -> list[Path]:
     """Resolve one or more intervention pair files from a v1 intervention selector."""
     candidates = [
