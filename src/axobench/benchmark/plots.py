@@ -35,8 +35,8 @@ OKABE_ITO = {
 
 
 # Okabe-Ito without yellow, which is too light for lines on white.
-SERIES_COLORS = tuple(OKABE_ITO[name] for name in ("blue", "orange", "green", "red", "purple", "sky", "gray"))
-SERIES_MARKERS = ("o", "s", "^", "D", "v", "P", "X")
+SERIES_COLORS = tuple(OKABE_ITO[name] for name in ("blue", "orange", "green", "red", "purple", "sky", "gray", "black"))
+SERIES_MARKERS = ("o", "s", "^", "D", "v", "P", "X", "*")
 COLUMN_WIDTH_IN = 3.35  # one column of a two-column paper
 TEXT_WIDTH_IN = 7.0  # full text width
 
@@ -803,7 +803,7 @@ def plot_error_anatomy(
     """
     apply_paper_plot_style()
     panels = _error_anatomy_panels(anatomy)
-    fig, axes = plt.subplots(2, 2, figsize=(TEXT_WIDTH_IN, 4.6))
+    fig, axes = plt.subplots(2, 2, figsize=(TEXT_WIDTH_IN, 4.9))
     for ax, panel, letter in zip(axes.flat, panels, "ABCD", strict=True):
         if panel["kind"] == "line":
             for series in panel["series"]:
@@ -823,7 +823,12 @@ def plot_error_anatomy(
         ax.set_ylabel(panel["ylabel"])
         if panel.get("ylim"):
             ax.set_ylim(*panel["ylim"])
-        ax.legend(loc=panel["legend"], fontsize=6.5)
+        if panel["kind"] == "line":
+            ax.legend(loc=panel["legend"], fontsize=6.5)
+        else:
+            # Above the axes, as in the pgfplots export, so bars are never covered.
+            ax.legend(loc="lower left", bbox_to_anchor=(0.0, 1.0), ncol=len(panel["series"]),
+                      fontsize=6.5, frameon=False, borderaxespad=0.2)
         _add_panel_label(ax, letter)
     fig.tight_layout(h_pad=1.6, w_pad=2.0)
     output = Path(output)
