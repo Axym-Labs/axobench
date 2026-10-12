@@ -1530,12 +1530,13 @@ def _plot_spike_metric_identification(
     )
     for yy, val in zip(y, vals):
         ax2.plot([0, val], [yy, yy], color="#777777", linewidth=1.2)
-        ax2.text(
-            val + (0.001 if val >= 0 else -0.001),
-            yy,
+        ax2.annotate(
             f"{val:+.3f}",
+            (max(val, 0.0), yy),
+            textcoords="offset points",
+            xytext=(6, 0),
             va="center",
-            ha="left" if val >= 0 else "right",
+            ha="left",
         )
     ax2.set_yticks(y, labels=keys)
     ax2.set_xlabel("prevalence-matched\nminus validation F1")
@@ -1706,6 +1707,11 @@ def _plot_target_view_distortion_map(
                     raw_value * 1.04, yy, f"{ratio:.1f}x", va="center", fontsize=5.8
                 )
         ax.set_xscale("log")
+        plain = mpl.ticker.FuncFormatter(lambda value, _: f"{value:g}")
+        ax.xaxis.set_major_formatter(plain)
+        ax.xaxis.set_minor_formatter(
+            mpl.ticker.FuncFormatter(lambda value, _: f"{value:g}" if f"{value:e}"[0] in "235" else "")
+        )
         ax.set_xlabel("RMSE (mV)")
         ax.text(
             0.03, 0.92, label, transform=ax.transAxes, ha="left", va="top", fontsize=7.2
@@ -1918,15 +1924,8 @@ def _plot_tcn_preprocessing_trajectories(
             color=colors[idx % len(colors)],
             label=blob["model"].replace("tcn_", ""),
         )
-        for x, val in enumerate(y):
-            ax.text(
-                x,
-                val * (1.05 if x == 0 else 0.93),
-                _format_value(val),
-                fontsize=5.8,
-                ha="center",
-                va="bottom" if x == 0 else "top",
-            )
+        # Only the raw view is labelled; the preprocessed views nearly coincide.
+        ax.text(0, y[0] * 1.05, _format_value(y[0]), fontsize=6, ha="center", va="bottom")
     ax.set_yscale("log")
     ax.set_xticks(
         np.arange(len(view_order)), labels=[label for _key, label in view_order]
