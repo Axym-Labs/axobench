@@ -219,7 +219,7 @@ class BenchmarkSuite:
             )
 
         results = {
-            "benchmark_version": "0.2.0",
+            "benchmark_version": "0.2.1",
             "metadata": metadata,
             "m1_trace_fidelity": m1,
             "m1b_feature_fidelity": m1b,
