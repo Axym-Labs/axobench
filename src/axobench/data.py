@@ -168,7 +168,12 @@ class ShardedNeuronIODataset:
                     )
                 )
         if not shards:
-            shards = [_ShardFiles(name=path.name, path=path) for path in sorted(self.root.glob("*.npz"))]
+            # Manifest entries may name shards in subfolders (the Hub layout has one folder per cell).
+            listed = [str(entry["file"]) for entry in manifest.get("shards", []) if "file" in entry]
+            if listed:
+                shards = [_ShardFiles(name=name, path=self.root / name) for name in listed if (self.root / name).is_file()]
+            else:
+                shards = [_ShardFiles(name=path.name, path=path) for path in sorted(self.root.glob("*.npz"))]
         shard_lookup = {shard.name: idx for idx, shard in enumerate(shards)}
         index: list[tuple[int, int, str]] = []
         for shard_entry in manifest.get("shards", []):
