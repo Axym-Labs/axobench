@@ -27,25 +27,29 @@ it does not ship BranchELM, Mamba, RNN, or training code.
 
 ## Download the data
 
-The released corpora live on the Hugging Face Hub:
-[`Axym-Labs/axobench`](https://huggingface.co/datasets/Axym-Labs/axobench)
-(train/val/test),
-[`Axym-Labs/axobench-interventions`](https://huggingface.co/datasets/Axym-Labs/axobench-interventions)
-(paired interventions), and
-[`Axym-Labs/axobench-population`](https://huggingface.co/datasets/Axym-Labs/axobench-population)
-(population context). `download-data` assembles the first two into the
-dataset-root layout the evaluator reads:
+The benchmark lives on the Hugging Face Hub as
+[`Axym-Labs/axobench-v2`](https://huggingface.co/datasets/Axym-Labs/axobench-v2):
+15 layer-5 cells (14 Allen all-active models and the NeuronIO cell, 3 of them
+held out), train/val/test splits and paired interventions at three doses each.
+Each variant is a folder of that repository; `minimal` (2,000 training traces
+per cell, 14.6 GB) is released, and larger variants will sit beside it. The
+population-context corpus is
+[`Axym-Labs/axobench-population`](https://huggingface.co/datasets/Axym-Labs/axobench-population).
+`download-data` fetches the requested folders of a variant together with its
+cell index into the dataset-root layout the evaluator reads:
 
 ```bash
-axobench download-data                          # val + all interventions (~8.5 GB)
-axobench download-data --splits train,val,test  # full corpus
+axobench download-data                          # minimal: val + all interventions (~6 GB)
+axobench download-data --splits train,val,test  # minimal training corpus
+axobench download-data --interventions inh_dropout,temporal_jitter_j8
 axobench download-data --population             # population-context corpus
 ```
 
 The same is available from Python as `axobench.hub.download_dataset` and
-`download_population_dataset`. Data goes to `$AXOBENCH_DATA_DIR` (default
-`~/.cache/axobench`) unless `--output` is given. Complete folders are skipped,
-so repeated calls work offline, and `--revision` pins a Hub commit.
+`download_population_dataset`. Data goes to `$AXOBENCH_DATA_DIR/v2/<variant>`
+(default `~/.cache/axobench/v2/minimal`) unless `--output` is given. Complete
+folders are skipped, so repeated calls work offline, and `--revision` pins a
+Hub commit.
 
 ## Population-context extension
 

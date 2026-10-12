@@ -45,13 +45,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     download.add_argument(
         "--output",
-        help="dataset root; defaults to $AXOBENCH_DATA_DIR/v1 (or .../population with --population)",
+        help="download directory; the data land in <output>/<variant>; defaults to $AXOBENCH_DATA_DIR/v2 "
+        "(or .../population with --population)",
     )
+    download.add_argument("--variant", default="minimal", help="AxoBench v2 variant (default minimal)")
     download.add_argument("--splits", help="comma-separated splits; default val (train,val with --population)")
     download.add_argument(
         "--interventions",
         default="all",
-        help="comma-separated intervention conditions, 'all', or 'none'",
+        help="comma-separated intervention folders (inh_dropout_p35) or conditions (all doses), 'all', or 'none'",
     )
     download.add_argument("--population", action="store_true", help="download the population-context corpus instead")
     download.add_argument("--revision", help="Hub branch, tag, or commit to download")
@@ -369,6 +371,7 @@ def main(argv: list[str] | None = None) -> int:
                 interventions = _parse_suites(args.interventions)
                 root = download_dataset(
                     args.output,
+                    variant=args.variant,
                     splits=_parse_suites(args.splits or "val"),
                     interventions=(
                         None if interventions == ("none",)

@@ -1,14 +1,17 @@
 """Download the public AxoBench datasets from the Hugging Face Hub.
 
-The benchmark corpus and its paired interventions are published as two Hub
-repositories. ``download_dataset`` places both into one directory with the
-layout that ``V1DatasetLayout`` and ``evaluate_model`` expect::
+AxoBench v2 is one Hub repository with one folder per variant (``minimal/``
+now; larger variants are added beside it). ``download_dataset`` fetches the
+requested folders of a variant together with its cell index, giving the layout
+that ``V1DatasetLayout`` and ``evaluate_model`` expect::
 
-    <root>/train/  <root>/val/  <root>/test/
-    <root>/interventions/<condition>/
+    <root>/<variant>/train/<cell>/  .../val/<cell>/  .../test/<cell>/
+    <root>/<variant>/interventions/<condition>_<dose>/
+    <root>/<variant>/morphologies.json  .../morphologies/
 
-Downloads are per split or per intervention condition because each folder's
-``manifest.json`` indexes every shard in that folder. Folders whose manifest
+Split shards sit in one folder per cell (the Hub allows 10,000 files per
+directory). Downloads are per split or per intervention folder because each
+folder's ``manifest.json`` indexes every shard in that folder. Folders whose manifest
 and shards are already present are not requested again, so repeated calls work
 offline once the data is local.
 """
@@ -25,9 +28,21 @@ from typing import Literal
 from axobench.benchmark.dataset_schema import INTERVENTION_CONDITIONS
 
 
-BENCHMARK_REPO_ID = "Axym-Labs/axobench"
-INTERVENTIONS_REPO_ID = "Axym-Labs/axobench-interventions"
+REPO_ID = "Axym-Labs/axobench-v2"
 POPULATION_REPO_ID = "Axym-Labs/axobench-population"
+
+VARIANTS = ("minimal",)
+DEFAULT_VARIANT = "minimal"
+INTERVENTION_DOSES: dict[str, tuple[str, ...]] = {
+    "event_dropout": ("p10", "p35", "p70"),
+    "exc_dropout": ("p10", "p35", "p70"),
+    "inh_dropout": ("p10", "p35", "p70"),
+    "temporal_jitter": ("j1", "j2", "j8"),
+    "site_silence": ("p10", "p25", "p50"),
+}
+INTERVENTION_FOLDERS = tuple(
+    f"{condition}_{dose}" for condition in INTERVENTION_CONDITIONS for dose in INTERVENTION_DOSES[condition]
+)
 
 PUBLIC_SPLITS = ("train", "val", "test")
 POPULATION_SPLITS = ("train", "val")
@@ -39,6 +54,7 @@ _METADATA_FILES = (
     "dataset_package_manifest.json",
     "package-manifest.json",
 )
+_CELL_INDEX = ("morphologies.json", "morphologies/*")
 
 
 def default_data_dir() -> Path:
@@ -54,35 +70,50 @@ def default_data_dir() -> Path:
 def download_dataset(
     root: str | Path | None = None,
     *,
+    variant: str = DEFAULT_VARIANT,
     splits: Iterable[str] = ("val",),
     interventions: Iterable[str] | Literal["all"] | None = "all",
     revision: str | None = None,
     max_workers: int = 8,
 ) -> Path:
-    """Download benchmark splits and intervention conditions into a v1 dataset root.
+    """Download splits and intervention folders of one AxoBench v2 variant.
 
     The defaults fetch what ``evaluate_model`` reads: the validation split and
-    all paired interventions (about 8.5 GB). Pass ``splits=("train", "val",
-    "test")`` for the full training corpus. Returns the dataset root.
+    all paired interventions of the minimal variant (about 6 GB). Pass
+    ``splits=("train", "val", "test")`` for the training corpus. Interventions
+    are named by folder (``inh_dropout_p35``) or by condition, which selects all
+    of its doses. The data land in ``<root>/<variant>``, which is returned.
     """
-    root = default_data_dir() / "v1" if root is None else Path(root)
+    root = default_data_dir() / "v2" if root is None else Path(root)
+    (variant,) = _validated_names(variant, VARIANTS, kind="variant")
     split_names = _validated_names(splits, PUBLIC_SPLITS, kind="split")
     if interventions is None:
-        condition_names: tuple[str, ...] = ()
+        folder_names: tuple[str, ...] = ()
     elif interventions == "all":
-        condition_names = INTERVENTION_CONDITIONS
+        folder_names = INTERVENTION_FOLDERS
     else:
-        condition_names = _validated_names(interventions, INTERVENTION_CONDITIONS, kind="intervention")
+        if isinstance(interventions, str):
+            interventions = (interventions,)
+        expanded = [
+            folder
+            for name in interventions
+            for folder in (
+                [f"{name}_{dose}" for dose in INTERVENTION_DOSES[name]] if name in INTERVENTION_DOSES else [name]
+            )
+        ]
+        folder_names = _validated_names(expanded, INTERVENTION_FOLDERS, kind="intervention")
 
-    _download_folders(BENCHMARK_REPO_ID, root, split_names, revision=revision, max_workers=max_workers)
+    folders = (*split_names, *(f"interventions/{name}" for name in folder_names))
     _download_folders(
-        INTERVENTIONS_REPO_ID,
-        root / "interventions",
-        condition_names,
+        REPO_ID,
+        root,
+        folders,
+        prefix=variant,
+        extra_patterns=_CELL_INDEX,
         revision=revision,
         max_workers=max_workers,
     )
-    return root
+    return root / variant
 
 
 def download_population_dataset(
@@ -118,11 +149,16 @@ def _download_folders(
     local_dir: Path,
     folders: tuple[str, ...],
     *,
+    prefix: str = "",
+    extra_patterns: tuple[str, ...] = (),
     revision: str | None,
     max_workers: int,
 ) -> None:
-    missing = [folder for folder in folders if not folder_is_complete(local_dir / folder)]
-    if not missing:
+    base = local_dir / prefix if prefix else local_dir
+    missing = [folder for folder in folders if not folder_is_complete(base / folder)]
+    # The first extra pattern is a file whose presence marks the extras as downloaded.
+    extras_missing = bool(extra_patterns) and not (base / extra_patterns[0]).is_file()
+    if not missing and not extras_missing:
         return
     try:
         from huggingface_hub import snapshot_download
@@ -132,20 +168,28 @@ def _download_folders(
             "`python -m pip install huggingface_hub`"
         ) from error
 
-    print(f"[axobench] downloading {repo_id} {', '.join(missing)} -> {local_dir}", file=sys.stderr, flush=True)
+    def in_prefix(pattern: str) -> str:
+        return f"{prefix}/{pattern}" if prefix else pattern
+
+    target = f"{repo_id}/{prefix}" if prefix else repo_id
+    print(f"[axobench] downloading {target} {', '.join(missing) or 'cell index'} -> {base}", file=sys.stderr, flush=True)
     local_dir.mkdir(parents=True, exist_ok=True)
     snapshot_download(
         repo_id=repo_id,
         repo_type="dataset",
         revision=revision,
         local_dir=local_dir,
-        allow_patterns=[*_METADATA_FILES, *(f"{folder}/*" for folder in missing)],
+        allow_patterns=[
+            *_METADATA_FILES,
+            *(in_prefix(name) for name in (*_METADATA_FILES, *extra_patterns)),
+            *(in_prefix(f"{folder}/*") for folder in missing),
+        ],
         max_workers=max_workers,
     )
-    incomplete = [folder for folder in missing if not folder_is_complete(local_dir / folder)]
+    incomplete = [folder for folder in missing if not folder_is_complete(base / folder)]
     if incomplete:
         raise FileNotFoundError(
-            f"{repo_id} download left incomplete folders under {local_dir}: {', '.join(incomplete)}"
+            f"{target} download left incomplete folders under {base}: {', '.join(incomplete)}"
         )
 
 
