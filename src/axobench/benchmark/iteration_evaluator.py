@@ -21,9 +21,10 @@ The secondary SERA skill rows compare SERA with that of a constant voltage,
 the mean -55 mV-clipped teacher voltage of the calibration traces:
 ``voltage_sera_skill`` and ``dynamics_sera_skill`` are ``1 - SERA /
 SERA(constant)``. Most voltage SERA sits in action-potential windows, so a
-model that never emits action potentials (for example one trained on clipped
+prediction that stays at or below -55 mV (as from a model trained on clipped
 voltage) cannot exceed ``voltage_sera_ceiling_skill``, the skill of the
-teacher clipped at -55 mV. The ceiling falls as the spike rate rises, so raw
+teacher clipped at -55 mV, and models that do not emit action potentials stay
+near it. The ceiling falls as the spike rate rises, so raw
 skill is not comparable across datasets with different rates;
 ``voltage_sera_skill_of_ceiling`` divides it out.
 """

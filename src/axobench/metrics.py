@@ -406,7 +406,8 @@ def sera_skills(terms: dict[str, np.ndarray], indices: np.ndarray | None = None)
     ``voltage_sera_skill = 1 - SERA / SERA(reference)``; SERA per spike shares
     its relevance and spike count with the reference, so the ratio is a ratio
     of summed areas. ``voltage_sera_ceiling_skill`` is the skill of the
-    clipped teacher, the best prediction without action potentials;
+    clipped teacher, the best prediction that stays at or below
+    `SOMA_CLIP_MV` (no action potentials);
     ``voltage_sera_skill_of_ceiling`` is their ratio. ``dynamics_sera_skill``
     is the dV/dt analogue with the same constant reference.
     """
