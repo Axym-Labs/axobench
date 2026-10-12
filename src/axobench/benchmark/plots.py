@@ -34,28 +34,65 @@ OKABE_ITO = {
 }
 
 
+# Okabe-Ito without yellow, which is too light for lines on white.
+SERIES_COLORS = tuple(OKABE_ITO[name] for name in ("blue", "orange", "green", "red", "purple", "sky", "gray"))
+SERIES_MARKERS = ("o", "s", "^", "D", "v", "P", "X")
+COLUMN_WIDTH_IN = 3.35  # one column of a two-column paper
+TEXT_WIDTH_IN = 7.0  # full text width
+
+
 def apply_paper_plot_style() -> None:
-    """Use the compact serif style used by the IEWC paper figures."""
+    """Compact serif paper style: 7-8 pt text, despined axes, no grid, Okabe-Ito colors.
+
+    Figures are sized for `COLUMN_WIDTH_IN` or `TEXT_WIDTH_IN` and saved as
+    vector (PDF/SVG, text kept as text) and 300 dpi PNG. Set
+    ``AXOBENCH_PAPER_STYLE`` to a Matplotlib style file to apply it first.
+    """
     if PAPER_STYLE is not None and PAPER_STYLE.exists():
         plt.style.use(str(PAPER_STYLE))
     mpl.rcParams.update(
         {
             "figure.dpi": 140,
+            "figure.facecolor": "white",
             "savefig.dpi": 300,
             "savefig.bbox": "tight",
-            "axes.grid": True,
-            "grid.color": "#D7DCE2",
-            "grid.linewidth": 0.55,
-            "axes.edgecolor": "#222222",
-            "axes.linewidth": 0.8,
+            "savefig.pad_inches": 0.02,
+            "savefig.facecolor": "white",
             "font.family": "serif",
-            "font.size": 7,
+            "font.serif": ["STIXGeneral", "DejaVu Serif"],
+            "mathtext.fontset": "stix",
+            "font.size": 8,
             "axes.titlesize": 8,
-            "axes.labelsize": 7,
-            "legend.fontsize": 6.5,
-            "xtick.labelsize": 6.5,
-            "ytick.labelsize": 6.5,
+            "axes.labelsize": 8,
+            "legend.fontsize": 7,
+            "xtick.labelsize": 7,
+            "ytick.labelsize": 7,
+            "axes.spines.top": False,
+            "axes.spines.right": False,
+            "axes.edgecolor": "#333333",
+            "axes.linewidth": 0.6,
+            "axes.labelcolor": "#111111",
+            "axes.prop_cycle": mpl.cycler(color=SERIES_COLORS),
+            "axes.grid": False,
+            "grid.color": "#E3E6EA",
+            "grid.linewidth": 0.5,
+            "xtick.color": "#333333",
+            "ytick.color": "#333333",
+            "xtick.major.width": 0.6,
+            "ytick.major.width": 0.6,
+            "xtick.minor.width": 0.4,
+            "ytick.minor.width": 0.4,
+            "xtick.major.size": 2.5,
+            "ytick.major.size": 2.5,
+            "xtick.minor.size": 1.5,
+            "ytick.minor.size": 1.5,
+            "lines.linewidth": 1.2,
+            "lines.markersize": 3.5,
+            "patch.linewidth": 0.5,
             "legend.frameon": False,
+            "legend.handlelength": 1.6,
+            "legend.borderaxespad": 0.3,
+            "image.cmap": "cividis",
             "svg.fonttype": "none",
             "svg.hashsalt": "axobench-diagnostic-plots",
             "pdf.fonttype": 42,
@@ -749,6 +786,149 @@ def _display_model_name(model_name: str) -> str:
     )
 
 
+def plot_error_anatomy(
+    anatomy: dict[str, Any],
+    output: str | Path,
+    *,
+    formats: tuple[str, ...] = PLOT_FORMATS,
+    tikz: bool = True,
+) -> list[str]:
+    """Plot an :func:`~axobench.benchmark.error_anatomy.error_anatomy` result.
+
+    Four panels: spike-triggered voltage of teacher and model around hit,
+    missed and false spikes; subthreshold error by time since the last teacher
+    spike; skill by teacher firing rate; subthreshold skill by frequency
+    band. Writes ``output`` in each of `formats` and, with `tikz`, a
+    standalone pgfplots ``.tex`` of the same panels. Returns the paths.
+    """
+    apply_paper_plot_style()
+    panels = _error_anatomy_panels(anatomy)
+    fig, axes = plt.subplots(2, 2, figsize=(TEXT_WIDTH_IN, 4.6))
+    for ax, panel, letter in zip(axes.flat, panels, "ABCD", strict=True):
+        if panel["kind"] == "line":
+            for series in panel["series"]:
+                ax.plot(series["x"], series["y"], color=OKABE_ITO[series["color"]],
+                        linestyle=series["style"], label=series["label"])
+            ax.axvline(0.0, color="#BBBBBB", linewidth=0.5, zorder=0)
+        else:
+            x = np.arange(len(panel["categories"]))
+            width = 0.8 / len(panel["series"])
+            for index, series in enumerate(panel["series"]):
+                values = np.array([np.nan if v is None else v for v in series["y"]], dtype=float)
+                ax.bar(x + (index - (len(panel["series"]) - 1) / 2) * width, values, width,
+                       color=OKABE_ITO[series["color"]], label=series["label"])
+            ax.set_xticks(x, labels=panel["categories"])
+            ax.axhline(0.0, color="#333333", linewidth=0.6)
+        ax.set_xlabel(panel["xlabel"])
+        ax.set_ylabel(panel["ylabel"])
+        if panel.get("ylim"):
+            ax.set_ylim(*panel["ylim"])
+        ax.legend(loc=panel["legend"], fontsize=6.5)
+        _add_panel_label(ax, letter)
+    fig.tight_layout(h_pad=1.6, w_pad=2.0)
+    output = Path(output)
+    _save_figure(fig, output, formats)
+    paths = [str(output.with_suffix(f".{suffix}")) for suffix in formats]
+    if tikz:
+        output.with_suffix(".tex").write_text(_pgfplots_document(panels), encoding="utf-8")
+        paths.append(str(output.with_suffix(".tex")))
+    return paths
+
+
+def _error_anatomy_panels(anatomy: dict[str, Any]) -> list[dict[str, Any]]:
+    """Plot-library-neutral panel specs shared by the Matplotlib and pgfplots figures."""
+    step_ms = float(anatomy["config"]["timestep_ms"])
+    sta = anatomy["spike_triggered_average"]
+    lags = [lag * step_ms for lag in sta["lags_steps"]]
+    line_series = []
+    for kind, color, style in (("hit", "blue", "solid"), ("missed", "orange", "dashed"), ("false", "purple", "dotted")):
+        group = sta[kind]
+        if not group["events"]:
+            continue
+        if kind != "false":
+            line_series.append({"label": f"Teacher, {kind} (n={group['events']})", "x": lags, "y": group["teacher_mv"],
+                                "color": "black", "style": style})
+        line_series.append({"label": f"Model, {kind}" + (f" (n={group['events']})" if kind == "false" else ""),
+                            "x": lags, "y": group["model_mv"], "color": color, "style": style})
+    since = [row for row in anatomy["subthreshold_by_spike_distance"]["since_last_teacher_spike"] if row["point_share"]]
+    rates = anatomy["by_teacher_rate"]
+    bands = anatomy["subthreshold_by_frequency"]
+    return [
+        {"kind": "line", "xlabel": "Time from spike event (ms)", "ylabel": "Mean soma voltage (mV)", "legend": "upper right",
+         "series": line_series},
+        {"kind": "bar", "xlabel": "Time since last teacher spike (ms)", "ylabel": "Share of subthreshold total",
+         "legend": "upper left", "categories": [row["bin_ms"] for row in since],
+         "series": [
+             {"label": "Retained steps", "y": [row["point_share"] for row in since], "color": "gray"},
+             {"label": "Squared error", "y": [row["error_share"] for row in since], "color": "red"},
+         ]},
+        {"kind": "bar", "xlabel": "Teacher firing rate (Hz)", "ylabel": "Skill", "legend": "upper right",
+         "categories": [f"{row['bin']} (n={row['traces']})" for row in rates],
+         "series": [
+             {"label": "Voltage SERA", "y": [row["voltage_sera_skill"] for row in rates], "color": "blue"},
+             {"label": "AP-free ceiling", "y": [row["voltage_sera_ceiling_skill"] for row in rates], "color": "sky"},
+             {"label": "Subthreshold", "y": [row["subthreshold_skill"] for row in rates], "color": "green"},
+         ]},
+        {"kind": "bar", "xlabel": "Frequency band (Hz)", "ylabel": "Subthreshold skill or share", "legend": "upper right",
+         "categories": [row["band_hz"] for row in bands],
+         "series": [
+             {"label": "Skill", "y": [row["skill"] for row in bands], "color": "green"},
+             {"label": "Teacher variance share", "y": [row["teacher_share"] for row in bands], "color": "gray"},
+         ]},
+    ]
+
+
+def _pgfplots_document(panels: list[dict[str, Any]]) -> str:
+    """Standalone pgfplots source for a 2x2 grid of line and bar panels."""
+    colors = sorted({series["color"] for panel in panels for series in panel["series"]})
+    styles = {"solid": "solid", "dashed": "dashed", "dotted": "densely dotted"}
+    lines = [
+        r"\documentclass[tikz,border=2pt]{standalone}",
+        r"\usepackage{pgfplots}",
+        r"\usepgfplotslibrary{groupplots}",
+        r"\pgfplotsset{compat=1.17}",
+        *[rf"\definecolor{{ab{name}}}{{HTML}}{{{OKABE_ITO[name].lstrip('#')}}}" for name in colors],
+        r"\begin{document}",
+        r"\begin{tikzpicture}[font=\footnotesize]",
+        r"\begin{groupplot}[group style={group size=2 by 2, horizontal sep=18mm, vertical sep=24mm},",
+        r"  width=7.2cm, height=5cm, axis lines*=left, tick align=outside, tick pos=left,",
+        r"  legend style={draw=none, fill=none, font=\scriptsize}, legend cell align=left]",
+    ]
+    for panel, letter in zip(panels, "ABCD", strict=True):
+        options = [f"xlabel={{{_tex(panel['xlabel'])}}}", f"ylabel={{{_tex(panel['ylabel'])}}}",
+                   f"title={{\\textbf{{{letter}}}}}", "title style={at={(-0.12,1.0)}, anchor=south west}"]
+        if panel["kind"] == "line":
+            options.append("legend pos=" + {"upper right": "north east", "upper left": "north west"}[panel["legend"]])
+        if panel.get("ylim"):
+            options.append(f"ymin={panel['ylim'][0]:g}, ymax={panel['ylim'][1]:g}")
+        if panel["kind"] == "bar":
+            labels = ",".join("{" + _tex(c) + "}" for c in panel["categories"])
+            width = 0.8 / len(panel["series"])
+            values = [y for series in panel["series"] for y in series["y"] if y is not None]
+            options += [f"ybar=0pt, bar width={width:g}, xtick={{0,...,{len(panel['categories']) - 1}}}, xticklabels={{{labels}}}",
+                        f"ymin={min(0.0, 1.1 * min(values, default=0.0)):.3g}, area legend",
+                        f"legend style={{at={{(1,1.03)}}, anchor=south east, legend columns={2 if len(panel['series']) > 2 else -1}, "
+                        f"/tikz/every even column/.append style={{column sep=6pt}}}}",
+                        "enlarge x limits=0.12, x tick label style={rotate=30, anchor=east}",
+                        "extra y ticks={0}, extra y tick style={grid=major, tick label style={opacity=0}}"]
+        lines.append(r"\nextgroupplot[" + ", ".join(options) + "]")
+        for series in panel["series"]:
+            if panel["kind"] == "line":
+                points = " ".join(f"({x:g},{y:.4g})" for x, y in zip(series["x"], series["y"]))
+                style = f"color=ab{series['color']}, {styles[series['style']]}, thick, mark=none"
+            else:
+                points = " ".join(f"({x},{y:.4g})" for x, y in enumerate(series["y"]) if y is not None)
+                style = f"fill=ab{series['color']}, draw=none"
+            lines.append(rf"\addplot[{style}] coordinates {{{points}}};")
+            lines.append(rf"\addlegendentry{{{_tex(series['label'])}}}")
+    lines += [r"\end{groupplot}", r"\end{tikzpicture}", r"\end{document}", ""]
+    return "\n".join(lines)
+
+
+def _tex(text: str) -> str:
+    return str(text).replace("\\", r"\textbackslash{}").replace("%", r"\%").replace("_", r"\_").replace("&", r"\&").replace("#", r"\#")
+
+
 def write_core_metric_set_artifacts(
     *,
     summary: dict[str, Any] | str | Path,
@@ -809,14 +989,7 @@ def _format_value(value: float) -> str:
 def _plot_core_spike_f1_curves(
     models: list[dict[str, Any]], output: Path, formats: tuple[str, ...]
 ) -> str:
-    fig, ax = plt.subplots(figsize=(5.9, 3.05))
-    colors = [
-        OKABE_ITO["blue"],
-        OKABE_ITO["orange"],
-        OKABE_ITO["green"],
-        OKABE_ITO["purple"],
-        OKABE_ITO["red"],
-    ]
+    fig, ax = plt.subplots(figsize=(0.62 * TEXT_WIDTH_IN, 2.3))
     for index, model in enumerate(models):
         curve = model.get("spike_f1_curve_full") or model.get("spike_f1_curve", [])
         if not curve:
@@ -826,19 +999,18 @@ def _plot_core_spike_f1_curves(
         ax.plot(
             x,
             y,
-            marker="o",
-            linewidth=1.25,
-            markersize=3.2,
-            color=colors[index % len(colors)],
+            marker=SERIES_MARKERS[index % len(SERIES_MARKERS)],
+            color=SERIES_COLORS[index % len(SERIES_COLORS)],
+            linestyle="-" if index < len(SERIES_COLORS) else "--",
             label=str(model.get("model_id", f"model_{index}")),
         )
     ax.set_xlabel("Spike timing tolerance (ms)")
-    ax.set_ylabel("Discrete event F1")
+    ax.set_ylabel("Spike event F1")
     ax.set_ylim(
-        0.0, min(1.0, max(0.25, _max_model_value(models, "spike_f1_area") * 2.4))
+        0.0, min(1.0, max(0.25, _max_model_value(models, "spike_f1_area") * 1.6))
     )
-    ax.legend(loc="best")
-    ax.grid(True, alpha=0.35)
+    ax.legend(loc="center left", bbox_to_anchor=(1.01, 0.5))
+    ax.grid(True, axis="y")
     fig.tight_layout()
     _save_figure(fig, output, formats)
     plt.close(fig)
@@ -854,7 +1026,7 @@ def _plot_core_sera_pareto(
 ) -> str:
     if x_axis not in {"parameters", "branch_memory"}:
         raise ValueError("x_axis must be 'parameters' or 'branch_memory'")
-    fig, axes = plt.subplots(1, 3, figsize=(10.4, 3.05), sharex=True)
+    fig, axes = plt.subplots(1, 3, figsize=(TEXT_WIDTH_IN, 2.35), sharex=True)
     legend_handles: dict[str, Any] = {}
     panels = (
         (axes[0], "voltage_sera_iron_per_spike_mv2", "Voltage SERA (mV²/spike)"),
@@ -889,16 +1061,15 @@ def _plot_core_sera_pareto(
                     for point in sweep
                 ],
                 [point["value"] for point in sweep],
-                s=23,
-                color=OKABE_ITO["blue"],
-                alpha=0.9,
+                s=14,
+                color=OKABE_ITO["gray"],
                 zorder=3,
                 label="Branch-ELM sweep",
             )
             _plot_log_x_smooth_fit(
                 ax,
                 sweep,
-                color=OKABE_ITO["blue"],
+                color=OKABE_ITO["gray"],
                 branch_size_axis=use_branch_size_axis,
             )
             for point in sweep:
@@ -913,8 +1084,9 @@ def _plot_core_sera_pareto(
                             point["value"],
                         ),
                         textcoords="offset points",
-                        xytext=(3, 3),
-                        fontsize=5.8,
+                        xytext=(2, 3),
+                        fontsize=6,
+                        color="#555555",
                     )
         for point in best:
             best_x = (
@@ -937,37 +1109,28 @@ def _plot_core_sera_pareto(
                 "best",
                 (best_x, point["value"]),
                 textcoords="offset points",
-                xytext=(3, 3),
-                fontsize=5.8,
+                xytext=(2, 3),
+                fontsize=6,
             )
-        colors = [
-            OKABE_ITO["green"],
-            OKABE_ITO["purple"],
-            OKABE_ITO["red"],
-            OKABE_ITO["gray"],
-        ]
         if not use_branch_size_axis:
             for index, point in enumerate(other):
                 ax.scatter(
                     point["params"],
                     point["value"],
-                    s=26,
-                    color=colors[index % len(colors)],
+                    s=18,
+                    marker=SERIES_MARKERS[index % len(SERIES_MARKERS)],
+                    color=SERIES_COLORS[index % len(SERIES_COLORS)],
                     zorder=3,
+                    label=point["model_id"],
                 )
-                ax.annotate(
-                    point["model_id"].replace("branch_elm_", ""),
-                    (point["params"], point["value"]),
-                    textcoords="offset points",
-                    xytext=(3, 3),
-                    fontsize=5.8,
-                )
+        if not points:
+            ax.text(0.5, 0.5, "no data", transform=ax.transAxes, ha="center", va="center", color="#777777")
+            ax.set_yticks([])
         ax.set_xscale("log")
         ax.set_xlabel(
             r"Branch memory size $d_m$" if use_branch_size_axis else "Parameters"
         )
         ax.set_ylabel(label)
-        ax.grid(True, alpha=0.35)
         ax.margins(x=0.07, y=0.12)
         handles, labels = ax.get_legend_handles_labels()
         legend_handles.update(dict(zip(labels, handles, strict=False)))
@@ -976,10 +1139,10 @@ def _plot_core_sera_pareto(
             legend_handles.values(),
             legend_handles.keys(),
             loc="upper center",
-            bbox_to_anchor=(0.5, 1.01),
-            ncol=min(3, len(legend_handles)),
+            bbox_to_anchor=(0.5, 1.0),
+            ncol=min(5, len(legend_handles)),
         )
-    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.90))
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.89))
     _save_figure(fig, output, formats)
     plt.close(fig)
     return str(output.with_suffix(f".{formats[0]}"))
@@ -1053,10 +1216,8 @@ def _plot_log_x_smooth_fit(
     if len(np.unique(log_xs)) < 4:
         return
     grid = np.linspace(float(log_xs.min()), float(log_xs.max()), 180)
-    fit = _local_linear_smooth(log_xs, ys, grid, fraction=0.45)
-    ax.plot(
-        10.0**grid, fit, color=color, linewidth=1.15, alpha=0.84, label="Smooth fit"
-    )
+    fit = _local_linear_smooth(log_xs, ys, grid, fraction=0.8)
+    ax.plot(10.0**grid, fit, color=color, linewidth=1.0, label="Smooth fit")
 
 
 def _local_linear_smooth(
@@ -1459,13 +1620,14 @@ def _plot_mechanistic_behavior_matrix(
                 linewidth=0.5,
                 zorder=3,
             )
-            ax.text(
-                model_index,
-                value,
+            ax.annotate(
                 _format_value(value),
+                (model_index, value),
+                textcoords="offset points",
+                xytext=(0, 4),
                 ha="center",
                 va="bottom",
-                fontsize=5.5,
+                fontsize=6,
             )
         ax.set_xticks(
             x,
@@ -1898,28 +2060,21 @@ def _plot_neuronio_matched_intervention_response(
         label="mean soma delta",
     )
     for yy, spike_value, soma_value in zip(y, spike_delta, soma_delta):
-        ax.text(
-            spike_value,
-            yy - 0.27,
-            f"{spike_value:+.2f}",
-            ha="center",
-            va="top",
-            fontsize=5.5,
-            color=OKABE_ITO["blue"],
-        )
-        ax.text(
-            soma_value,
-            yy + 0.27,
-            f"{soma_value:+.2f}",
-            ha="center",
-            va="bottom",
-            fontsize=5.5,
-            color=OKABE_ITO["orange"],
-        )
+        for value, offset, color in ((spike_value, -0.10, "blue"), (soma_value, 0.10, "orange")):
+            ax.annotate(
+                f"{value:+.2f}",
+                (value, yy + offset),
+                textcoords="offset points",
+                xytext=(5, 0),
+                ha="left",
+                va="center",
+                fontsize=6,
+                color=OKABE_ITO[color],
+            )
     ax.set_yticks(y, labels=labels)
     ax.invert_yaxis()
-    ax.set_xlabel("signed teacher response")
-    ax.legend(loc="lower right")
+    ax.set_xlabel("Signed teacher response")
+    ax.legend(loc="lower left", bbox_to_anchor=(0.0, 1.0), ncol=2)
     ax.grid(True, axis="x", alpha=0.32)
 
     ax2 = fig.add_subplot(gs[0, 1])
@@ -1954,15 +2109,14 @@ def _plot_neuronio_matched_intervention_response(
             linewidth=0.7,
             zorder=4,
         )
-        ax2.text(intervened + 0.18, yy, f"{intervened:.2f}", va="center", fontsize=5.8)
+        ax2.text(max(base, intervened) + 0.25, yy, f"{intervened:.2f}", va="center", fontsize=6)
     ax2.set_yticks(y, labels=[])
     ax2.invert_yaxis()
-    ax2.set_xlabel("spike rate (Hz)")
+    ax2.set_xlabel("Spike rate (Hz)")
     ax2.scatter([], [], s=26, facecolor="white", edgecolor="#222222", label="baseline")
-    ax2.scatter(
-        [], [], s=30, color=OKABE_ITO["blue"], edgecolor="white", label="intervention"
-    )
-    ax2.legend(loc="lower right")
+    ax2.scatter([], [], s=30, color=OKABE_ITO["blue"], edgecolor="white", label="decrease")
+    ax2.scatter([], [], s=30, color=OKABE_ITO["red"], edgecolor="white", label="increase")
+    ax2.legend(loc="lower left", bbox_to_anchor=(0.0, 1.0), ncol=3)
     ax2.set_xlim(0, max(10.0, float(np.max(intervention)) + 1.2))
 
     ax3 = fig.add_subplot(gs[1, 1])
@@ -1990,8 +2144,8 @@ def _plot_neuronio_matched_intervention_response(
                 fontsize=5.6,
             )
     ax3.axhline(0.0, color="#222222", linewidth=0.65, alpha=0.55)
-    ax3.set_xlabel("mean |soma delta| (mV)")
-    ax3.set_ylabel("event-fraction delta (pp)")
+    ax3.set_xlabel("Mean |soma delta| (mV)")
+    ax3.set_ylabel("Event-fraction delta (pp)")
     ax3.grid(True, alpha=0.32)
     _add_panel_label(ax, "A")
     _add_panel_label(ax2, "B")

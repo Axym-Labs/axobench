@@ -160,6 +160,19 @@ def main(argv: list[str] | None = None) -> int:
     diagnostic_plots.add_argument("--output-dir", required=True)
     diagnostic_plots.add_argument("--formats", default="svg,pdf,png")
 
+    anatomy = subparsers.add_parser(
+        "error-anatomy",
+        help="break a cached prediction's errors down by spike outcome, spike distance, rate, band and morphology",
+    )
+    anatomy.add_argument("--cache", required=True, help="evaluation cache or NPZ with a 'prediction' array")
+    anatomy.add_argument(
+        "--targets", help="NPZ with 'target' and optional 'raw_soma_mv' and 'trace_ids' (default: the cache file)"
+    )
+    anatomy.add_argument("--output", required=True, help="output directory")
+    anatomy.add_argument("--ignore-start", type=int, help="default: the cache protocol's, else 500")
+    anatomy.add_argument("--calibration-fraction", type=float, help="default: the cache protocol's, else 0.25")
+    anatomy.add_argument("--formats", default="pdf,png")
+
     benchmark_v1 = subparsers.add_parser(
         "benchmark-v1",
         help="run the promoted v1 benchmark bundle on teacher QC plus paired interventions",
@@ -312,6 +325,15 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(manifest, indent=2, sort_keys=True))
         return 0
 
+    if args.command == "error-anatomy":
+        try:
+            summary = _run_error_anatomy(args)
+        except (FileNotFoundError, KeyError, ValueError) as error:
+            print(str(error))
+            return 2
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        return 0
+
     if args.command == "benchmark-v1":
         try:
             manifest = run_v1_benchmark_bundle(
@@ -427,6 +449,47 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     raise AssertionError(f"unhandled command {args.command}")
+
+
+def _run_error_anatomy(args) -> dict[str, object]:
+    from dataclasses import fields
+
+    from axobench.benchmark.error_anatomy import error_anatomy
+    from axobench.benchmark.iteration_evaluator import EvaluationConfig, _array_sha256
+    from axobench.benchmark.plots import plot_error_anatomy
+
+    with np.load(args.cache, allow_pickle=False) as cache:
+        prediction = np.asarray(cache["prediction"])
+        metadata = json.loads(str(cache["metadata_json"].item())) if "metadata_json" in cache.files else {}
+    with np.load(args.targets or args.cache, allow_pickle=False) as data:
+        if "target" not in data.files:
+            raise ValueError("no 'target' array; pass --targets")
+        target = np.asarray(data["target"])
+        raw = np.asarray(data["raw_soma_mv"]) if "raw_soma_mv" in data.files else None
+        trace_ids = [str(i) for i in data["trace_ids"]] if "trace_ids" in data.files else metadata.get("trace_ids")
+    if metadata.get("target_sha256") and _array_sha256(target) != metadata["target_sha256"]:
+        raise ValueError("targets do not match the cache's target_sha256")
+    if metadata.get("trace_ids") and trace_ids is not None and list(trace_ids) != list(metadata["trace_ids"]):
+        raise ValueError("target trace_ids do not match the cache's trace_ids")
+    names = {field.name for field in fields(EvaluationConfig)}
+    stored = {key: tuple(value) if isinstance(value, list) else value
+              for key, value in metadata.get("protocol", {}).get("config", {}).items() if key in names}
+    if args.ignore_start is not None:
+        stored["ignore_start"] = args.ignore_start
+    if args.calibration_fraction is not None:
+        stored["calibration_fraction"] = args.calibration_fraction
+    config = EvaluationConfig(**stored)
+    result = error_anatomy(prediction, target, raw_soma_mv=raw, trace_ids=trace_ids, config=config)
+    output = Path(args.output)
+    output.mkdir(parents=True, exist_ok=True)
+    (output / "error-anatomy.json").write_text(json.dumps(result, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+    figures = plot_error_anatomy(result, output / "error-anatomy", formats=_parse_suites(args.formats))
+    overall = result["overall"]
+    return {
+        "output": str(output / "error-anatomy.json"),
+        "figures": figures,
+        **{key: overall[key] for key in ("voltage_sera_skill", "voltage_sera_ceiling_skill", "voltage_sera_skill_of_ceiling", "subthreshold_skill", "mean_f1")},
+    }
 
 
 def _expand_globs(patterns: list[str]) -> list[Path]:
