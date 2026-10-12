@@ -7,6 +7,7 @@ from dataclasses import replace
 from threading import Lock
 
 import numpy as np
+import pytest
 
 from axobench import benchmark
 from axobench.benchmark import iteration_evaluator
@@ -109,6 +110,14 @@ def test_iteration_evaluator_is_available_from_public_benchmark_api() -> None:
     assert benchmark.write_evaluation_report is write_evaluation_report
 
 
+SKILL_IDS = (
+    "voltage_sera_skill",
+    "voltage_sera_ceiling_skill",
+    "voltage_sera_skill_of_ceiling",
+    "dynamics_sera_skill",
+)
+
+
 def test_perfect_predictions_clear_available_attention_rows() -> None:
     prediction, target, inputs, trace_ids = _ordinary_fixture()
     report = evaluate_predictions(
@@ -140,11 +149,18 @@ def test_perfect_predictions_clear_available_attention_rows() -> None:
         "response_sera_iron_per_spike_mv2",
         "subthreshold_skill",
         "dynamics_sera_iron_per_spike_mv2_per_ms2",
+        *SKILL_IDS,
     }
     assert {row["id"] for row in report["metrics"] if not row["core"]} == {
         "subthreshold_skill",
         "dynamics_sera_iron_per_spike_mv2_per_ms2",
+        *SKILL_IDS,
     }
+    assert metrics["voltage_sera_skill"]["value"] == 1.0
+    assert metrics["dynamics_sera_skill"]["value"] == 1.0
+    ceiling = metrics["voltage_sera_ceiling_skill"]["value"]
+    assert 0.0 < ceiling <= 1.0
+    assert metrics["voltage_sera_skill_of_ceiling"]["value"] == pytest.approx(1.0 / ceiling)
     (intervention,) = report["interventions"]
     assert intervention["response_sera_iron_per_spike_mv2"] == 0.0
     assert intervention["zero_response_sera_iron_per_spike_mv2"] > 0.0
@@ -217,11 +233,14 @@ def test_paired_comparison_identifies_consistent_candidate_improvement() -> None
         "response_sera_iron_per_spike_mv2",
         "subthreshold_skill",
         "dynamics_sera_iron_per_spike_mv2_per_ms2",
+        *SKILL_IDS,
     }
+    # The ceiling depends on the teacher only, so both models share it.
+    assert rows["voltage_sera_ceiling_skill"]["delta"] == 0.0
     assert all(
         row["assessment"] == "improved"
         for identifier, row in rows.items()
-        if identifier != "spike_f1_5ms"
+        if identifier not in {"spike_f1_5ms", "voltage_sera_ceiling_skill"}
     )
     assert rows["spike_f1_5ms"]["assessment"] == "uncertain"
     assert rows["voltage_sera_iron_per_spike_mv2"]["delta"] < 0.0
@@ -326,7 +345,7 @@ def test_paired_comparison_writes_json_and_tidy_csv(tmp_path) -> None:
     )
     with csv_path.open(newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
-    assert len(rows) == 9
+    assert len(rows) == 13
     assert sum(row["core"] == "True" for row in rows) == 7
     assert {row["assessment"] for row in rows} == {"uncertain"}
 
@@ -420,7 +439,7 @@ def test_report_format_is_deterministic_and_bounded() -> None:
     assert "dynamics_sera_iron_per_spike_mv2_per_ms2" in secondary
     assert "subthreshold_skill" in secondary
     assert "YES = early watch" in rendered
-    assert len(rendered.splitlines()) <= 49
+    assert len(rendered.splitlines()) <= 53
     assert rendered == format_evaluation_report(report)
 
 
@@ -667,7 +686,7 @@ def test_machine_readable_report_writes_json_or_tidy_csv_only_when_called(
     with csv_path.open(newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
     assert {row["row_type"] for row in rows} == {"metric", "diagnostic", "intervention"}
-    assert len([row for row in rows if row["row_type"] == "metric"]) == 9
+    assert len([row for row in rows if row["row_type"] == "metric"]) == 13
     assert len([row for row in rows if row["row_type"] == "diagnostic"]) == 24
     intervention_ids = [row["id"] for row in rows if row["row_type"] == "intervention"]
     assert intervention_ids == [

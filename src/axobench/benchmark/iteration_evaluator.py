@@ -16,6 +16,16 @@ The core metrics are Voltage SERA, subthreshold voltage RMSE (outside the
 cell-type-specific action-potential windows of teacher and predicted spikes,
 fixed by the teacher of the whole evaluated block), spike F1, and
 Response SERA. Subthreshold skill and Dynamics SERA are secondary rows.
+
+The secondary SERA skill rows compare SERA with that of a constant voltage,
+the mean -55 mV-clipped teacher voltage of the calibration traces:
+``voltage_sera_skill`` and ``dynamics_sera_skill`` are ``1 - SERA /
+SERA(constant)``. Most voltage SERA sits in action-potential windows, so a
+model that never emits action potentials (for example one trained on clipped
+voltage) cannot exceed ``voltage_sera_ceiling_skill``, the skill of the
+teacher clipped at -55 mV. The ceiling falls as the spike rate rises, so raw
+skill is not comparable across datasets with different rates;
+``voltage_sera_skill_of_ceiling`` divides it out.
 """
 
 from __future__ import annotations
@@ -37,19 +47,21 @@ from axobench.data import ShardedNeuronIODataset
 from axobench.metrics import (
     AP_POST_STEPS,
     AP_PRE_STEPS,
+    SOMA_CLIP_MV,
     ap_window_ends,
     iron_dynamics_sera,
     iron_voltage_sera,
     prevalence_matched_threshold,
     response_sera,
     response_sera_trace_terms,
+    sera_skill_trace_terms,
+    sera_skills,
     spike_event_confusion,
     spike_events,
     spike_f1_curve,
     subthreshold_voltage_error,
     subthreshold_voltage_trace_terms,
 )
-from axobench.relevance import iron_relevance, iron_threshold_weights
 
 DEFAULT_SINGLE_MORPHOLOGY_STANDARD_SAMPLES = 120
 DEFAULT_SINGLE_MORPHOLOGY_INTERVENTION_SAMPLES = 40
@@ -636,16 +648,7 @@ def evaluate_predictions(
     if cfg.ignore_start >= pred.shape[1]:
         raise ValueError("ignore_start leaves no timesteps to evaluate")
 
-    n_calibration = max(
-        1, min(pred.shape[0] - 1, round(pred.shape[0] * cfg.calibration_fraction))
-    )
-    calibration_scores = pred[:n_calibration, cfg.ignore_start :, 0]
-    calibration_labels = tgt[:n_calibration, cfg.ignore_start :, 0] > 0.5
-    finite_calibration = np.isfinite(calibration_scores)
-    threshold = prevalence_matched_threshold(
-        calibration_scores[finite_calibration],
-        int(calibration_labels[finite_calibration].sum()),
-    )
+    n_calibration, threshold = calibrate_spike_threshold(pred, tgt, cfg)
 
     score_slice = slice(n_calibration, None)
     pred_score = pred[score_slice, cfg.ignore_start :, :]
@@ -687,6 +690,17 @@ def evaluate_predictions(
         soma_scale=cfg.soma_scale,
         soma_bias_mv=cfg.soma_bias_mv,
         timestep_ms=cfg.timestep_ms,
+    )
+    skills = sera_skills(
+        sera_skill_trace_terms(
+            pred_score,
+            tgt_score,
+            reference_mv=sera_reference_voltage(tgt, raw_soma_mv, n_calibration, cfg),
+            raw_soma_mv=raw_score,
+            soma_scale=cfg.soma_scale,
+            soma_bias_mv=cfg.soma_bias_mv,
+            timestep_ms=cfg.timestep_ms,
+        )
     )
     ap_windows = _subthreshold_ap_windows(tgt, raw_soma_mv, ids, cfg)
     subthreshold = subthreshold_voltage_error(
@@ -760,6 +774,34 @@ def evaluate_predictions(
             iron_dynamics["dynamics_sera_iron_per_spike_mv2_per_ms2"],
             "mV^2/ms^2/spike",
             "IRon SERA/spike, phi(teacher dV/dt)",
+            core=False,
+        ),
+        _metric(
+            "voltage_sera_skill",
+            skills["voltage_sera_skill"],
+            "skill",
+            "1-SERA/SERA(const. calib. mean V)",
+            core=False,
+        ),
+        _metric(
+            "voltage_sera_ceiling_skill",
+            skills["voltage_sera_ceiling_skill"],
+            "skill",
+            "skill of teacher clipped at -55 mV",
+            core=False,
+        ),
+        _metric(
+            "voltage_sera_skill_of_ceiling",
+            skills["voltage_sera_skill_of_ceiling"],
+            "ratio",
+            "voltage SERA skill / ceiling skill",
+            core=False,
+        ),
+        _metric(
+            "dynamics_sera_skill",
+            skills["dynamics_sera_skill"],
+            "skill",
+            "1-SERA/SERA(const. V), dV/dt",
             core=False,
         ),
     ]
@@ -884,9 +926,7 @@ def compare_predictions(
     rows = []
     for identifier, candidate_metric in candidate_metrics.items():
         baseline_metric = baseline_metrics[identifier]
-        higher_is_better = identifier.startswith(
-            ("spike_f1", "spike_mean_f1")
-        ) or identifier == "subthreshold_skill"
+        higher_is_better = identifier.startswith(("spike_f1", "spike_mean_f1")) or "skill" in identifier
         candidate_value = candidate_metric["value"]
         baseline_value = baseline_metric["value"]
         delta = (
@@ -1414,13 +1454,7 @@ def _paired_metric_bootstrap(
     replicates: int,
     seed: int,
 ) -> dict[str, list[float]]:
-    calibration_count = max(
-        1,
-        min(
-            candidate.shape[0] - 1,
-            round(candidate.shape[0] * config.calibration_fraction),
-        ),
-    )
+    calibration_count = _calibration_count(candidate.shape[0], config)
     candidate_score = candidate[calibration_count:, config.ignore_start :, :]
     baseline_score = baseline[calibration_count:, config.ignore_start :, :]
     target_score = target[calibration_count:, config.ignore_start :, :]
@@ -1431,25 +1465,20 @@ def _paired_metric_bootstrap(
         candidate.shape[:2],
         "raw_soma_mv",
     )
-    target_mv = (
-        raw_score
-        if raw_score is not None
-        else target_score[..., 1] / config.soma_scale + config.soma_bias_mv
+    reference_mv = sera_reference_voltage(target, raw_soma_mv, calibration_count, config)
+    candidate_sera, baseline_sera = (
+        sera_skill_trace_terms(
+            prediction,
+            target_score,
+            reference_mv=reference_mv,
+            raw_soma_mv=raw_score,
+            soma_scale=config.soma_scale,
+            soma_bias_mv=config.soma_bias_mv,
+            timestep_ms=config.timestep_ms,
+        )
+        for prediction in (candidate_score, baseline_score)
     )
-    candidate_mv = candidate_score[..., 1] / config.soma_scale + config.soma_bias_mv
-    baseline_mv = baseline_score[..., 1] / config.soma_scale + config.soma_bias_mv
-    target_rate = np.diff(target_mv, axis=1) / config.timestep_ms
-    iron_voltage_weights = iron_threshold_weights(iron_relevance(target_mv))
-    iron_rate_weights = iron_threshold_weights(iron_relevance(target_rate))
-    trace_spikes = (target_score[..., 0] > 0.5).sum(axis=1).astype(np.float64)
-    candidate_iron_voltage = ((candidate_mv - target_mv) ** 2 * iron_voltage_weights).sum(axis=1)
-    baseline_iron_voltage = ((baseline_mv - target_mv) ** 2 * iron_voltage_weights).sum(axis=1)
-    candidate_iron_dynamics = (
-        (np.diff(candidate_mv, axis=1) / config.timestep_ms - target_rate) ** 2 * iron_rate_weights
-    ).sum(axis=1)
-    baseline_iron_dynamics = (
-        (np.diff(baseline_mv, axis=1) / config.timestep_ms - target_rate) ** 2 * iron_rate_weights
-    ).sum(axis=1)
+    trace_spikes = candidate_sera["teacher_spikes"].astype(np.float64)
 
     def _per_spike(values: np.ndarray, indices: np.ndarray) -> float:
         spikes = float(trace_spikes[indices].sum())
@@ -1524,17 +1553,30 @@ def _paired_metric_bootstrap(
         "response_sera_iron_per_spike_mv2": [],
         "subthreshold_skill": [],
         "dynamics_sera_iron_per_spike_mv2_per_ms2": [],
+        "voltage_sera_skill": [],
+        "voltage_sera_ceiling_skill": [],
+        "voltage_sera_skill_of_ceiling": [],
+        "dynamics_sera_skill": [],
     }
     rng = np.random.default_rng(seed)
     exact_step, tolerant_step = config.selected_f1_steps
     for _ in range(replicates):
         indices = _draw_stratified_bootstrap(ordinary_groups, rng)
         values["voltage_sera_iron_per_spike_mv2"].append(
-            _per_spike(candidate_iron_voltage, indices) - _per_spike(baseline_iron_voltage, indices)
+            _per_spike(candidate_sera["voltage"], indices)
+            - _per_spike(baseline_sera["voltage"], indices)
         )
         values["dynamics_sera_iron_per_spike_mv2_per_ms2"].append(
-            _per_spike(candidate_iron_dynamics, indices) - _per_spike(baseline_iron_dynamics, indices)
+            _per_spike(candidate_sera["dynamics"], indices)
+            - _per_spike(baseline_sera["dynamics"], indices)
         )
+        candidate_skills = sera_skills(candidate_sera, indices)
+        baseline_skills = sera_skills(baseline_sera, indices)
+        for key, value in candidate_skills.items():
+            other = baseline_skills[key]
+            values[key].append(
+                float("nan") if value is None or other is None else value - other
+            )
         rmse_delta, skill_delta = _subthreshold(indices)
         values["subthreshold_rmse_mv"].append(rmse_delta)
         values["subthreshold_skill"].append(skill_delta)
@@ -1564,6 +1606,51 @@ def _paired_metric_bootstrap(
             _bootstrap_response_delta(response_stats, rng)
         )
     return values
+
+
+def calibrate_spike_threshold(
+    prediction: np.ndarray, target: np.ndarray, config: EvaluationConfig
+) -> tuple[int, float]:
+    """Calibration trace count and spike threshold of :func:`evaluate_predictions`.
+
+    The first ``calibration_fraction`` of traces (at least one, leaving at
+    least one to score) set the threshold whose supra-threshold timestep
+    count matches their teacher spike count (scored steps only); the
+    remaining traces are scored.
+    """
+    pred = _as_traces(prediction, "prediction")
+    tgt = _as_traces(target, "target")
+    n_calibration = _calibration_count(pred.shape[0], config)
+    scores = pred[:n_calibration, config.ignore_start :, 0]
+    labels = tgt[:n_calibration, config.ignore_start :, 0] > 0.5
+    finite = np.isfinite(scores)
+    return n_calibration, prevalence_matched_threshold(scores[finite], int(labels[finite].sum()))
+
+
+def sera_reference_voltage(
+    target: np.ndarray,
+    raw_soma_mv: np.ndarray | None,
+    n_calibration: int,
+    config: EvaluationConfig,
+) -> float:
+    """Constant reference voltage of the SERA skill scores (mV).
+
+    The mean teacher voltage clipped at -55 mV over the scored steps of the
+    calibration traces, so it uses no scored trace.
+    """
+    teacher_mv = (
+        _slice_optional_2d(
+            raw_soma_mv, slice(0, n_calibration), config.ignore_start, target.shape[:2], "raw_soma_mv"
+        )
+        if raw_soma_mv is not None
+        else target[:n_calibration, config.ignore_start :, 1] / config.soma_scale
+        + config.soma_bias_mv
+    )
+    return float(np.mean(np.minimum(teacher_mv, SOMA_CLIP_MV)))
+
+
+def _calibration_count(traces: int, config: EvaluationConfig) -> int:
+    return max(1, min(traces - 1, round(traces * config.calibration_fraction)))
 
 
 def _subthreshold_ap_windows(

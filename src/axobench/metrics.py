@@ -121,13 +121,19 @@ def event_count_matched_threshold(scores: np.ndarray, positive_count: int, *, re
     return float(np.sort(heights)[::-1][positive_count - 1])
 
 
-def spike_event_confusion(
+def spike_event_matches(
     predicted_spikes: np.ndarray,
     target_spikes: np.ndarray,
     *,
     tolerance_steps: int,
-) -> dict[str, int]:
-    """One-to-one event confusion under a symmetric timing tolerance."""
+) -> np.ndarray:
+    """One-to-one event matches under a symmetric timing tolerance.
+
+    Events of each trace are paired in time order: a predicted and a target
+    event within `tolerance_steps` of each other are matched and both are
+    consumed. Returns an integer (matches, 3) array of (trace, predicted step,
+    target step).
+    """
     if tolerance_steps < 0:
         raise ValueError("tolerance_steps must be non-negative")
     pred = _as_2d(predicted_spikes) > 0.5
@@ -136,24 +142,36 @@ def spike_event_confusion(
         raise ValueError(
             f"predicted_spikes and target_spikes must match, got {pred.shape} and {tgt.shape}"
         )
-    tp = 0
-    pred_total = int(pred.sum())
-    target_total = int(tgt.sum())
+    matches = []
     for trace_index in range(pred.shape[0]):
         p_idx = np.flatnonzero(pred[trace_index])
         t_idx = np.flatnonzero(tgt[trace_index])
         i = j = 0
         while i < p_idx.size and j < t_idx.size:
-            delta = int(p_idx[i] - t_idx[j])
-            if abs(delta) <= tolerance_steps:
-                tp += 1
+            if abs(int(p_idx[i] - t_idx[j])) <= tolerance_steps:
+                matches.append((trace_index, int(p_idx[i]), int(t_idx[j])))
                 i += 1
                 j += 1
             elif p_idx[i] < t_idx[j] - tolerance_steps:
                 i += 1
             else:
                 j += 1
-    return {"tp": tp, "fp": pred_total - tp, "fn": target_total - tp}
+    return np.asarray(matches, dtype=np.int64).reshape(-1, 3)
+
+
+def spike_event_confusion(
+    predicted_spikes: np.ndarray,
+    target_spikes: np.ndarray,
+    *,
+    tolerance_steps: int,
+) -> dict[str, int]:
+    """One-to-one event confusion under a symmetric timing tolerance (:func:`spike_event_matches`)."""
+    tp = len(spike_event_matches(predicted_spikes, target_spikes, tolerance_steps=tolerance_steps))
+    return {
+        "tp": tp,
+        "fp": int((_as_2d(predicted_spikes) > 0.5).sum()) - tp,
+        "fn": int((_as_2d(target_spikes) > 0.5).sum()) - tp,
+    }
 
 
 def coincidence_factor(
@@ -336,6 +354,79 @@ def iron_dynamics_sera(
     }
 
 
+def sera_skill_trace_terms(
+    prediction: np.ndarray,
+    target: np.ndarray,
+    *,
+    reference_mv: float,
+    raw_soma_mv: np.ndarray | None = None,
+    soma_scale: float = 0.1,
+    soma_bias_mv: float = -67.7,
+    timestep_ms: float = 1.0,
+    ignore_start: int = 0,
+) -> dict[str, np.ndarray]:
+    """Per-trace IRon SERA areas behind the SERA skill scores.
+
+    Relevance is fit once on the pooled scored teacher, as in
+    :func:`iron_voltage_sera` and :func:`iron_dynamics_sera`. For each trace
+    the result holds the summed relevance area ``sum(e**2 * A(phi))`` of the
+    voltage error of the prediction (``voltage``), of the constant reference
+    `reference_mv` (``voltage_reference``), and of the teacher clipped at
+    `SOMA_CLIP_MV` (``voltage_ceiling``), the dV/dt areas of the prediction
+    (``dynamics``) and of the constant reference, whose rate is zero
+    (``dynamics_reference``), and the teacher spike count. Sums over any
+    subset of traces give that subset's skills (:func:`sera_skills`).
+    """
+    pred, tgt, raw = _prepare_prediction_target(
+        prediction, target, raw_soma_mv=raw_soma_mv, ignore_start=ignore_start
+    )
+    if pred.shape[1] < 2:
+        raise ValueError("SERA skill requires at least two scored timesteps")
+    pred_mv = pred[..., 1] / soma_scale + soma_bias_mv
+    target_mv = raw if raw is not None else tgt[..., 1] / soma_scale + soma_bias_mv
+    weights = iron_threshold_weights(iron_relevance(target_mv))
+    pred_rate = np.diff(pred_mv, axis=1) / timestep_ms
+    target_rate = np.diff(target_mv, axis=1) / timestep_ms
+    rate_weights = iron_threshold_weights(iron_relevance(target_rate))
+    return {
+        "voltage": np.sum((pred_mv - target_mv) ** 2 * weights, axis=1),
+        "voltage_reference": np.sum((reference_mv - target_mv) ** 2 * weights, axis=1),
+        "voltage_ceiling": np.sum(
+            (np.minimum(target_mv, SOMA_CLIP_MV) - target_mv) ** 2 * weights, axis=1
+        ),
+        "dynamics": np.sum((pred_rate - target_rate) ** 2 * rate_weights, axis=1),
+        "dynamics_reference": np.sum(target_rate**2 * rate_weights, axis=1),
+        "teacher_spikes": (tgt[..., 0] > 0.5).sum(axis=1).astype(np.int64),
+    }
+
+
+def sera_skills(terms: dict[str, np.ndarray], indices: np.ndarray | None = None) -> dict[str, float | None]:
+    """SERA skill scores from (a subset of) :func:`sera_skill_trace_terms`.
+
+    ``voltage_sera_skill = 1 - SERA / SERA(reference)``; SERA per spike shares
+    its relevance and spike count with the reference, so the ratio is a ratio
+    of summed areas. ``voltage_sera_ceiling_skill`` is the skill of the
+    clipped teacher, the best prediction without action potentials;
+    ``voltage_sera_skill_of_ceiling`` is their ratio. ``dynamics_sera_skill``
+    is the dV/dt analogue with the same constant reference.
+    """
+    sums = {key: float(np.sum(value if indices is None else value[indices])) for key, value in terms.items()}
+
+    def skill(area: str, reference: str) -> float | None:
+        return 1.0 - sums[area] / sums[reference] if sums[reference] > 0.0 else None
+
+    voltage = skill("voltage", "voltage_reference")
+    ceiling = skill("voltage_ceiling", "voltage_reference")
+    return {
+        "voltage_sera_skill": voltage,
+        "voltage_sera_ceiling_skill": ceiling,
+        "voltage_sera_skill_of_ceiling": (
+            voltage / ceiling if voltage is not None and ceiling else None
+        ),
+        "dynamics_sera_skill": skill("dynamics", "dynamics_reference"),
+    }
+
+
 def ap_window_mask(spikes: np.ndarray, post_steps: np.ndarray | None = None) -> np.ndarray:
     """Steps from `AP_PRE_STEPS` before to `post_steps` after each spike (inclusive).
 
@@ -420,7 +511,7 @@ def ap_window_ends(
     }
 
 
-def subthreshold_voltage_trace_terms(
+def subthreshold_voltage_point_terms(
     prediction: np.ndarray,
     target: np.ndarray,
     *,
@@ -433,7 +524,7 @@ def subthreshold_voltage_trace_terms(
     ignore_start: int = 0,
     timestep_ms: float = 1.0,
 ) -> dict[str, np.ndarray]:
-    """Per-trace terms of the subthreshold voltage error.
+    """Per-step terms of the subthreshold voltage error, on the scored steps.
 
     `prediction` and `target` cover the whole trace; `predicted_spikes` are the
     predicted spike events of the scored steps (``>= ignore_start``). Scored
@@ -441,9 +532,10 @@ def subthreshold_voltage_trace_terms(
     teacher or a predicted spike are excluded; the per-trace window ends
     `ap_post_steps` default to :func:`ap_window_ends` of the scored teacher
     steps of these traces. Both voltages are clipped from above at
-    `SOMA_CLIP_MV`. For each trace the result holds the summed squared
-    error, the same sum for the null prediction (the trace's mean clipped
-    teacher voltage over its retained steps), and the retained step count.
+    `SOMA_CLIP_MV`. The result holds the boolean ``keep`` mask of retained
+    steps, the clipped ``error`` (prediction minus teacher) and the clipped
+    teacher ``deviation`` from the null prediction (the trace's mean clipped
+    teacher voltage over its retained steps); both are zero where not kept.
     """
     pred, tgt, raw = _prepare_prediction_target(
         prediction, target, raw_soma_mv=raw_soma_mv, ignore_start=0
@@ -475,14 +567,31 @@ def subthreshold_voltage_trace_terms(
     )
     pred_mv = np.minimum(pred_mv, SOMA_CLIP_MV)
     target_mv = np.minimum(target_mv, SOMA_CLIP_MV)
-    count = keep.sum(axis=1)
-    null_mv = np.where(keep, target_mv, 0.0).sum(axis=1) / np.maximum(count, 1)
+    null_mv = np.where(keep, target_mv, 0.0).sum(axis=1) / np.maximum(keep.sum(axis=1), 1)
     return {
-        "squared_error": np.where(keep, (pred_mv - target_mv) ** 2, 0.0).sum(axis=1),
-        "null_squared_error": np.where(keep, (target_mv - null_mv[:, None]) ** 2, 0.0).sum(
-            axis=1
-        ),
-        "retained_points": count.astype(np.int64),
+        "keep": keep,
+        "error": np.where(keep, pred_mv - target_mv, 0.0),
+        "deviation": np.where(keep, target_mv - null_mv[:, None], 0.0),
+    }
+
+
+def subthreshold_voltage_trace_terms(
+    prediction: np.ndarray,
+    target: np.ndarray,
+    **kwargs: Any,
+) -> dict[str, np.ndarray]:
+    """Per-trace terms of the subthreshold voltage error.
+
+    Takes the arguments of :func:`subthreshold_voltage_point_terms`. For each
+    trace the result holds the summed squared error, the same sum for the
+    null prediction (the trace's mean clipped teacher voltage over its
+    retained steps), and the retained step count.
+    """
+    points = subthreshold_voltage_point_terms(prediction, target, **kwargs)
+    return {
+        "squared_error": np.sum(points["error"] ** 2, axis=1),
+        "null_squared_error": np.sum(points["deviation"] ** 2, axis=1),
+        "retained_points": points["keep"].sum(axis=1).astype(np.int64),
     }
 
 

@@ -12,14 +12,18 @@ from axobench.metrics import (
     iron_voltage_sera,
     response_sera,
     response_sera_trace_terms,
+    sera_skill_trace_terms,
+    sera_skills,
     soma_rmse,
     spike_auc,
     spike_event_confusion,
+    spike_event_matches,
     spike_f1_curve,
     event_count_matched_threshold,
     spike_event_peaks,
     spike_events,
     subthreshold_voltage_error,
+    subthreshold_voltage_point_terms,
     subthreshold_voltage_trace_terms,
 )
 
@@ -473,3 +477,61 @@ def test_subthreshold_error_uses_the_teacher_window_end():
         ap_post_steps=np.full(2, AP_POST_STEPS),
     )
     assert fixed["squared_error"][0] == pytest.approx(9.0)
+
+
+def test_sera_skill_is_one_for_perfect_and_zero_for_reference_prediction():
+    target, raw = _subthreshold_case()
+    reference = float(np.minimum(raw, -55.0).mean())
+    perfect = sera_skills(sera_skill_trace_terms(_with_voltage(target, raw), target, reference_mv=reference, raw_soma_mv=raw))
+    assert perfect["voltage_sera_skill"] == pytest.approx(1.0)
+    assert perfect["dynamics_sera_skill"] == pytest.approx(1.0)
+    ceiling = perfect["voltage_sera_ceiling_skill"]
+    assert 0.0 < ceiling < 1.0
+    assert perfect["voltage_sera_skill_of_ceiling"] == pytest.approx(1.0 / ceiling)
+
+    constant = sera_skills(
+        sera_skill_trace_terms(_with_voltage(target, np.full_like(raw, reference)), target, reference_mv=reference, raw_soma_mv=raw)
+    )
+    assert constant["voltage_sera_skill"] == pytest.approx(0.0)
+    assert constant["dynamics_sera_skill"] == pytest.approx(0.0)
+    assert constant["voltage_sera_skill_of_ceiling"] == pytest.approx(0.0)
+
+
+def test_sera_skill_of_clipped_teacher_is_the_ceiling():
+    target, raw = _subthreshold_case()
+    terms = sera_skill_trace_terms(
+        _with_voltage(target, np.minimum(raw, -55.0)), target, reference_mv=-70.0, raw_soma_mv=raw
+    )
+    skills = sera_skills(terms)
+    assert skills["voltage_sera_skill"] == pytest.approx(skills["voltage_sera_ceiling_skill"])
+    assert skills["voltage_sera_skill_of_ceiling"] == pytest.approx(1.0)
+    # The voltage area per spike is the reported Voltage SERA.
+    sera = iron_voltage_sera(_with_voltage(target, np.minimum(raw, -55.0)), target, raw_soma_mv=raw)
+    assert terms["voltage"].sum() / terms["teacher_spikes"].sum() == pytest.approx(sera["voltage_sera_iron_per_spike_mv2"])
+    # Subsets are ratios of summed trace areas.
+    first = sera_skills(terms, np.array([0]))
+    assert first["voltage_sera_skill"] == pytest.approx(1.0 - terms["voltage"][0] / terms["voltage_reference"][0])
+
+
+def test_spike_event_matches_pair_events_one_to_one():
+    predicted = np.zeros((2, 20))
+    target = np.zeros((2, 20))
+    predicted[0, [3, 4, 15]] = 1.0
+    target[0, [4, 10]] = 1.0
+    predicted[1, 7] = 1.0
+    target[1, 9] = 1.0
+    matches = spike_event_matches(predicted, target, tolerance_steps=2)
+    assert matches.tolist() == [[0, 3, 4], [1, 7, 9]]
+    assert spike_event_confusion(predicted, target, tolerance_steps=2) == {"tp": 2, "fp": 2, "fn": 1}
+
+
+def test_subthreshold_point_terms_sum_to_trace_terms():
+    target, raw = _subthreshold_case()
+    prediction = _with_voltage(target, raw + 1.0)
+    kwargs = dict(predicted_spikes=target[:, 5:, 0], raw_soma_mv=raw, ignore_start=5)
+    points = subthreshold_voltage_point_terms(prediction, target, **kwargs)
+    terms = subthreshold_voltage_trace_terms(prediction, target, **kwargs)
+    assert points["keep"].shape == (2, 55)
+    assert np.allclose((points["error"] ** 2).sum(axis=1), terms["squared_error"])
+    assert np.allclose(points["error"][points["keep"]], 1.0)
+    assert np.all(points["error"][~points["keep"]] == 0.0)
