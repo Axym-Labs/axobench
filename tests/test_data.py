@@ -111,6 +111,23 @@ def test_sharded_dataset_uses_manifest_without_opening_all_shards(tmp_path):
     assert dataset[1].sample_id == "manifest:1"
 
 
+def test_sharded_dataset_reads_manifest_shards_in_subfolders(tmp_path):
+    write_demo_shards(tmp_path / "cell_a", shard_count=1, samples_per_shard=2, time_steps=4, input_dim=3, seed=5)
+    manifest = {
+        "version": 1,
+        "shards": [
+            {"file": "cell_a/demo_000.npz", "count": 2, "sample_ids": ["cell_a:0", "cell_a:1"]},
+            {"file": "cell_b/missing.npz", "count": 1, "sample_ids": ["cell_b:0"]},
+        ],
+    }
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    dataset = ShardedNeuronIODataset(tmp_path)
+
+    assert len(dataset) == 2
+    assert dataset[1].sample_id == "cell_a:1"
+
+
 def test_repack_shards_as_npy_preserves_samples(tmp_path):
     source_dir = tmp_path / "source"
     repacked_dir = tmp_path / "repacked"

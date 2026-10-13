@@ -26,6 +26,32 @@ experiments stay in the separate AxoSim model repository. AxoBench evaluates
 caller-supplied prediction functions or stored prediction/diagnostic artifacts;
 it does not ship BranchELM, Mamba, RNN, or training code.
 
+## Download the data
+
+The benchmark lives on the Hugging Face Hub as
+[`Axym-Labs/axobench-v2`](https://huggingface.co/datasets/Axym-Labs/axobench-v2):
+15 layer-5 cells (14 Allen all-active models and the NeuronIO cell, 3 of them
+held out), train/val/test splits and paired interventions at three doses each.
+Each variant is a folder of that repository; `minimal` (2,000 training traces
+per cell, 14.6 GB) is released, and larger variants will sit beside it. The
+population-context corpus is
+[`Axym-Labs/axobench-population`](https://huggingface.co/datasets/Axym-Labs/axobench-population).
+`download-data` fetches the requested folders of a variant together with its
+cell index into the dataset-root layout the evaluator reads:
+
+```bash
+axobench download-data                          # minimal: val + all interventions (~6 GB)
+axobench download-data --splits train,val,test  # minimal training corpus
+axobench download-data --interventions inh_dropout,temporal_jitter_j8
+axobench download-data --population             # population-context corpus
+```
+
+The same is available from Python as `axobench.hub.download_dataset` and
+`download_population_dataset`. Data goes to `$AXOBENCH_DATA_DIR/v2/<variant>`
+(default `~/.cache/axobench/v2/minimal`) unless `--output` is given. Complete
+folders are skipped, so repeated calls work offline, and `--revision` pins a
+Hub commit.
+
 ## Population-context extension
 
 The population-context route preserves source identity, E/I role, causal
@@ -57,16 +83,17 @@ selection.
 ## Iterative Model Evaluation
 
 `evaluate_model` accepts any batched NumPy prediction callable and a v1-style
-dataset root. It calibrates the spike threshold on a held-out fraction of the
-selected validation traces, computes the core metric set, evaluates available
-paired interventions, and returns a fixed 24-row attention panel.
+dataset root; when `dataset_root` is omitted, the validation split and the
+requested interventions are downloaded on first use. It calibrates the spike
+threshold on a held-out fraction of the selected validation traces, computes
+the core metric set, evaluates available paired interventions, and returns a
+fixed 24-row attention panel.
 
 ```python
 from axobench.benchmark import EvaluationConfig, evaluate_model, format_evaluation_report
 
 report = evaluate_model(
     predict,
-    dataset_root="data/axobench-v1",
     model_id="candidate-17",
     config=EvaluationConfig(default_spike_threshold=0.0),
 )
