@@ -213,6 +213,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--worker-intervention", choices=INTERVENTION_CONDITIONS, help=argparse.SUPPRESS)
     parser.add_argument("--worker-intervention-dose", type=float, help=argparse.SUPPRESS)
     parser.add_argument("--worker-samples", type=int, help=argparse.SUPPRESS)
+    parser.add_argument("--worker-input-file", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--worker-shard-index", type=int, help=argparse.SUPPRESS)
     return parser
 
@@ -694,6 +695,8 @@ def run_tasks(tasks: list[dict[str, Any]], parallelism: int, stop_file: Path | N
                 if task["intervention"]:
                     cmd += ["--worker-intervention", task["intervention"],
                             "--worker-intervention-dose", str(task.get("intervention_dose", DEFAULT_DOSE[task["intervention"]]))]
+                if task.get("input_file"):
+                    cmd += ["--worker-input-file", task["input_file"]]
                 if task["coreneuron_gpu"]:
                     cmd += ["--coreneuron-gpu"]
                 env = os.environ.copy()
@@ -737,7 +740,7 @@ def task_is_complete(task: dict[str, Any]) -> bool:
         and meta.get("morphology_id") == task["morphology_id"]
         and int(meta.get("samples", -1)) == int(task["samples"])
         and meta.get("teacher_balance_label") == task["teacher_balance_label"]
-        and meta.get("input_event_policy") == "source_neuronio_sampler_unmodified"
+        and meta.get("input_event_policy") == task.get("input_event_policy", "source_neuronio_sampler_unmodified")
         and abs(float(meta.get("exc_gmax_scale", float("nan"))) - float(task["exc_gmax_scale"])) < 1e-12
         and abs(float(meta.get("inh_gmax_scale", float("nan"))) - float(task["inh_gmax_scale"])) < 1e-12
         and _generator_matches(meta, task)
@@ -781,7 +784,22 @@ def worker_main(args: argparse.Namespace) -> int:
     intervention_soma = []
     changed_masks = []
     sample_ids = []
+    supplied = None
+    if args.worker_input_file is not None:
+        # Replay supplied inputs (e.g. recorded population contexts) instead of sampling them; every other
+        # array in the file is carried through to the shard unchanged.
+        if args.worker_kind != "split":
+            raise ValueError("--worker-input-file supports split shards only")
+        with np.load(args.worker_input_file, allow_pickle=False) as data:
+            supplied = {key: data[key] for key in data.files}
+        if int(supplied["inputs"].shape[0]) != int(args.worker_samples):
+            raise ValueError(f"{args.worker_input_file} holds {supplied['inputs'].shape[0]} traces, "
+                             f"expected {args.worker_samples}")
     for sample_index in range(args.worker_samples):
+        if supplied is not None:
+            baseline_inputs.append(supplied["inputs"][sample_index].astype(np.int8, copy=False))
+            sample_ids.append(str(supplied["sample_ids"][sample_index]))
+            continue
         sample_seed = int(rng.integers(0, np.iinfo(np.int32).max))
         signed_inputs = sample_signed_inputs(
             setup["source_segment_types"],
@@ -836,6 +854,7 @@ def worker_main(args: argparse.Namespace) -> int:
             soma_mv=np.stack(baseline_soma).astype(np.float32, copy=False),
             sample_ids=np.asarray(sample_ids),
             **high_res,
+            **{key: value for key, value in (supplied or {}).items() if key not in ("inputs", "sample_ids")},
         )
     else:
         arrays = dict(
@@ -859,7 +878,8 @@ def worker_main(args: argparse.Namespace) -> int:
         "duration_ms": int(args.duration_ms),
         "elapsed_seconds": time.perf_counter() - started,
         "teacher_balance_label": args.teacher_balance_label,
-        "input_event_policy": "source_neuronio_sampler_unmodified",
+        "input_event_policy": "source_neuronio_sampler_unmodified" if supplied is None else "supplied_inputs",
+        "input_file_sha256": None if supplied is None else _sha256(args.worker_input_file),
         "exc_gmax_scale": float(args.exc_gmax_scale),
         "inh_gmax_scale": float(args.inh_gmax_scale),
         "morphology_id": args.worker_morphology_id,
