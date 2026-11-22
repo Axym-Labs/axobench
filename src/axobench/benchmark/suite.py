@@ -21,6 +21,7 @@ from typing import Any
 
 import numpy as np
 
+from axobench import __version__
 from axobench.benchmark.perturbation_stability import compute_perturbation_stability
 from axobench.benchmark.regime_stratified import compute_regime_stratified_metrics
 from axobench.benchmark.state_metrics import compute_state_conditioned_metrics
@@ -219,7 +220,7 @@ class BenchmarkSuite:
             )
 
         results = {
-            "benchmark_version": "0.2.1",
+            "benchmark_version": __version__,
             "metadata": metadata,
             "m1_trace_fidelity": m1,
             "m1b_feature_fidelity": m1b,

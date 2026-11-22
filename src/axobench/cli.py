@@ -49,7 +49,9 @@ def main(argv: list[str] | None = None) -> int:
         "(or .../population with --population)",
     )
     download.add_argument("--variant", default="minimal", help="AxoBench v2 variant: minimal (default) or full")
-    download.add_argument("--splits", help="comma-separated splits; default val (train,val with --population)")
+    download.add_argument(
+        "--splits", help="comma-separated splits or 'none'; default val (train,val with --population)"
+    )
     download.add_argument(
         "--interventions",
         default="all",
@@ -391,10 +393,11 @@ def main(argv: list[str] | None = None) -> int:
                 )
             else:
                 interventions = _parse_suites(args.interventions)
+                splits = _parse_suites(args.splits or "val")
                 root = download_dataset(
                     args.output,
                     variant=args.variant,
-                    splits=_parse_suites(args.splits or "val"),
+                    splits=() if splits == ("none",) else splits,
                     interventions=(
                         None if interventions == ("none",)
                         else "all" if interventions == ("all",)

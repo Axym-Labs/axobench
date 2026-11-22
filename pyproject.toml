@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "axobench"
-version = "0.2.1"
+version = "0.2.2"
 description = "Single-neuron surrogate benchmark and dataset generation workbench."
 readme = "README.md"
 license = "Apache-2.0 AND BSD-3-Clause"
@@ -36,7 +36,7 @@ axobench = "axobench.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-"axobench.generation" = ["assets/*.swc", "assets/*.json", "mechanisms/*.mod"]
+"axobench.generation" = ["assets/*.swc", "assets/*.json", "assets/*.mod", "mechanisms/*.mod"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

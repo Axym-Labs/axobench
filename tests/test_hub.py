@@ -151,3 +151,13 @@ def test_cli_download_data(tmp_path, fake_hub, capsys):
     assert [call["repo_id"] for call in fake_hub.calls] == [hub.REPO_ID]
 
     assert main(["download-data", "--output", str(tmp_path), "--splits", "private-test"]) == 2
+
+
+def test_cli_download_interventions_only(tmp_path, fake_hub):
+    argv = ["download-data", "--output", str(tmp_path), "--variant", "full", "--splits", "none",
+            "--interventions", "temporal_jitter_j1"]
+
+    assert main(argv) == 0
+    patterns = fake_hub.calls[0]["allow_patterns"]
+    assert "full/interventions/temporal_jitter_j1/*" in patterns
+    assert not any(p.startswith(f"full/{split}/") for p in patterns for split in hub.PUBLIC_SPLITS)

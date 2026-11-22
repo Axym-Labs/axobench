@@ -45,7 +45,7 @@ cell index into the dataset-root layout the evaluator reads:
 axobench download-data                          # minimal: val + all interventions (~6 GB)
 axobench download-data --splits train,val,test  # minimal training corpus
 axobench download-data --variant full --splits train  # full training corpus
-axobench download-data --interventions inh_dropout,temporal_jitter_j8
+axobench download-data --splits none --interventions inh_dropout,temporal_jitter_j8
 axobench download-data --population             # population-context corpus
 ```
 
