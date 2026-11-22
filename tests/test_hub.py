@@ -61,6 +61,16 @@ def test_download_dataset_builds_variant_layout(tmp_path, fake_hub):
     assert len(hub.INTERVENTION_FOLDERS) == 3 * len(INTERVENTION_CONDITIONS)
 
 
+def test_download_dataset_selects_full_variant(tmp_path, fake_hub):
+    root = hub.download_dataset(tmp_path, variant="full", splits=("train",), interventions=None)
+
+    assert root == tmp_path / "full"
+    patterns = fake_hub.calls[0]["allow_patterns"]
+    assert "full/train/*" in patterns and "full/morphologies/*" in patterns
+    assert not any(p.startswith("minimal/") for p in patterns)
+    assert hub.folder_is_complete(root / "train")
+
+
 def test_download_dataset_expands_conditions_to_doses(tmp_path, fake_hub):
     hub.download_dataset(tmp_path, splits=(), interventions=("inh_dropout", "temporal_jitter_j8"))
 

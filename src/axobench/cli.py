@@ -48,7 +48,7 @@ def main(argv: list[str] | None = None) -> int:
         help="download directory; the data land in <output>/<variant>; defaults to $AXOBENCH_DATA_DIR/v2 "
         "(or .../population with --population)",
     )
-    download.add_argument("--variant", default="minimal", help="AxoBench v2 variant (default minimal)")
+    download.add_argument("--variant", default="minimal", help="AxoBench v2 variant: minimal (default) or full")
     download.add_argument("--splits", help="comma-separated splits; default val (train,val with --population)")
     download.add_argument(
         "--interventions",

@@ -29,11 +29,13 @@ it does not ship BranchELM, Mamba, RNN, or training code.
 ## Download the data
 
 The benchmark lives on the Hugging Face Hub as
-[`Axym-Labs/axobench-v2`](https://huggingface.co/datasets/Axym-Labs/axobench-v2):
+[`Axym-Labs/axobench`](https://huggingface.co/datasets/Axym-Labs/axobench):
 15 layer-5 cells (14 Allen all-active models and the NeuronIO cell, 3 of them
 held out), train/val/test splits and paired interventions at three doses each.
-Each variant is a folder of that repository; `minimal` (2,000 training traces
-per cell, 14.6 GB) is released, and larger variants will sit beside it. The
+Each variant is a folder of that repository: `minimal` (2,000 training traces
+per cell, 14.6 GB) and `full` (8,000 per cell, 35.6 GB). `full` contains
+every `minimal` shard, and both share the same val, test and intervention
+shards, so their scores are comparable. The
 population-context corpus is
 [`Axym-Labs/axobench-population`](https://huggingface.co/datasets/Axym-Labs/axobench-population).
 `download-data` fetches the requested folders of a variant together with its
@@ -42,6 +44,7 @@ cell index into the dataset-root layout the evaluator reads:
 ```bash
 axobench download-data                          # minimal: val + all interventions (~6 GB)
 axobench download-data --splits train,val,test  # minimal training corpus
+axobench download-data --variant full --splits train  # full training corpus
 axobench download-data --interventions inh_dropout,temporal_jitter_j8
 axobench download-data --population             # population-context corpus
 ```

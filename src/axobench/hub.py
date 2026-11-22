@@ -1,7 +1,8 @@
 """Download the public AxoBench datasets from the Hugging Face Hub.
 
-AxoBench v2 is one Hub repository with one folder per variant (``minimal/``
-now; larger variants are added beside it). ``download_dataset`` fetches the
+AxoBench v2 is one Hub repository with one folder per variant: ``minimal/``
+(2,000 training traces per cell) and ``full/`` (8,000; the same val, test and
+intervention shards). ``download_dataset`` fetches the
 requested folders of a variant together with its cell index, giving the layout
 that ``V1DatasetLayout`` and ``evaluate_model`` expect::
 
@@ -28,10 +29,10 @@ from typing import Literal
 from axobench.benchmark.dataset_schema import INTERVENTION_CONDITIONS
 
 
-REPO_ID = "Axym-Labs/axobench-v2"
+REPO_ID = "Axym-Labs/axobench"
 POPULATION_REPO_ID = "Axym-Labs/axobench-population"
 
-VARIANTS = ("minimal",)
+VARIANTS = ("minimal", "full")
 DEFAULT_VARIANT = "minimal"
 INTERVENTION_DOSES: dict[str, tuple[str, ...]] = {
     "event_dropout": ("p10", "p35", "p70"),
