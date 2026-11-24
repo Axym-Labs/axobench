@@ -22,7 +22,10 @@ from axobench.metrics import (
     event_count_matched_threshold,
     spike_event_peaks,
     spike_events,
+    metric_set,
     subthreshold_voltage_error,
+    voltage_event_steps,
+    voltage_event_thresholds,
     subthreshold_voltage_point_terms,
     subthreshold_voltage_trace_terms,
 )
@@ -535,3 +538,51 @@ def test_subthreshold_point_terms_sum_to_trace_terms():
     assert np.allclose((points["error"] ** 2).sum(axis=1), terms["squared_error"])
     assert np.allclose(points["error"][points["keep"]], 1.0)
     assert np.all(points["error"][~points["keep"]] == 0.0)
+
+
+def _metric_set_case(traces: int = 4, steps: int = 3000, seed: int = 0):
+    rng = np.random.default_rng(seed)
+    voltage = -70.0 + np.cumsum(rng.normal(0.0, 0.3, (traces, steps)), axis=1) * 0.1
+    spikes = np.zeros((traces, steps), dtype=bool)
+    spikes[:, [800, 1500, 2400]] = True
+    voltage[spikes] += 80.0
+    scores = np.where(spikes, 5.0, -5.0)
+    return scores, voltage, spikes
+
+
+def test_metric_set_is_perfect_for_the_true_output():
+    scores, voltage, spikes = _metric_set_case()
+    result = metric_set(scores, voltage, spikes, voltage, spike_threshold=0.0)
+    assert result["mean_f1"] == pytest.approx(1.0)
+    assert result["event_error_mv"] == pytest.approx(0.0)
+    assert result["subthreshold_error_mv"] == pytest.approx(0.0)
+
+
+def test_missing_action_potential_raises_only_the_event_error():
+    scores, voltage, spikes = _metric_set_case()
+    predicted = voltage.copy()
+    predicted[spikes] -= 80.0
+    result = metric_set(scores, predicted, spikes, voltage, spike_threshold=0.0)
+    assert result["event_error_mv"] > 1.0
+    assert result["subthreshold_error_mv"] == pytest.approx(0.0)
+
+
+def test_event_and_subthreshold_error_recombine_to_the_rmse():
+    scores, voltage, spikes = _metric_set_case()
+    predicted = voltage * 0.9 + 1.0
+    result = metric_set(scores, predicted, spikes, voltage, spike_threshold=0.0)
+    share = result["event_share"]
+    rmse2 = np.mean((predicted[:, 500:] - voltage[:, 500:]) ** 2)
+    assert share * result["event_error_mv"] ** 2 + (1 - share) * result[
+        "subthreshold_error_mv"
+    ] ** 2 == pytest.approx(rmse2)
+
+
+def test_event_steps_cover_spike_windows_and_rare_voltages_with_fixed_thresholds():
+    _, voltage, spikes = _metric_set_case()
+    thresholds = voltage_event_thresholds(voltage[:, 500:], spikes[:, 500:])
+    events = voltage_event_steps(voltage[:, 500:], spikes[:, 500:], thresholds)
+    assert events[:, 300 - 5 : 300 + 6].all()
+    assert 0.01 < events.mean() < 0.05
+    shifted = voltage[:, 500:] + 5.0
+    assert voltage_event_steps(shifted, spikes[:, 500:], thresholds).mean() > 0.5

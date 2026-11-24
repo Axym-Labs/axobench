@@ -83,6 +83,28 @@ the morphology-conditioned firing-rate criterion on three held-out
 connectomes, which is why connected diagnostics remain part of model
 selection.
 
+## Metric set
+
+Mean F1, event error and subthreshold error for the traces of one neuron (arrays of shape
+`(traces, steps)` at 1 ms, voltages in mV):
+
+```python
+from axobench.metrics import event_count_matched_threshold, metric_set, voltage_event_thresholds
+
+# spike threshold: as many predicted events as true spikes on validation traces
+threshold = event_count_matched_threshold(val_scores[:, 500:], int(val_spikes[:, 500:].sum()))
+# event thresholds: once per neuron, from its unchanged test traces
+event_thresholds = voltage_event_thresholds(test_mv[:, 500:], test_spikes[:, 500:])
+result = metric_set(scores, predicted_mv, test_spikes, test_mv,
+                    spike_threshold=threshold, event_thresholds=event_thresholds)
+result["mean_f1"], result["event_error_mv"], result["subthreshold_error_mv"]
+```
+
+Event steps are the steps within 5 ms of a true spike and the steps at which the true voltage
+is in its top or bottom 0.5% or its absolute change in its top 0.5%. The event error is the
+RMSE on these steps and the subthreshold error the RMSE on all other steps. For
+out-of-distribution traces, pass the thresholds of the neuron's unchanged test traces.
+
 ## Iterative Model Evaluation
 
 `evaluate_model` accepts any batched NumPy prediction callable and a v1-style

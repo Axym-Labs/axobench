@@ -756,6 +756,130 @@ def response_sera(
     }
 
 
+EVENT_WINDOW_STEPS = 5
+EVENT_QUANTILE = 0.995
+
+
+def spike_window_mask(spikes: np.ndarray, window_steps: int = EVENT_WINDOW_STEPS) -> np.ndarray:
+    """Steps within `window_steps` of a true spike, per trace."""
+    spk = _as_2d(spikes) > 0.5
+    mask = spk.copy()
+    for k in range(1, min(window_steps, spk.shape[1] - 1) + 1):
+        mask[:, :-k] |= spk[:, k:]
+        mask[:, k:] |= spk[:, :-k]
+    return mask
+
+
+def _absolute_change(voltage_mv: np.ndarray) -> np.ndarray:
+    return np.abs(np.diff(voltage_mv, axis=1, prepend=voltage_mv[:, :1]))
+
+
+def voltage_event_thresholds(
+    voltage_mv: np.ndarray,
+    spikes: np.ndarray,
+    *,
+    quantile: float = EVENT_QUANTILE,
+    window_steps: int = EVENT_WINDOW_STEPS,
+) -> tuple[float, float, float]:
+    """(high, low, change) thresholds of one neuron from its unchanged test traces.
+
+    They are the `quantile` and ``1 - quantile`` quantiles of the true voltage
+    and the `quantile` quantile of its absolute change from the previous step,
+    over the steps outside the spike windows. Pass the evaluated steps only
+    (AxoBench drops the first 500 ms of each trace).
+    """
+    v = _as_2d(np.asarray(voltage_mv, dtype=np.float64))
+    rest = ~spike_window_mask(spikes, window_steps)
+    return (
+        float(np.quantile(v[rest], quantile)),
+        float(np.quantile(v[rest], 1.0 - quantile)),
+        float(np.quantile(_absolute_change(v)[rest], quantile)),
+    )
+
+
+def voltage_event_steps(
+    voltage_mv: np.ndarray,
+    spikes: np.ndarray,
+    thresholds: tuple[float, float, float] | None = None,
+    *,
+    window_steps: int = EVENT_WINDOW_STEPS,
+) -> np.ndarray:
+    """Event steps of the true output: in a spike window, or voltage at or
+    beyond the high or low threshold, or absolute change at or above the change
+    threshold. Without `thresholds`, the traces are taken to be the neuron's
+    unchanged test traces and the thresholds are computed from them. The
+    prediction plays no role.
+    """
+    v = _as_2d(np.asarray(voltage_mv, dtype=np.float64))
+    high, low, fast = (
+        voltage_event_thresholds(v, spikes, window_steps=window_steps)
+        if thresholds is None
+        else thresholds
+    )
+    return spike_window_mask(spikes, window_steps) | (v >= high) | (v <= low) | (_absolute_change(v) >= fast)
+
+
+def event_and_subthreshold_error(
+    predicted_mv: np.ndarray, target_mv: np.ndarray, event_steps: np.ndarray
+) -> dict[str, float | None]:
+    """Event error and subthreshold error in mV, pooled over all given steps.
+
+    The event error is the RMSE of the predicted against the true unclipped
+    voltage on the event steps, the subthreshold error the RMSE on all other
+    steps, so ``rmse^2 = share * event^2 + (1 - share) * subthreshold^2`` with
+    ``share`` the fraction of event steps.
+    """
+    squared = (
+        _as_2d(np.asarray(predicted_mv, dtype=np.float64))
+        - _as_2d(np.asarray(target_mv, dtype=np.float64))
+    ) ** 2
+    events = _as_2d(event_steps).astype(bool)
+    if squared.shape != events.shape:
+        raise ValueError(f"voltages and event_steps must match, got {squared.shape} and {events.shape}")
+    return {
+        "event_error_mv": float(np.sqrt(squared[events].mean())) if events.any() else None,
+        "subthreshold_error_mv": float(np.sqrt(squared[~events].mean())) if (~events).any() else None,
+        "event_share": float(events.mean()),
+    }
+
+
+def metric_set(
+    spike_scores: np.ndarray,
+    predicted_mv: np.ndarray,
+    target_spikes: np.ndarray,
+    target_mv: np.ndarray,
+    *,
+    spike_threshold: float,
+    event_thresholds: tuple[float, float, float] | None = None,
+    ignore_start: int = 500,
+) -> dict[str, Any]:
+    """The AxoBench metric set for traces of one neuron at 1 ms: Mean F1, event
+    error and subthreshold error.
+
+    `spike_threshold` is fitted on validation traces
+    (:func:`event_count_matched_threshold`). `event_thresholds` are the
+    neuron's thresholds from its unchanged test traces
+    (:func:`voltage_event_thresholds`); leave them out only when the given
+    traces are those traces. The first `ignore_start` steps are not evaluated.
+    """
+    scores = _as_2d(np.asarray(spike_scores, dtype=np.float64))[:, ignore_start:]
+    spikes = _as_2d(target_spikes)[:, ignore_start:] > 0.5
+    predicted = _as_2d(np.asarray(predicted_mv, dtype=np.float64))[:, ignore_start:]
+    target = _as_2d(np.asarray(target_mv, dtype=np.float64))[:, ignore_start:]
+    if event_thresholds is None:
+        event_thresholds = voltage_event_thresholds(target, spikes)
+    spike = spike_f1_curve(scores, spikes, threshold=float(spike_threshold))
+    voltage = event_and_subthreshold_error(
+        predicted, target, voltage_event_steps(target, spikes, event_thresholds)
+    )
+    return {
+        "mean_f1": spike["mean_f1"],
+        **voltage,
+        "event_thresholds": tuple(float(t) for t in event_thresholds),
+        "spike_f1_curve": spike["rows"],
+    }
+
+
 def compute_core_metric_set(
     prediction: np.ndarray,
     target: np.ndarray,
