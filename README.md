@@ -35,14 +35,16 @@ held out), train/val/test splits and paired interventions at three doses each.
 Each variant is a folder of that repository: `minimal` (2,000 training traces
 per cell, 14.6 GB) and `full` (8,000 per cell, 35.6 GB). `full` contains
 every `minimal` shard, and both share the same val, test and intervention
-shards, so their scores are comparable. The
+shards, so their scores are comparable. The paired out-of-distribution tests
+are in the folder `ood/` of each variant (`interventions/` up to the tags
+`minimal-v2.0` and `full-v2.0`; the package reads both). The
 population-context corpus is
 [`Axym-Labs/axobench-population`](https://huggingface.co/datasets/Axym-Labs/axobench-population).
 `download-data` fetches the requested folders of a variant together with its
 cell index into the dataset-root layout the evaluator reads:
 
 ```bash
-axobench download-data                          # minimal: val + all interventions (~6 GB)
+axobench download-data                          # minimal: val + all out-of-distribution pairs (~6 GB)
 axobench download-data --splits train,val,test  # minimal training corpus
 axobench download-data --variant full --splits train  # full training corpus
 axobench download-data --splits none --interventions inh_dropout,temporal_jitter_j8
@@ -74,10 +76,8 @@ histories are replayed through biophysical teachers, so the labels are
 counterfactual teacher responses rather than a fully biophysical closed loop.
 AxoBench Population is available from
 [Axym-Labs/axobench-population](https://huggingface.co/datasets/Axym-Labs/axobench-population).
-Paired causal perturbations are released separately as
-[Axym-Labs/axobench-interventions](https://huggingface.co/datasets/Axym-Labs/axobench-interventions)
-so ordinary benchmark and population users do not need to download
-intervention shards.
+Paired out-of-distribution tests are part of the main dataset
+([Axym-Labs/axobench](https://huggingface.co/datasets/Axym-Labs/axobench), folder `ood/`).
 A fixed training recipe improves held-out trace metrics but does not improve
 the morphology-conditioned firing-rate criterion on three held-out
 connectomes, which is why connected diagnostics remain part of model

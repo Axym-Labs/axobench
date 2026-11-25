@@ -17,6 +17,8 @@ import numpy as np
 from matplotlib.lines import Line2D
 from matplotlib.patches import FancyArrowPatch, Rectangle
 
+from axobench.benchmark.dataset_schema import ood_root
+
 PLOT_FORMATS = ("svg", "pdf", "png")
 _PAPER_STYLE_ENV = os.environ.get("AXOBENCH_PAPER_STYLE")
 PAPER_STYLE = Path(_PAPER_STYLE_ENV).expanduser() if _PAPER_STYLE_ENV else None
@@ -2173,7 +2175,7 @@ def _plot_neuronio_intervention_trace_examples(
     records = []
     for intervention, label in examples:
         record = _load_representative_intervention_trace(
-            root / "interventions" / intervention
+            ood_root(root) / intervention
         )
         if record is not None:
             record["label"] = label

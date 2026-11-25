@@ -44,6 +44,7 @@ from typing import Any
 
 import numpy as np
 
+from axobench.benchmark.dataset_schema import ood_root
 from axobench.data import ShardedNeuronIODataset
 from axobench.metrics import (
     AP_POST_STEPS,
@@ -1901,7 +1902,7 @@ def _run_dataset_interventions(
     multiple_morphologies: bool,
     morphology_id: str | None,
 ) -> list[PairedInterventionPredictions]:
-    interventions_root = root / "interventions"
+    interventions_root = ood_root(root)
     if not interventions_root.exists() or max_interventions == 0:
         return []
     requested = set(intervention_names) if intervention_names is not None else None

@@ -7,7 +7,7 @@ requested folders of a variant together with its cell index, giving the layout
 that ``V1DatasetLayout`` and ``evaluate_model`` expect::
 
     <root>/<variant>/train/<cell>/  .../val/<cell>/  .../test/<cell>/
-    <root>/<variant>/interventions/<condition>_<dose>/
+    <root>/<variant>/ood/<condition>_<dose>/
     <root>/<variant>/morphologies.json  .../morphologies/
 
 Split shards sit in one folder per cell (the Hub allows 10,000 files per
@@ -26,7 +26,7 @@ from pathlib import Path
 import sys
 from typing import Literal
 
-from axobench.benchmark.dataset_schema import INTERVENTION_CONDITIONS
+from axobench.benchmark.dataset_schema import INTERVENTION_CONDITIONS, LEGACY_OOD_DIR, OOD_DIR
 
 
 REPO_ID = "Axym-Labs/axobench"
@@ -34,6 +34,7 @@ POPULATION_REPO_ID = "Axym-Labs/axobench-population"
 
 VARIANTS = ("minimal", "full")
 DEFAULT_VARIANT = "minimal"
+LEGACY_LAYOUT_REVISIONS = ("minimal-v2.0", "full-v2.0")
 INTERVENTION_DOSES: dict[str, tuple[str, ...]] = {
     "event_dropout": ("p10", "p35", "p70"),
     "exc_dropout": ("p10", "p35", "p70"),
@@ -104,7 +105,9 @@ def download_dataset(
         ]
         folder_names = _validated_names(expanded, INTERVENTION_FOLDERS, kind="intervention")
 
-    folders = (*split_names, *(f"interventions/{name}" for name in folder_names))
+    # The pairs are in ood/; the tags up to v2.0 hold the same folders in interventions/.
+    pair_dir = LEGACY_OOD_DIR if revision in LEGACY_LAYOUT_REVISIONS else OOD_DIR
+    folders = (*split_names, *(f"{pair_dir}/{name}" for name in folder_names))
     _download_folders(
         REPO_ID,
         root,

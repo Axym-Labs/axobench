@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from axobench.benchmark.dataset_schema import INTERVENTION_CONDITIONS, ORDINARY_SPLITS
+from axobench.benchmark.dataset_schema import INTERVENTION_CONDITIONS, ORDINARY_SPLITS, ood_root
 from axobench.data import ShardedNeuronIODataset
 
 
@@ -38,7 +38,7 @@ class V1DatasetLayout:
         return DatasetSelector(root=self.root / name, split=name, condition=name)
 
     def intervention(self, name: str) -> DatasetSelector:
-        path = self.root / "interventions" / name
+        path = ood_root(self.root) / name
         if name not in INTERVENTION_CONDITIONS and not path.exists():
             available = self.available_interventions()
             raise ValueError(
@@ -56,7 +56,7 @@ class V1DatasetLayout:
         return self.split("val")
 
     def available_interventions(self) -> tuple[str, ...]:
-        interventions_root = self.root / "interventions"
+        interventions_root = ood_root(self.root)
         if not interventions_root.exists():
             return ()
         names = {
@@ -76,7 +76,7 @@ class V1DatasetLayout:
                 missing.append(str(path))
         if require_interventions:
             for intervention in INTERVENTION_CONDITIONS:
-                path = self.root / "interventions" / intervention
+                path = ood_root(self.root) / intervention
                 if not _has_manifest_or_shards(path):
                     missing.append(str(path))
         if missing:

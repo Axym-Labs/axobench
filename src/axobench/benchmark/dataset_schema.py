@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any, Literal
 
 
@@ -11,6 +12,21 @@ V1_TRAIN_TRACES_PER_MORPHOLOGY = 20_000
 V1_NON_TRAIN_TRACES_PER_MORPHOLOGY = V1_TRAIN_TRACES_PER_MORPHOLOGY // 8
 
 ORDINARY_SPLITS = ("train", "val", "test", "private-test")
+OOD_DIR = "ood"
+LEGACY_OOD_DIR = "interventions"
+
+
+def ood_root(root: str | Path) -> Path:
+    """Folder of the out-of-distribution pairs in a dataset root.
+
+    It is ``ood/``; dataset roots written before the rename (Hub tags up to
+    ``minimal-v2.0`` and ``full-v2.0``) hold the same folders in ``interventions/``.
+    """
+    root = Path(root)
+    legacy = root / LEGACY_OOD_DIR
+    return legacy if legacy.exists() and not (root / OOD_DIR).exists() else root / OOD_DIR
+
+
 INTERVENTION_CONDITIONS = (
     "event_dropout",
     "exc_dropout",

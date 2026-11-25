@@ -67,6 +67,7 @@ DEFAULT_PYTHON = Path(".venv/bin/python")
 from axobench.benchmark import make_structured_intervention_inputs
 from axobench.benchmark.dataset_schema import (
     INTERVENTION_CONDITIONS,
+    OOD_DIR,
     build_v1_dataset_manifest_template,
     v1_morphologies,
 )
@@ -480,7 +481,7 @@ def build_tasks(
                 task = task_payload(
                     args,
                     "intervention",
-                    output_root / "interventions" / name / f"{morphology['id']}_intervention_pair_{shard_index:05d}.npz",
+                    output_root / OOD_DIR / name / f"{morphology['id']}_intervention_pair_{shard_index:05d}.npz",
                     morphology,
                     "",
                     condition,
@@ -1121,7 +1122,7 @@ def validate_positive(value: float, name: str) -> None:
 def write_split_manifests(output_root: Path) -> None:
     for split in ("train", "val", "test", "private-test"):
         write_npz_manifest(output_root / split)
-    interventions_root = output_root / "interventions"
+    interventions_root = output_root / OOD_DIR
     if interventions_root.exists():
         for folder in sorted(path for path in interventions_root.iterdir() if path.is_dir()):
             write_pair_manifest(folder)

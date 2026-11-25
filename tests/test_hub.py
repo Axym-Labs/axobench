@@ -29,7 +29,7 @@ class FakeHub:
                 continue
             folder = root / pattern[:-2]
             folder.mkdir(parents=True, exist_ok=True)
-            key = "pair_shards" if "interventions/" in pattern else "shards"
+            key = "pair_shards" if "ood/" in pattern or "interventions/" in pattern else "shards"
             manifest = {key: [{"file": "shard_00000.npz", "count": 1}]}
             (folder / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
             if self.write_shards:
@@ -74,8 +74,8 @@ def test_download_dataset_selects_full_variant(tmp_path, fake_hub):
 def test_download_dataset_expands_conditions_to_doses(tmp_path, fake_hub):
     hub.download_dataset(tmp_path, splits=(), interventions=("inh_dropout", "temporal_jitter_j8"))
 
-    folders = sorted(p[len("minimal/interventions/"):-2] for p in fake_hub.calls[0]["allow_patterns"]
-                     if p.startswith("minimal/interventions/"))
+    folders = sorted(p[len("minimal/ood/"):-2] for p in fake_hub.calls[0]["allow_patterns"]
+                     if p.startswith("minimal/ood/"))
     assert folders == ["inh_dropout_p10", "inh_dropout_p35", "inh_dropout_p70", "temporal_jitter_j8"]
 
 
@@ -159,5 +159,22 @@ def test_cli_download_interventions_only(tmp_path, fake_hub):
 
     assert main(argv) == 0
     patterns = fake_hub.calls[0]["allow_patterns"]
-    assert "full/interventions/temporal_jitter_j1/*" in patterns
+    assert "full/ood/temporal_jitter_j1/*" in patterns
     assert not any(p.startswith(f"full/{split}/") for p in patterns for split in hub.PUBLIC_SPLITS)
+
+
+def test_download_of_a_v2_0_tag_uses_the_earlier_folder_name(tmp_path, fake_hub):
+    hub.download_dataset(tmp_path, splits=(), interventions=("temporal_jitter_j1",), revision="minimal-v2.0")
+    assert "minimal/interventions/temporal_jitter_j1/*" in fake_hub.calls[0]["allow_patterns"]
+
+
+def test_layout_reads_pairs_from_ood_and_from_the_earlier_interventions_folder(tmp_path):
+    from axobench.benchmark.dataset_schema import ood_root
+
+    assert ood_root(tmp_path) == tmp_path / "ood"
+    (tmp_path / "interventions" / "inh_dropout_p70").mkdir(parents=True)
+    assert ood_root(tmp_path) == tmp_path / "interventions"
+    assert V1DatasetLayout(tmp_path).available_interventions() == ("inh_dropout_p70",)
+    (tmp_path / "ood" / "inh_dropout_p10").mkdir(parents=True)
+    assert V1DatasetLayout(tmp_path).available_interventions() == ("inh_dropout_p10",)
+

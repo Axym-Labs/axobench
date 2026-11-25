@@ -40,5 +40,5 @@ def test_v1_dataset_layout_validates_minimal_categories(tmp_path):
 
     V1DatasetLayout(tmp_path).validate_minimal()
 
-    with pytest.raises(FileNotFoundError, match="interventions/event_dropout"):
+    with pytest.raises(FileNotFoundError, match="ood/event_dropout"):
         V1DatasetLayout(tmp_path).validate_minimal(require_interventions=True)

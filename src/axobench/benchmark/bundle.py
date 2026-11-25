@@ -10,7 +10,7 @@ from typing import Any, Literal
 
 import numpy as np
 
-from axobench.benchmark.dataset_schema import INTERVENTION_CONDITIONS
+from axobench.benchmark.dataset_schema import INTERVENTION_CONDITIONS, LEGACY_OOD_DIR, OOD_DIR
 from axobench.benchmark.diagnostic_rows import (
     DiagnosticContext,
     morphology_contrast_diagnostic_rows,
@@ -240,8 +240,9 @@ def infer_pair_metadata(path: str | Path, *, default_morphology: str = "unknown"
     path = Path(path)
     parts = path.parts
     intervention = None
-    if "interventions" in parts:
-        index = parts.index("interventions")
+    folder = next((name for name in (OOD_DIR, LEGACY_OOD_DIR) if name in parts), None)
+    if folder is not None:
+        index = parts.index(folder)
         if index + 1 < len(parts):
             intervention = parts[index + 1]
     text = str(path)
